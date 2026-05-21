@@ -5,6 +5,7 @@ models
 notebooks
 .cache
 training/runs
+training/inference_preview
 __pycache__/
 *.pyc
 *.pyo
