@@ -2,6 +2,7 @@
 set -e
 cd "$(dirname "$0")"
 
+export CUDA_VISIBLE_DEVICES=0
 export TORCH_HOME="$PWD/.cache/torch"
 export HF_HOME="$PWD/.cache/huggingface"
 export XDG_CACHE_HOME="$PWD/.cache"

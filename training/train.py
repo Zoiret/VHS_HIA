@@ -6,6 +6,7 @@ import json
 import os
 import time
 import contextlib
+import types
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +51,73 @@ def _make_grad_scaler(device: torch.device, enabled: bool):
     if device.type == "cuda" and bool(enabled):
         return torch.amp.GradScaler("cuda")
     return None
+
+
+def _deep_supervision_enabled(cfg: dict) -> bool:
+    m = cfg.get("model") or {}
+    if not isinstance(m, dict):
+        return False
+    return bool(m.get("deep_supervision", False))
+
+
+def _forward_unetpp_deep_supervision(self: torch.nn.Module, x: torch.Tensor) -> list[torch.Tensor]:
+    features = self.encoder(x)
+
+    feats = features[1:]
+    feats = feats[::-1]
+
+    depth = int(getattr(self.decoder, "depth"))
+    in_channels = list(getattr(self.decoder, "in_channels"))
+    blocks = getattr(self.decoder, "blocks")
+
+    dense_x: dict[str, torch.Tensor] = {}
+    for layer_idx in range(len(in_channels) - 1):
+        for depth_idx in range(depth - layer_idx):
+            if layer_idx == 0:
+                out = blocks[f"x_{depth_idx}_{depth_idx}"](feats[depth_idx], feats[depth_idx + 1])
+                dense_x[f"x_{depth_idx}_{depth_idx}"] = out
+            else:
+                dense_l_i = depth_idx + layer_idx
+                cat_features = [dense_x[f"x_{idx}_{dense_l_i}"] for idx in range(depth_idx + 1, dense_l_i + 1)]
+                cat_features = torch.cat(cat_features + [feats[dense_l_i + 1]], dim=1)
+                dense_x[f"x_{depth_idx}_{dense_l_i}"] = blocks[f"x_{depth_idx}_{dense_l_i}"](
+                    dense_x[f"x_{depth_idx}_{dense_l_i - 1}"], cat_features
+                )
+
+    dense_x[f"x_0_{depth}"] = blocks[f"x_0_{depth}"](dense_x[f"x_0_{depth - 1}"])
+
+    keys = [f"x_0_{depth}", f"x_0_{depth - 1}", f"x_0_{depth - 2}", f"x_0_{depth - 3}"]
+    outs: list[torch.Tensor] = []
+    for k in keys:
+        v = dense_x.get(k, None)
+        if v is not None:
+            outs.append(self.segmentation_head(v))
+    return outs
+
+
+class _LossWithDeepSupervision(torch.nn.Module):
+    def __init__(self, base_loss: torch.nn.Module, enabled: bool):
+        super().__init__()
+        self.base_loss = base_loss
+        self.enabled = bool(enabled)
+
+    def forward(self, logits, target: torch.Tensor, boundary_target: torch.Tensor | None = None) -> torch.Tensor:
+        if not self.enabled or not isinstance(logits, (list, tuple)):
+            return self.base_loss(logits, target, boundary_target=boundary_target)
+
+        weights = [1.0, 0.5, 0.25, 0.125]
+        total = None
+        for i, w in enumerate(weights):
+            if i >= len(logits):
+                break
+            out = logits[i]
+            if hasattr(out, "shape") and out.shape[-2:] != target.shape[-2:]:
+                out = torch.nn.functional.interpolate(out, size=target.shape[-2:], mode="bilinear", align_corners=False)
+            part = float(w) * self.base_loss(out, target, boundary_target=boundary_target)
+            total = part if total is None else (total + part)
+        if total is None:
+            raise RuntimeError("Deep supervision enabled but no outputs were produced by the model")
+        return total
 
 
 def _build_loss_from_cfg(cfg: dict, device: torch.device) -> torch.nn.Module:
@@ -301,6 +369,9 @@ def _build_model(cfg: dict) -> torch.nn.Module:
         classes=int(cfg["model"]["classes"]),
     )
 
+    if _deep_supervision_enabled(cfg):
+        model.forward = types.MethodType(_forward_unetpp_deep_supervision, model)
+
     train_init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
     init_path = train_init_path or cfg.get("model", {}).get("init_from_checkpoint", None)
     if init_path:
@@ -381,7 +452,7 @@ def dry_run(cfg: dict, device: torch.device) -> None:
     model = _build_model(cfg).to(device)
     model.train()
 
-    loss_fn = _build_loss_from_cfg(cfg, device=device)
+    loss_fn = _LossWithDeepSupervision(_build_loss_from_cfg(cfg, device=device), enabled=_deep_supervision_enabled(cfg)).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg["train"]["lr"]), weight_decay=float(cfg["train"]["weight_decay"]))
 
@@ -411,7 +482,11 @@ def dry_run(cfg: dict, device: torch.device) -> None:
             loss.backward()
             optimizer.step()
 
-        print(f"step={step} images={tuple(images.shape)} logits={tuple(logits.shape)} loss={loss.item():.6f}")
+        if isinstance(logits, (list, tuple)):
+            shapes = [tuple(x.shape) for x in logits]
+            print(f"step={step} images={tuple(images.shape)} logits={shapes} loss={loss.item():.6f}")
+        else:
+            print(f"step={step} images={tuple(images.shape)} logits={tuple(logits.shape)} loss={loss.item():.6f}")
 
 
 def benchmark(cfg: dict, device: torch.device, steps: int) -> None:
@@ -423,7 +498,7 @@ def benchmark(cfg: dict, device: torch.device, steps: int) -> None:
     model = _build_model(cfg).to(device)
     model.train()
 
-    loss_fn = _build_loss_from_cfg(cfg, device=device)
+    loss_fn = _LossWithDeepSupervision(_build_loss_from_cfg(cfg, device=device), enabled=_deep_supervision_enabled(cfg)).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg["train"]["lr"]), weight_decay=float(cfg["train"]["weight_decay"]))
     amp_enabled = _amp_enabled(cfg, device=device)
@@ -526,7 +601,7 @@ def train(cfg: dict, device: torch.device) -> None:
         shape_enabled = (num_classes == 2 and dataset_target == "leaflet_only") or (num_classes == 3)
     else:
         shape_enabled = bool(shape_cfg)
-    loss_fn = _build_loss_from_cfg(cfg, device=device)
+    loss_fn = _LossWithDeepSupervision(_build_loss_from_cfg(cfg, device=device), enabled=_deep_supervision_enabled(cfg)).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg["train"]["lr"]), weight_decay=float(cfg["train"]["weight_decay"]))
     amp_enabled = _amp_enabled(cfg, device=device)
@@ -561,6 +636,8 @@ def train(cfg: dict, device: torch.device) -> None:
             )
 
     best_score = None
+    best_leaflet = None
+    best_ring = None
     es_cfg = cfg.get("early_stopping", None)
     es_enabled = isinstance(es_cfg, dict) and bool(es_cfg)
     es_monitor = str(es_cfg.get("monitor", "mean_dice_fg")).strip() if es_enabled else None
@@ -657,14 +734,25 @@ def train(cfg: dict, device: torch.device) -> None:
                 f"mean_gt_components={shape.get('mean_gt_components')}"
             )
 
-        ckpt_path = out_dir / "last.pt"
-        _save_checkpoint(ckpt_path, model, optimizer, epoch, cfg)
+        _save_checkpoint(out_dir / "last.pt", model, optimizer, epoch, cfg)
+        _save_checkpoint(out_dir / "last.pth", model, optimizer, epoch, cfg)
 
         score = mean_dice_fg
         if score is not None and (best_score is None or score > best_score):
             best_score = float(score)
             _save_checkpoint(out_dir / "best.pt", model, optimizer, epoch, cfg)
             _save_checkpoint(out_dir / "best_mean_fg.pt", model, optimizer, epoch, cfg)
+            _save_checkpoint(out_dir / "best_mean_fg.pth", model, optimizer, epoch, cfg)
+
+        leaflet_score = float(dice[1]) if isinstance(dice, list) and len(dice) > 1 else None
+        if leaflet_score is not None and (best_leaflet is None or leaflet_score > best_leaflet):
+            best_leaflet = float(leaflet_score)
+            _save_checkpoint(out_dir / "best_leaflet.pth", model, optimizer, epoch, cfg)
+
+        ring_score = float(dice[2]) if isinstance(dice, list) and len(dice) > 2 else None
+        if ring_score is not None and (best_ring is None or ring_score > best_ring):
+            best_ring = float(ring_score)
+            _save_checkpoint(out_dir / "best_fibrous_ring.pth", model, optimizer, epoch, cfg)
 
         if scheduler is not None:
             sched_cfg = cfg.get("scheduler") or {}
@@ -753,6 +841,53 @@ def train(cfg: dict, device: torch.device) -> None:
                 writer.add_scalar("mean_iou_fg", float(mean_iou_fg), int(epoch))
             lr = float(optimizer.param_groups[0].get("lr", 0.0))
             writer.add_scalar("learning_rate", lr, int(epoch))
+
+            try:
+                sample_batch = next(iter(val_loader))
+            except Exception:
+                sample_batch = None
+
+            if sample_batch is not None:
+                model_was_training = model.training
+                model.eval()
+                with torch.no_grad():
+                    sample_img = sample_batch["image"][:1].to(device, non_blocking=True)
+                    sample_gt = sample_batch["mask"][:1].to(device, non_blocking=True)
+                    with _autocast_ctx(device, enabled=amp_enabled):
+                        sample_logits = model(sample_img)
+                    if isinstance(sample_logits, (list, tuple)):
+                        sample_logits = sample_logits[0]
+                    if sample_logits.shape[-2:] != sample_gt.shape[-2:]:
+                        sample_logits = torch.nn.functional.interpolate(
+                            sample_logits, size=sample_gt.shape[-2:], mode="bilinear", align_corners=False
+                        )
+                    sample_pred = torch.argmax(sample_logits, dim=1)
+
+                img_np = sample_batch["image"][0].detach().cpu().clamp(0.0, 1.0).numpy().transpose(1, 2, 0)
+                gt_np = sample_gt[0].detach().cpu().numpy().astype(np.uint8)
+                pred_np = sample_pred[0].detach().cpu().numpy().astype(np.uint8)
+
+                img_u8 = (img_np * 255.0 + 0.5).astype(np.uint8)
+                overlay_gt = img_u8.copy()
+                overlay_pred = img_u8.copy()
+                alpha = 0.45
+                if num_classes >= 2:
+                    m = gt_np == 1
+                    overlay_gt[m] = (overlay_gt[m].astype(np.float32) * (1 - alpha) + np.array([0, 255, 0], dtype=np.float32) * alpha).astype(np.uint8)
+                    m = pred_np == 1
+                    overlay_pred[m] = (overlay_pred[m].astype(np.float32) * (1 - alpha) + np.array([0, 255, 0], dtype=np.float32) * alpha).astype(np.uint8)
+                if num_classes >= 3:
+                    m = gt_np == 2
+                    overlay_gt[m] = (overlay_gt[m].astype(np.float32) * (1 - alpha) + np.array([255, 0, 0], dtype=np.float32) * alpha).astype(np.uint8)
+                    m = pred_np == 2
+                    overlay_pred[m] = (overlay_pred[m].astype(np.float32) * (1 - alpha) + np.array([255, 0, 0], dtype=np.float32) * alpha).astype(np.uint8)
+
+                compare = np.concatenate([img_u8, overlay_gt, overlay_pred], axis=1)
+                compare_t = torch.from_numpy(compare).permute(2, 0, 1).float() / 255.0
+                writer.add_image("samples/compare", compare_t, int(epoch))
+
+                if model_was_training:
+                    model.train()
 
     if writer is not None:
         writer.close()

@@ -118,7 +118,9 @@ def validate(
         total_loss += float(loss.item())
         n_batches += 1
 
-        m = compute_per_class_metrics_from_logits(logits, masks, num_classes=num_classes)
+        logits_main = logits[0] if isinstance(logits, (list, tuple)) else logits
+
+        m = compute_per_class_metrics_from_logits(logits_main, masks, num_classes=num_classes)
         for i in range(num_classes):
             dice_sum[i] += float(m.dice[i])
             iou_sum[i] += float(m.iou[i])
@@ -126,7 +128,7 @@ def validate(
         if shape_diagnostics and int(num_classes) == 2:
             import numpy as np
 
-            pred = torch.argmax(logits, dim=1).detach().cpu().numpy().astype(np.uint8)
+            pred = torch.argmax(logits_main, dim=1).detach().cpu().numpy().astype(np.uint8)
             gt = masks.detach().cpu().numpy().astype(np.uint8)
             image_paths = batch.get("image_path", None)
             if not isinstance(image_paths, list):
@@ -196,7 +198,7 @@ def validate(
         elif shape_diagnostics and int(num_classes) == 3:
             import numpy as np
 
-            pred = torch.argmax(logits, dim=1).detach().cpu().numpy().astype(np.uint8)
+            pred = torch.argmax(logits_main, dim=1).detach().cpu().numpy().astype(np.uint8)
             gt = masks.detach().cpu().numpy().astype(np.uint8)
             image_paths = batch.get("image_path", None)
             if not isinstance(image_paths, list):

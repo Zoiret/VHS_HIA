@@ -1,0 +1,49 @@
+seed: 1337
+
+dataset:
+  root: datasets/converted_full_multiclass
+  train_txt: datasets/converted_full_multiclass/train.txt
+  val_txt: datasets/converted_full_multiclass/val.txt
+  test_txt: datasets/converted_full_multiclass/test.txt
+
+model:
+  name: unetplusplus
+  architecture: UnetPlusPlus
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+  deep_supervision: true
+  init_from_checkpoint: null
+  init_ignore_mismatched: true
+
+loss:
+  ce_class_weights:
+    - 0.2
+    - 1.0
+    - 2.5
+  ce_coef: 0.3
+  dice_coef: 0.7
+
+augment:
+  rotate90: true
+  hflip: true
+  vflip: true
+  brightness_contrast: true
+  gamma: true
+
+train:
+  save_dir: training/runs/smoketest_cpu_multiclass_deepsup_1ep
+  epochs: 1
+  batch_size: 2
+  lr: 0.0003
+  weight_decay: 0.00001
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  amp: false
+  cudnn_benchmark: false
+  tensorboard: false
+  log_every: 1
+  dry_run_steps: 2

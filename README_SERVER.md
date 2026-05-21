@@ -3,8 +3,17 @@
 ## 1) Обновить код
 
 ```bash
-cd /path/to/VHS_HIA
+cd ~/Projects/VHS_HIA
 git pull
+```
+
+## 2) Сделать скрипты исполняемыми
+
+```bash
+chmod +x scripts/server_prepare_multiclass_dataset.sh
+chmod +x run_benchmark_a100.sh
+chmod +x run_train_a100.sh
+chmod +x run_tensorboard.sh
 ```
 
 ## 2) Проверить CUDA
@@ -35,6 +44,18 @@ python -m pip install -r requirements-train.txt
 Ожидаемый датасет:
 - `datasets/converted_full_multiclass`
 
+Если нужно конвертировать raw Supervisely export на сервере (источник: `Dataset_HIA/supervisely_sdk`):
+
+```bash
+bash scripts/server_prepare_multiclass_dataset.sh
+```
+
+Пересоздать датасет только явно:
+
+```bash
+bash scripts/server_prepare_multiclass_dataset.sh --force
+```
+
 Проверка целостности:
 
 ```bash
@@ -57,7 +78,7 @@ python training/train.py --config training/configs/unetpp_effb3_a100_multiclass_
 ## 6) Benchmark (CUDA)
 
 ```bash
-python training/train.py --config training/configs/unetpp_effb3_a100_multiclass_full_100ep.yaml --benchmark-steps 50
+bash run_benchmark_a100.sh
 ```
 
 Ожидаемый вывод включает:
