@@ -1,0 +1,45 @@
+seed: 1337
+
+dataset:
+  root: datasets/converted
+  train_txt: datasets/converted_curated/train.txt
+  val_txt: datasets/converted_curated/val.txt
+  test_txt: datasets/converted_curated/test.txt
+  target: leaflet_only
+  crop_mode: anatomy_bbox
+  crop_padding: 0.15
+
+model:
+  name: unetplusplus
+  encoder: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 2
+  input_size: 768
+  init_from_checkpoint: training/runs/unetpp_effb3_cpu_leaflet_only_aug/best.pt
+  init_ignore_mismatched: true
+
+loss:
+  ce_weight:
+    background: 0.2
+    leaflet: 0.8
+  ce_coef: 0.3
+  dice_coef: 0.7
+
+augment:
+  rotate90: true
+  hflip: true
+  vflip: true
+  brightness_contrast: true
+  gamma: true
+
+train:
+  save_dir: training/runs/unetpp_effb3_cpu_leaflet_crop_weighted_from_leaflet_100ep
+  epochs: 100
+  batch_size: 2
+  lr: 0.0003
+  weight_decay: 0.00001
+  num_workers: 0
+  pin_memory: false
+  log_every: 10
+  dry_run_steps: 2

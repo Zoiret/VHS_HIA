@@ -1,0 +1,17 @@
+.venv
+datasets
+exports
+models
+notebooks
+.cache
+training/runs
+__pycache__/
+*.pyc
+*.pyo
+*.pt
+*.pth
+*.tar
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,29 @@
+seed: 1337
+
+dataset:
+  root: datasets/converted
+  train_txt: datasets/converted/train.txt
+  val_txt: datasets/converted/val.txt
+  test_txt: datasets/converted/test.txt
+
+model:
+  name: unetplusplus
+  encoder: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+
+loss:
+  ce_weight: 1.0
+  dice_weight: 1.0
+
+train:
+  save_dir: training/runs/unetpp_effb3_cpu_10ep
+  epochs: 10
+  batch_size: 2
+  lr: 0.0003
+  weight_decay: 0.00001
+  num_workers: 0
+  pin_memory: false
+  log_every: 10

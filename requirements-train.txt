@@ -1,0 +1,8 @@
+torch
+segmentation-models-pytorch
+timm
+pyyaml
+numpy
+opencv-python
+pillow
+tqdm
