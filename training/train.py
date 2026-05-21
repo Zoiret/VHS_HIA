@@ -433,13 +433,20 @@ def benchmark(cfg: dict, device: torch.device, steps: int) -> None:
     input_size = int(cfg["model"]["input_size"])
     requested_num_workers = int(cfg["train"]["num_workers"])
     effective_num_workers = 0 if device.type != "cuda" else requested_num_workers
-    pin_memory = device.type == "cuda"
+    pin_memory_cfg = cfg.get("train", {}).get("pin_memory", None)
+    pin_memory = bool(pin_memory_cfg) if pin_memory_cfg is not None else (device.type == "cuda")
+    if device.type != "cuda":
+        pin_memory = False
 
     train_samples = len(getattr(train_loader, "dataset", []))
     steps_per_epoch = len(train_loader)
 
     print("Benchmark")
     print(f"  device: {device}")
+    if device.type == "cuda":
+        props = torch.cuda.get_device_properties(0)
+        total_gb = props.total_memory / (1024**3)
+        print(f"  gpu: {props.name} ({total_gb:.1f} GB)")
     print(f"  input_size: {input_size}")
     print(f"  batch_size: {batch_size}")
     print(f"  num_workers: {effective_num_workers}")
@@ -450,6 +457,10 @@ def benchmark(cfg: dict, device: torch.device, steps: int) -> None:
 
     it = iter(train_loader)
     if device.type == "cuda":
+        try:
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
         torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in tqdm(range(steps), desc="Benchmark", unit="step"):
@@ -490,6 +501,15 @@ def benchmark(cfg: dict, device: torch.device, steps: int) -> None:
     print(f"sec_per_step: {sec_per_step:.3f}")
     print(f"estimated_sec_per_epoch: {estimated_epoch_sec:.1f}")
     print(f"estimated_min_per_epoch: {estimated_min_per_epoch:.2f}")
+    if device.type == "cuda":
+        alloc = torch.cuda.memory_allocated() / (1024**2)
+        reserv = torch.cuda.memory_reserved() / (1024**2)
+        peak_alloc = torch.cuda.max_memory_allocated() / (1024**2)
+        peak_reserv = torch.cuda.max_memory_reserved() / (1024**2)
+        print(f"cuda_mem_allocated_mb: {alloc:.1f}")
+        print(f"cuda_mem_reserved_mb: {reserv:.1f}")
+        print(f"cuda_peak_allocated_mb: {peak_alloc:.1f}")
+        print(f"cuda_peak_reserved_mb: {peak_reserv:.1f}")
 
 
 def train(cfg: dict, device: torch.device) -> None:
