@@ -1,226 +1,194 @@
-# Histological Image Analyzer — ML (Dataset Pipeline)
+# VHS_HIA — ML (Ubuntu 22.04 + NVIDIA)
 
-Этот подпроект содержит подготовку датасета и ML training pipeline.
+This repo contains:
+- Supervisely → segmentation dataset conversion (multiclass + leaflet-only)
+- Dataset validation / stats / preview tools
+- Training pipeline (PyTorch + segmentation_models_pytorch)
+- Manual curation workflow (local HTML gallery) + curated split generation
+- Offline (pre-generated) augmentation pipeline for CUDA servers
 
-## Структура
+The repository does not include datasets/exports/checkpoints (they are ignored). You must place them locally under `datasets/` and `exports/`.
 
-```
-ml/
-  datasets/
-    raw/
-    converted/
-      images/
-      masks/
-      meta/
-      train.txt
-      val.txt
-      test.txt
-    previews/
-  exports/
-    supervisely/
-  scripts/
-    convert_supervisely_to_segmentation.py
-    preview_dataset.py
-    dataset_stats.py
-  training/
-    configs/
-  models/
-  notebooks/
-  requirements.txt
-  requirements-train.txt
-```
+## System requirements (Ubuntu 22.04)
 
-## Установка зависимостей
+- Ubuntu 22.04
+- NVIDIA driver installed (verify with `nvidia-smi`)
+- Python (recommended: system Python 3.10 on Ubuntu 22.04)
+- Git
+
+This project currently trains on a single GPU per process. On multi-GPU machines (e.g. 2×A100 + RTX 4060), select a GPU via `CUDA_VISIBLE_DEVICES`.
+
+## Quick start (Ubuntu 22.04 + CUDA)
 
 ```bash
-python -m pip install -r requirements.txt
-```
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git
 
-## Training окружение (Windows)
-
-Training pipeline требует Python 3.12 x64 (чтобы корректно ставились wheels для PyTorch).
-
-Создание venv внутри `E:\3d_visual\ml`:
-
-```bash
-py -3.12 -m venv .venv
-.venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+```
+
+Install PyTorch with CUDA wheels (pick the right CUDA build for your driver; example uses CUDA 12.4 wheels):
+
+```bash
+python -m pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision
 python -m pip install -r requirements-train.txt
 ```
 
-Если установка `torch` падает, ставь PyTorch по официальной инструкции под свою конфигурацию (CPU/CUDA), затем докидывай остальное:
-
-- https://pytorch.org/get-started/locally/
-
-Offline/VM режим (без интернета):
-- используй `encoder_weights: null` в training config, чтобы не было попыток скачать pretrained веса.
-- `imagenet` веса требуют интернет или заранее прогретый cache.
-
-Подробная инструкция: `setup_training_env_windows.md`.
-
-Benchmark на CPU (оценка скорости без долгого обучения):
+Verify CUDA:
 
 ```bash
-python training/train.py --config training/configs/unetpp_effb3.yaml --benchmark-steps 10
+python -c "import torch; print('cuda:', torch.cuda.is_available()); print('device_count:', torch.cuda.device_count()); print([torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())])"
 ```
 
-Короткий CPU training run (10 эпох):
+## Datasets and classes
+
+Mask values (uint8):
+- 0: background
+- 1: leaflet
+- 2: fibrous_ring (Aortic valve base)
+
+Split file format (`train.txt`, `val.txt`, `test.txt`): one line per sample, tab-separated:
+`images/<file>.png<TAB>masks/<file>.png`
+
+Recommended datasets used in this repo:
+- `datasets/converted_full_multiclass` (multiclass full dataset)
+- `datasets/converted_full_leaflet_only` (leaflet-only full dataset)
+
+## Validate a dataset (recommended before training)
 
 ```bash
-python training/train.py --config training/configs/unetpp_effb3_cpu_10ep.yaml
+python scripts/validate_dataset_files.py --dataset-root datasets/converted_full_multiclass
+python scripts/dataset_stats.py --dataset-root datasets/converted_full_multiclass
 ```
 
-Overnight CPU training run (~40 эпох):
+If validation reports broken samples, remove them from split files (does not delete the image/mask files, only updates `*.txt` and creates `*.bak`):
 
 ```bash
-python training/train.py --config training/configs/unetpp_effb3_cpu_overnight.yaml
+python scripts/validate_dataset_files.py --dataset-root datasets/converted_full_multiclass --drop-broken
 ```
 
-## Конвертация Supervisely → segmentation dataset
+## Offline (pre-generated) augmentation for CUDA training
 
-Положи экспорт Supervisely в:
+This generates a new dataset on disk so training can run without runtime spatial augmentations.
+
+Command (train split only; val/test are copied as-is):
+
+```bash
+python scripts/build_augmented_dataset.py \
+  --dataset-root datasets/converted_full_multiclass \
+  --split train \
+  --out-root datasets/converted_full_multiclass_aug \
+  --num-variants 4 \
+  --seed 42
+```
+
+Output structure:
+
+```
+datasets/converted_full_multiclass_aug/
+  images/
+  masks/
+  train.txt
+  val.txt
+  test.txt
+  augment_meta.csv
+```
+
+Validate the augmented dataset:
+
+```bash
+python scripts/validate_dataset_files.py --dataset-root datasets/converted_full_multiclass_aug
+python scripts/dataset_stats.py --dataset-root datasets/converted_full_multiclass_aug
+```
+
+## Training (CUDA)
+
+CUDA config (offline-augmented dataset; runtime aug disabled):
+- `training/configs/unetpp_effb3_cuda_multiclass_full_aug_100ep.yaml`
+
+Run on a specific GPU (example: use GPU 0):
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+python training/train.py --config training/configs/unetpp_effb3_cuda_multiclass_full_aug_100ep.yaml
+```
+
+If you want TensorBoard logs, set in the config:
+
+```yaml
+train:
+  tensorboard: true
+```
+
+Logs will be written to:
+`training/runs/<run_name>/tensorboard`
+
+Start TensorBoard:
+
+```bash
+python -m pip install tensorboard
+tensorboard --logdir training/runs
+```
+
+## Portable server run script
+
+Linux helper script (sets cache paths to local `.cache/` before training):
+
+```bash
+bash run_train_cuda.sh
+```
+
+It exports:
+- `TORCH_HOME=.cache/torch`
+- `HF_HOME=.cache/huggingface`
+- `XDG_CACHE_HOME=.cache`
+- `MPLCONFIGDIR=.cache/matplotlib`
+
+## Training (CPU)
+
+Example CPU config:
+- `training/configs/unetpp_effb3_cpu_multiclass_full_100ep.yaml`
+
+Dry-run (safe check: forward/loss/backward; does not start full training):
+
+```bash
+python training/train.py --config training/configs/unetpp_effb3_cpu_multiclass_full_100ep.yaml --dry-run
+```
+
+## Supervisely conversion
+
+Put a Supervisely export under:
 
 ```
 exports/supervisely/
 ```
 
-Запуск:
-
-```bash
-python scripts/convert_supervisely_to_segmentation.py --input exports/supervisely/328010_HIA --output datasets/converted --target multiclass
-```
-
-Классы (итоговая маска uint8):
-- 0 — background
-- 1 — leaflet
-- 2 — fibrous_ring
-
-Формат split-файлов:
-- `train.txt / val.txt / test.txt`: по строке на объект, 2 колонки через таб: `images/<file>\tmasks/<file>.png`
-
-## Быстрый preview (overlay)
-
-```bash
-python scripts/preview_dataset.py --dataset-root datasets/converted --out datasets/previews
-```
-
-## Статистика датасета
-
-```bash
-python scripts/dataset_stats.py --dataset-root datasets/converted
-```
-
-## Проверка целостности converted dataset
-
-Проверить, что все записи из `train.txt/val.txt/test.txt` указывают на читаемые image/mask файлы:
-
-```bash
-python scripts/validate_dataset_files.py --dataset-root datasets/converted
-```
-
-Удалить битые записи из split-файлов (файлы на диске не трогаются, создаются `*.bak`):
-
-```bash
-python scripts/validate_dataset_files.py --dataset-root datasets/converted --drop-broken
-```
-
-## Audit Supervisely export
-
-```bash
-python scripts/audit_supervisely_export.py --input exports/supervisely/328010_HIA
-```
-
-## Full conversion (без удаления старых датасетов)
-
-Полный multiclass датасет (0 background, 1 Leaf, 2 Aortic valve base):
+Convert to multiclass dataset:
 
 ```bash
 python scripts/convert_supervisely_to_segmentation.py --input exports/supervisely/328010_HIA --output datasets/converted_full_multiclass --target multiclass
-python scripts/validate_dataset_files.py --dataset-root datasets/converted_full_multiclass
-python scripts/dataset_stats.py --dataset-root datasets/converted_full_multiclass
 ```
 
-Полный leaflet-only датасет (0 background, 1 Leaf; Aortic valve base → background):
+Convert to leaflet-only dataset:
 
 ```bash
 python scripts/convert_supervisely_to_segmentation.py --input exports/supervisely/328010_HIA --output datasets/converted_full_leaflet_only --target leaflet_only
-python scripts/validate_dataset_files.py --dataset-root datasets/converted_full_leaflet_only
-python scripts/dataset_stats.py --dataset-root datasets/converted_full_leaflet_only
 ```
 
-Разница:
-- `datasets/converted` — старый датасет, созданный предыдущей логикой matching.
-- `datasets/converted_full_*` — новые датасеты с устойчивым matching ann→img и опцией `--target`.
+## Curation workflow (multiclass / leaflet-only)
 
-## Curation gallery для полного датасета
-
-```bash
-python scripts/build_curation_gallery.py --source dataset --dataset-root datasets/converted_full_leaflet_only --out datasets/curated_full_leaflet/curation_gallery.html
-```
-
-Применение результатов и генерация curated split:
-
-```bash
-python scripts/apply_curation_result.py --input datasets/curated_full_leaflet/curation_result.json --curated-dir datasets/curated_full_leaflet
-python scripts/make_curated_split.py --converted-root datasets/converted_full_leaflet_only --curated-dir datasets/curated_full_leaflet --out-dir datasets/converted_full_leaflet_curated
-```
-
-## Curation gallery для полного multiclass датасета
-
-Галерея:
+Build a local HTML gallery (no server):
 
 ```bash
 python scripts/build_curation_gallery.py --source dataset --dataset-root datasets/converted_full_multiclass --out datasets/curated_full_multiclass/curation_gallery.html
 ```
 
-Критерии multiclass curation:
-- clean: хорошие leaflet, хорошо видимое fibrous ring, корректные границы, нормальная морфология
-- medium: небольшие дефекты, слабый контраст, частично рваное кольцо, допустимо для train
-- bad: сильные артефакты, плохая анатомия, сомнительная разметка
-
-Применение результатов и генерация curated split:
+After manual labeling (clean/medium/bad) and saving `curation_result.json`, apply it:
 
 ```bash
 python scripts/apply_curation_result.py --input datasets/curated_full_multiclass/curation_result.json --curated-dir datasets/curated_full_multiclass
 python scripts/make_curated_split.py --converted-root datasets/converted_full_multiclass --curated-dir datasets/curated_full_multiclass --out-dir datasets/converted_full_multiclass_curated
-```
-
-## Curated subset (ручная сортировка)
-
-Пайплайн:
-- Сделать inference preview на `val.txt` (генерирует `training/inference_preview/compare/*.png`)
-- Сгенерировать HTML-галерею для ручной сортировки:
-
-```bash
-python scripts/build_curation_gallery.py --source dataset
-```
-
-- Сгенерировать галерею только по inference previews:
-
-```bash
-python scripts/build_curation_gallery.py --source inference
-```
-
-- Тестовая маленькая галерея:
-
-```bash
-python scripts/build_curation_gallery.py --source dataset --limit 20
-```
-
-- Открыть файл в браузере (без сервера):
-  - `datasets/curated/curation_gallery.html`
-- Разметить samples как `clean / medium / bad`, нажать Export, сохранить JSON в:
-  - `datasets/curated/curation_result.json`
-- Применить JSON к спискам:
-
-```bash
-python scripts/apply_curation_result.py --input datasets/curated/curation_result.json
-```
-
-- Сгенерировать curated split (без копирования файлов, только новые `train/val/test`):
-
-```bash
-python scripts/make_curated_split.py
 ```
