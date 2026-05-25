@@ -634,6 +634,47 @@ def benchmark(cfg: dict, device: torch.device, steps: int) -> None:
         print(f"cuda_peak_reserved_mb: {peak_reserv:.1f}")
 
 
+def _limit_loader(loader, max_batches: int):
+    max_batches = int(max_batches)
+    if max_batches <= 0:
+        return
+    for i, batch in enumerate(loader):
+        if i >= max_batches:
+            break
+        yield batch
+
+
+def validate_steps(cfg: dict, device: torch.device, steps: int) -> None:
+    _, val_loader = _build_loaders(cfg, device=device)
+    model = _build_model(cfg).to(device)
+    loss_fn = _LossWithDeepSupervision(_build_loss_from_cfg(cfg, device=device), enabled=_deep_supervision_enabled(cfg)).to(device)
+
+    num_classes = int(cfg["model"]["classes"])
+    dataset_cfg = cfg.get("dataset") or {}
+    dataset_target = str(dataset_cfg.get("target", "multiclass")).strip().lower() if isinstance(dataset_cfg, dict) else "multiclass"
+
+    shape_cfg = cfg.get("shape_diagnostics", None)
+    if shape_cfg is None:
+        shape_enabled = (num_classes == 2 and dataset_target == "leaflet_only") or (num_classes == 3)
+    else:
+        shape_enabled = bool(shape_cfg)
+
+    out_dir = _get_save_dir(cfg)
+    val_metrics = validate(
+        model=model,
+        loader=_limit_loader(val_loader, int(steps)),
+        num_classes=num_classes,
+        device=device,
+        loss_fn=loss_fn,
+        shape_diagnostics=shape_enabled,
+        shape_out_dir=out_dir,
+        epoch=0,
+    )
+    print(format_metrics(val_metrics))
+    shape = val_metrics.get("shape", None)
+    print(f"shape_dict: {shape}")
+
+
 def train(cfg: dict, device: torch.device) -> None:
     out_dir = _get_save_dir(cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -773,13 +814,26 @@ def train(cfg: dict, device: torch.device) -> None:
 
         shape = val_metrics.get("shape", None)
         if isinstance(shape, dict) and shape:
-            print(
-                "shape: "
-                f"merged_suspect_count={shape.get('merged_suspect_count')} "
-                f"extra_fragments_count={shape.get('extra_fragments_count')} "
-                f"mean_pred_components={shape.get('mean_pred_components')} "
-                f"mean_gt_components={shape.get('mean_gt_components')}"
-            )
+            if int(num_classes) == 2:
+                print(
+                    "shape: "
+                    f"merged_suspect_count={shape.get('merged_suspect_count')} "
+                    f"extra_fragments_count={shape.get('extra_fragments_count')} "
+                    f"mean_pred_components={shape.get('mean_pred_components')} "
+                    f"mean_gt_components={shape.get('mean_gt_components')}"
+                )
+            elif int(num_classes) == 3:
+                print(
+                    "shape: "
+                    f"mean_pred_leaflet_components={shape.get('mean_pred_leaflet_components')} "
+                    f"mean_gt_leaflet_components={shape.get('mean_gt_leaflet_components')} "
+                    f"merged_leaflet_suspect_count={shape.get('merged_leaflet_suspect_count')} "
+                    f"extra_leaflet_fragments_count={shape.get('extra_leaflet_fragments_count')} "
+                    f"mean_pred_ring_components={shape.get('mean_pred_ring_components')} "
+                    f"mean_gt_ring_components={shape.get('mean_gt_ring_components')} "
+                    f"disconnected_ring_suspect_count={shape.get('disconnected_ring_suspect_count')} "
+                    f"extra_ring_fragments_count={shape.get('extra_ring_fragments_count')}"
+                )
 
         _save_checkpoint(out_dir / "last.pt", model, optimizer, epoch, cfg)
         _save_checkpoint(out_dir / "last.pth", model, optimizer, epoch, cfg)
@@ -945,6 +999,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--benchmark-steps", type=int, default=None)
+    parser.add_argument("--validate-steps", type=int, default=None)
     args = parser.parse_args()
 
     cfg = _load_yaml(args.config)
@@ -960,6 +1015,9 @@ def main() -> None:
         torch.backends.cudnn.benchmark = bool(cudnn_benchmark)
     if args.benchmark_steps is not None:
         benchmark(cfg, device=device, steps=int(args.benchmark_steps))
+        return
+    if args.validate_steps is not None:
+        validate_steps(cfg, device=device, steps=int(args.validate_steps))
         return
     if args.dry_run:
         dry_run(cfg, device=device)

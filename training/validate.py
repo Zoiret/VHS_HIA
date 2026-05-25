@@ -65,6 +65,16 @@ def _dice_iou_binary(gt01, pred01) -> tuple[float, float]:
     return dice, iou
 
 
+def _tiny_components_count(areas_desc: list[int], *, rel_thresh: float = 0.1) -> int:
+    if not areas_desc:
+        return 0
+    largest = float(areas_desc[0])
+    if largest <= 0:
+        return 0
+    thresh = float(rel_thresh) * largest
+    return int(sum(1 for a in areas_desc[1:] if float(a) < thresh))
+
+
 def _ensure_csv_header(path: Path, header: list[str]) -> None:
     if path.exists():
         return
@@ -98,13 +108,14 @@ def validate(
     pred_components_sum = 0.0
     gt_components_sum = 0.0
     shape_samples = 0
+    gt_leaflet_components_sum = 0.0
+    pred_leaflet_components_sum = 0.0
     merged_leaflet_suspect_count = 0
-    tiny_leaflet_components_total = 0
-    leaflet_components_sum = 0.0
-    disconnected_ring_samples = 0
-    ring_holes_total = 0
-    tiny_ring_fragments_total = 0
-    ring_components_sum = 0.0
+    extra_leaflet_fragments_count = 0
+    gt_ring_components_sum = 0.0
+    pred_ring_components_sum = 0.0
+    disconnected_ring_suspect_count = 0
+    extra_ring_fragments_count = 0
 
     for batch in tqdm(loader, desc="Validate", leave=False):
         images = batch["image"].to(device, non_blocking=True)
@@ -208,72 +219,80 @@ def validate(
                 sample_path = image_paths[i] if i < len(image_paths) else None
                 sample_id = Path(sample_path).stem if isinstance(sample_path, str) else f"sample_{shape_samples}"
 
-                gt_leaflet = (gt[i] == 1).astype(np.uint8)
-                pr_leaflet = (pred[i] == 1).astype(np.uint8)
-                gt_ring = (gt[i] == 2).astype(np.uint8)
-                pr_ring = (pred[i] == 2).astype(np.uint8)
+                gt_leaflet01 = (gt[i] == 1).astype(np.uint8)
+                pr_leaflet01 = (pred[i] == 1).astype(np.uint8)
+                gt_ring01 = (gt[i] == 2).astype(np.uint8)
+                pr_ring01 = (pred[i] == 2).astype(np.uint8)
 
-                gt_leaf_areas = _components_areas(gt_leaflet)
-                pr_leaf_areas = _components_areas(pr_leaflet)
-                gt_leaf_c = len(gt_leaf_areas)
-                pr_leaf_c = len(pr_leaf_areas)
+                gt_leaf_areas = _components_areas(gt_leaflet01)
+                pr_leaf_areas = _components_areas(pr_leaflet01)
+                gt_leaf_c = int(len(gt_leaf_areas))
+                pr_leaf_c = int(len(pr_leaf_areas))
 
-                gt_ring_areas = _components_areas(gt_ring)
-                pr_ring_areas = _components_areas(pr_ring)
-                gt_ring_c = len(gt_ring_areas)
-                pr_ring_c = len(pr_ring_areas)
+                gt_ring_areas = _components_areas(gt_ring01)
+                pr_ring_areas = _components_areas(pr_ring01)
+                gt_ring_c = int(len(gt_ring_areas))
+                pr_ring_c = int(len(pr_ring_areas))
 
-                leaf_largest = int(pr_leaf_areas[0]) if pr_leaf_areas else 0
-                leaf_small = 0
-                if pr_leaf_areas and leaf_largest > 0:
-                    thresh = 0.1 * float(leaf_largest)
-                    leaf_small = sum(1 for a in pr_leaf_areas[1:] if float(a) < thresh)
+                tiny_leaflet = _tiny_components_count(pr_leaf_areas, rel_thresh=0.1)
+                tiny_ring = _tiny_components_count(pr_ring_areas, rel_thresh=0.1)
 
                 merged_leaflet_suspect = False
                 if pr_leaf_c < gt_leaf_c:
                     merged_leaflet_suspect = True
                 if pr_leaf_c == 1 and gt_leaf_c >= 2:
                     merged_leaflet_suspect = True
-                if gt_leaf_c >= 2 and pr_leaf_areas and len(pr_leaf_areas) > 1:
-                    second = int(pr_leaf_areas[1])
-                    if second > 0 and (float(leaf_largest) / float(second)) > 2.0:
+                if gt_leaf_c >= 2 and len(pr_leaf_areas) > 1:
+                    largest = float(pr_leaf_areas[0])
+                    second = float(pr_leaf_areas[1])
+                    if second > 0 and (largest / second) > 2.0:
                         merged_leaflet_suspect = True
 
-                ring_largest = int(pr_ring_areas[0]) if pr_ring_areas else 0
-                ring_small = 0
-                if pr_ring_areas and ring_largest > 0:
-                    thresh = 0.1 * float(ring_largest)
-                    ring_small = sum(1 for a in pr_ring_areas[1:] if float(a) < thresh)
+                extra_leaflet_fragments = False
+                if pr_leaf_c > gt_leaf_c + 1:
+                    extra_leaflet_fragments = True
+                if pr_leaf_c > 3:
+                    extra_leaflet_fragments = True
+                if tiny_leaflet > 0:
+                    extra_leaflet_fragments = True
 
-                disconnected_ring = pr_ring_c > 1
-                ring_holes = _count_holes(pr_ring)
+                disconnected_ring_suspect = pr_ring_c > 1
 
-                dice_leaflet, _ = _dice_iou_binary(gt_leaflet, pr_leaflet)
-                dice_ring, _ = _dice_iou_binary(gt_ring, pr_ring)
+                extra_ring_fragments = False
+                if pr_ring_c > gt_ring_c + 1:
+                    extra_ring_fragments = True
+                if pr_ring_c > 2:
+                    extra_ring_fragments = True
+                if tiny_ring > 0:
+                    extra_ring_fragments = True
 
                 shape_rows.append(
                     [
                         int(epoch) if epoch is not None else None,
                         sample_id,
+                        gt_leaf_c,
                         pr_leaf_c,
+                        int(tiny_leaflet),
                         int(merged_leaflet_suspect),
-                        int(leaf_small),
+                        int(extra_leaflet_fragments),
+                        gt_ring_c,
                         pr_ring_c,
-                        int(ring_holes),
-                        int(ring_small),
-                        float(dice_leaflet),
-                        float(dice_ring),
+                        int(tiny_ring),
+                        int(disconnected_ring_suspect),
+                        int(extra_ring_fragments),
                     ]
                 )
 
+                gt_leaflet_components_sum += float(gt_leaf_c)
+                pred_leaflet_components_sum += float(pr_leaf_c)
                 merged_leaflet_suspect_count += int(merged_leaflet_suspect)
-                tiny_leaflet_components_total += int(leaf_small)
-                leaflet_components_sum += float(pr_leaf_c)
+                extra_leaflet_fragments_count += int(extra_leaflet_fragments)
 
-                disconnected_ring_samples += int(disconnected_ring)
-                ring_holes_total += int(ring_holes)
-                tiny_ring_fragments_total += int(ring_small)
-                ring_components_sum += float(pr_ring_c)
+                gt_ring_components_sum += float(gt_ring_c)
+                pred_ring_components_sum += float(pr_ring_c)
+                disconnected_ring_suspect_count += int(disconnected_ring_suspect)
+                extra_ring_fragments_count += int(extra_ring_fragments)
+
                 shape_samples += 1
 
     if n_batches == 0:
@@ -341,27 +360,30 @@ def validate(
             [
                 "epoch",
                 "sample_id",
-                "leaflet_component_count",
-                "merged_leaflet_suspect",
+                "gt_leaflet_components",
+                "pred_leaflet_components",
                 "tiny_leaflet_components",
-                "ring_component_count",
-                "ring_holes",
-                "tiny_ring_fragments",
-                "dice_leaflet",
-                "dice_fibrous_ring",
+                "merged_leaflet_suspect",
+                "extra_leaflet_fragments",
+                "gt_ring_components",
+                "pred_ring_components",
+                "tiny_ring_components",
+                "disconnected_ring_suspect",
+                "extra_ring_fragments",
             ],
         )
         _ensure_csv_header(
             per_epoch_path,
             [
                 "epoch",
+                "mean_pred_leaflet_components",
+                "mean_gt_leaflet_components",
                 "merged_leaflet_suspect_count",
-                "tiny_leaflet_components_total",
-                "mean_leaflet_component_count",
-                "disconnected_ring_samples",
-                "ring_holes_total",
-                "tiny_ring_fragments_total",
-                "mean_ring_component_count",
+                "extra_leaflet_fragments_count",
+                "mean_pred_ring_components",
+                "mean_gt_ring_components",
+                "disconnected_ring_suspect_count",
+                "extra_ring_fragments_count",
             ],
         )
 
@@ -370,20 +392,23 @@ def validate(
             for r in shape_rows:
                 w.writerow(r)
 
-        mean_leaflet_components = (leaflet_components_sum / shape_samples) if shape_samples else None
-        mean_ring_components = (ring_components_sum / shape_samples) if shape_samples else None
+        mean_gt_leaflet_components = (gt_leaflet_components_sum / shape_samples) if shape_samples else None
+        mean_pred_leaflet_components = (pred_leaflet_components_sum / shape_samples) if shape_samples else None
+        mean_gt_ring_components = (gt_ring_components_sum / shape_samples) if shape_samples else None
+        mean_pred_ring_components = (pred_ring_components_sum / shape_samples) if shape_samples else None
         with per_epoch_path.open("a", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(
                 [
                     int(epoch),
+                    float(mean_pred_leaflet_components) if mean_pred_leaflet_components is not None else None,
+                    float(mean_gt_leaflet_components) if mean_gt_leaflet_components is not None else None,
                     int(merged_leaflet_suspect_count),
-                    int(tiny_leaflet_components_total),
-                    float(mean_leaflet_components) if mean_leaflet_components is not None else None,
-                    int(disconnected_ring_samples),
-                    int(ring_holes_total),
-                    int(tiny_ring_fragments_total),
-                    float(mean_ring_components) if mean_ring_components is not None else None,
+                    int(extra_leaflet_fragments_count),
+                    float(mean_pred_ring_components) if mean_pred_ring_components is not None else None,
+                    float(mean_gt_ring_components) if mean_gt_ring_components is not None else None,
+                    int(disconnected_ring_suspect_count),
+                    int(extra_ring_fragments_count),
                 ]
             )
 
@@ -399,13 +424,14 @@ def validate(
         }
         if shape_diagnostics and int(num_classes) == 2
         else {
+            "mean_pred_leaflet_components": (pred_leaflet_components_sum / shape_samples) if shape_samples else None,
+            "mean_gt_leaflet_components": (gt_leaflet_components_sum / shape_samples) if shape_samples else None,
             "merged_leaflet_suspect_count": int(merged_leaflet_suspect_count),
-            "tiny_leaflet_components_total": int(tiny_leaflet_components_total),
-            "mean_leaflet_component_count": (leaflet_components_sum / shape_samples) if shape_samples else None,
-            "disconnected_ring_samples": int(disconnected_ring_samples),
-            "ring_holes_total": int(ring_holes_total),
-            "tiny_ring_fragments_total": int(tiny_ring_fragments_total),
-            "mean_ring_component_count": (ring_components_sum / shape_samples) if shape_samples else None,
+            "extra_leaflet_fragments_count": int(extra_leaflet_fragments_count),
+            "mean_pred_ring_components": (pred_ring_components_sum / shape_samples) if shape_samples else None,
+            "mean_gt_ring_components": (gt_ring_components_sum / shape_samples) if shape_samples else None,
+            "disconnected_ring_suspect_count": int(disconnected_ring_suspect_count),
+            "extra_ring_fragments_count": int(extra_ring_fragments_count),
         }
         if shape_diagnostics and int(num_classes) == 3
         else None,
