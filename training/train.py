@@ -86,12 +86,19 @@ def _forward_unetpp_deep_supervision(self: torch.nn.Module, x: torch.Tensor) -> 
 
     dense_x[f"x_0_{depth}"] = blocks[f"x_0_{depth}"](dense_x[f"x_0_{depth - 1}"])
 
-    keys = [f"x_0_{depth}", f"x_0_{depth - 1}", f"x_0_{depth - 2}", f"x_0_{depth - 3}"]
-    outs: list[torch.Tensor] = []
-    for k in keys:
-        v = dense_x.get(k, None)
-        if v is not None:
-            outs.append(self.segmentation_head(v))
+    out_main = self.segmentation_head(dense_x[f"x_0_{depth}"])
+
+    aux_heads = getattr(self, "deep_supervision_heads", None)
+    if aux_heads is None:
+        raise RuntimeError("Deep supervision enabled but deep_supervision_heads is missing on the model")
+
+    aux_keys = [f"x_0_{depth - 1}", f"x_0_{depth - 2}", f"x_0_{depth - 3}"]
+    outs: list[torch.Tensor] = [out_main]
+    for head, k in zip(aux_heads, aux_keys, strict=False):
+        feat = dense_x.get(k, None)
+        if feat is None:
+            continue
+        outs.append(head(feat))
     return outs
 
 
@@ -357,6 +364,7 @@ def _build_loaders(cfg: dict, device: torch.device):
 
 def _build_model(cfg: dict) -> torch.nn.Module:
     import segmentation_models_pytorch as smp
+    from segmentation_models_pytorch.base import SegmentationHead
 
     encoder = cfg["model"].get("encoder") or cfg["model"].get("encoder_name")
     if not encoder:
@@ -370,7 +378,27 @@ def _build_model(cfg: dict) -> torch.nn.Module:
     )
 
     if _deep_supervision_enabled(cfg):
+        decoder = getattr(model, "decoder", None)
+        out_channels = list(getattr(decoder, "out_channels", [])) if decoder is not None else []
+        if len(out_channels) < 4:
+            raise RuntimeError(f"Deep supervision requires Unet++ decoder out_channels len>=4, got {out_channels}")
+
+        aux_in_channels = [int(out_channels[-2]), int(out_channels[-3]), int(out_channels[-4])]
+        model.deep_supervision_heads = torch.nn.ModuleList(
+            [
+                SegmentationHead(in_channels=int(ch), out_channels=int(cfg["model"]["classes"]), activation=None, kernel_size=3)
+                for ch in aux_in_channels
+            ]
+        )
         model.forward = types.MethodType(_forward_unetpp_deep_supervision, model)
+        print(f"Deep supervision enabled: main_in_channels={int(out_channels[-1])} aux_in_channels={aux_in_channels}")
+        w_main = next(iter(model.segmentation_head.parameters()), None)
+        w_main_shape = tuple(w_main.shape) if w_main is not None else None
+        print(f"  main_head first_param_shape={w_main_shape}")
+        for i, h in enumerate(model.deep_supervision_heads, start=1):
+            w = next(iter(h.parameters()), None)
+            w_shape = tuple(w.shape) if w is not None else None
+            print(f"  aux_head[{i}] first_param_shape={w_shape}")
 
     train_init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
     init_path = train_init_path or cfg.get("model", {}).get("init_from_checkpoint", None)
@@ -390,6 +418,9 @@ def _build_model(cfg: dict) -> torch.nn.Module:
             skipped_keys: list[str] = []
             for k, v in state.items():
                 if str(k).startswith("segmentation_head"):
+                    skipped_keys.append(str(k))
+                    continue
+                if str(k).startswith("deep_supervision_heads"):
                     skipped_keys.append(str(k))
                     continue
                 if k in model_state and hasattr(v, "shape") and hasattr(model_state[k], "shape") and v.shape == model_state[k].shape:
@@ -428,8 +459,12 @@ def _build_model(cfg: dict) -> torch.nn.Module:
                 print(f"Init from checkpoint: {init_path}")
                 print(f"  loaded: {loaded}  skipped: {skipped}")
             else:
-                model.load_state_dict(state, strict=True)
-                print(f"Init from checkpoint (strict): {init_path}")
+                if _deep_supervision_enabled(cfg):
+                    model.load_state_dict(state, strict=False)
+                    print(f"Init from checkpoint (non-strict, deep_supervision): {init_path}")
+                else:
+                    model.load_state_dict(state, strict=True)
+                    print(f"Init from checkpoint (strict): {init_path}")
 
     return model
 
@@ -484,7 +519,19 @@ def dry_run(cfg: dict, device: torch.device) -> None:
 
         if isinstance(logits, (list, tuple)):
             shapes = [tuple(x.shape) for x in logits]
-            print(f"step={step} images={tuple(images.shape)} logits={shapes} loss={loss.item():.6f}")
+            named = []
+            if len(shapes) >= 1:
+                named.append(f"main={shapes[0]}")
+            if len(shapes) >= 2:
+                named.append(f"aux1={shapes[1]}")
+            if len(shapes) >= 3:
+                named.append(f"aux2={shapes[2]}")
+            if len(shapes) >= 4:
+                named.append(f"aux3={shapes[3]}")
+            extra = shapes[4:]
+            if extra:
+                named.append(f"extra={extra}")
+            print(f"step={step} images={tuple(images.shape)} logits({len(shapes)}): " + " ".join(named) + f" loss={loss.item():.6f}")
         else:
             print(f"step={step} images={tuple(images.shape)} logits={tuple(logits.shape)} loss={loss.item():.6f}")
 

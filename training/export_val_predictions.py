@@ -103,10 +103,6 @@ def _build_model(cfg: dict) -> torch.nn.Module:
         in_channels=in_channels,
         classes=classes,
     )
-    if _deep_supervision_enabled(cfg):
-        import types
-
-        model.forward = types.MethodType(_forward_unetpp_deep_supervision, model)
     return model
 
 
@@ -141,7 +137,11 @@ def main() -> None:
     model = _build_model(cfg).to(device)
     ckpt = torch.load(str(args.checkpoint), map_location=device)
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
-    model.load_state_dict(state, strict=True)
+    incompat = model.load_state_dict(state, strict=False)
+    missing = list(getattr(incompat, "missing_keys", [])) if incompat is not None else []
+    unexpected = list(getattr(incompat, "unexpected_keys", [])) if incompat is not None else []
+    if missing or unexpected:
+        print(f"Checkpoint load (non-strict): missing={len(missing)} unexpected={len(unexpected)}")
     model.eval()
 
     ds_root = Path(cfg["dataset"]["root"]).resolve()
