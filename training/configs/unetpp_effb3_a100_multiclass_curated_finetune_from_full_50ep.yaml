@@ -1,0 +1,63 @@
+seed: 1337
+
+dataset:
+  root: datasets/converted_full_multiclass
+  train_txt: datasets/converted_full_multiclass_curated/train.txt
+  val_txt: datasets/converted_full_multiclass_curated/val.txt
+  test_txt: datasets/converted_full_multiclass_curated/test.txt
+
+model:
+  name: unetplusplus
+  architecture: UnetPlusPlus
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+  init_from_checkpoint: null
+  init_ignore_mismatched: true
+
+loss:
+  ce_class_weights:
+    - 0.2
+    - 1.0
+    - 2.5
+  ce_coef: 0.3
+  dice_coef: 0.7
+
+augment:
+  rotate90: true
+  hflip: true
+  vflip: true
+  brightness_contrast: true
+  gamma: true
+
+scheduler:
+  type: reduce_on_plateau
+  monitor: mean_dice_fg
+  mode: max
+  factor: 0.5
+  patience: 5
+  min_lr: 0.000003
+
+early_stopping:
+  monitor: mean_dice_fg
+  mode: max
+  patience: 15
+
+train:
+  save_dir: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_from_full_50ep
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_full_100ep/best_mean_fg.pth
+  epochs: 50
+  batch_size: 16
+  lr: 0.00003
+  weight_decay: 0.00001
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  amp: true
+  cudnn_benchmark: true
+  tensorboard: true
+  log_every: 10
+  dry_run_steps: 2

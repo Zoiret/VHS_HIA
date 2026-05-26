@@ -412,36 +412,27 @@ def _build_model(cfg: dict) -> torch.nn.Module:
             raise SystemExit(f"Unsupported checkpoint format: {init_path}")
 
         if train_init_path:
-            model_state = model.state_dict()
-            filtered: dict = {}
-            loaded_keys: list[str] = []
-            skipped_keys: list[str] = []
-            for k, v in state.items():
-                if str(k).startswith("segmentation_head"):
-                    skipped_keys.append(str(k))
-                    continue
-                if str(k).startswith("deep_supervision_heads"):
-                    skipped_keys.append(str(k))
-                    continue
-                if k in model_state and hasattr(v, "shape") and hasattr(model_state[k], "shape") and v.shape == model_state[k].shape:
-                    filtered[k] = v
-                    loaded_keys.append(str(k))
-                else:
-                    skipped_keys.append(str(k))
-
-            incompat = model.load_state_dict(filtered, strict=False)
+            incompat = model.load_state_dict(state, strict=False)
             missing_keys = list(getattr(incompat, "missing_keys", [])) if incompat is not None else []
+            unexpected_keys = list(getattr(incompat, "unexpected_keys", [])) if incompat is not None else []
 
-            print(f"Init from checkpoint (filtered): {init_path}")
-            print("loaded keys:")
-            for k in sorted(loaded_keys):
-                print(f"- {k}")
-            print("skipped keys:")
-            for k in sorted(skipped_keys):
-                print(f"- {k}")
-            print("missing keys:")
-            for k in sorted(missing_keys):
-                print(f"- {k}")
+            print(f"Loaded init checkpoint: {init_path}")
+            if missing_keys:
+                print(f"missing keys: {len(missing_keys)}")
+                for k in missing_keys[:50]:
+                    print(f"- {k}")
+                if len(missing_keys) > 50:
+                    print(f"... ({len(missing_keys) - 50} more)")
+            else:
+                print("missing keys: 0")
+            if unexpected_keys:
+                print(f"unexpected keys: {len(unexpected_keys)}")
+                for k in unexpected_keys[:50]:
+                    print(f"- {k}")
+                if len(unexpected_keys) > 50:
+                    print(f"... ({len(unexpected_keys) - 50} more)")
+            else:
+                print("unexpected keys: 0")
         else:
             ignore_mismatched = bool(cfg.get("model", {}).get("init_ignore_mismatched", True))
             if ignore_mismatched:
