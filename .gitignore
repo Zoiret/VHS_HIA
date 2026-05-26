@@ -16,3 +16,4 @@ __pycache__/
 Thumbs.db
 .idea/
 .vscode/
+!server_assets/curation/*.json
