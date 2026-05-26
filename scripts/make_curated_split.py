@@ -87,6 +87,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--test-ratio", type=float, default=0.1)
+    parser.add_argument("--prefer-clean-for-val-test", action="store_true", help="Prefer using only clean for val/test if enough samples.")
+    parser.add_argument("--min-clean-for-val-test", type=int, default=100, help="Minimum clean samples required to use clean-only val/test.")
     args = parser.parse_args()
 
     converted_root = args.converted_root.resolve()
@@ -98,18 +100,50 @@ def main() -> None:
     clean_raw = _read_lines(curated_dir / "clean.txt")
     medium_raw = _read_lines(curated_dir / "medium.txt")
     bad_raw = _read_lines(curated_dir / "bad.txt")
+    unset_raw = _read_lines(curated_dir / "unset.txt")
 
     clean_ids = {_normalize_id(x) for x in clean_raw}
     medium_ids = {_normalize_id(x) for x in medium_raw}
     bad_ids = {_normalize_id(x) for x in bad_raw}
+    unset_ids = {_normalize_id(x) for x in unset_raw}
 
-    included_ids = (clean_ids | medium_ids) - bad_ids
+    included_ids = (clean_ids | medium_ids) - bad_ids - unset_ids
 
     missing = sorted([x for x in included_ids if x not in index])
     bad_missing = sorted([x for x in bad_ids if x not in index])
+    unset_missing = sorted([x for x in unset_ids if x not in index])
 
     resolved = [x for x in included_ids if x in index]
-    train_ids, val_ids, test_ids = _split_ids(resolved, seed=int(args.seed), val_ratio=float(args.val_ratio), test_ratio=float(args.test_ratio))
+    val_ratio = float(args.val_ratio)
+    test_ratio = float(args.test_ratio)
+    n_val = int(round(len(resolved) * val_ratio))
+    n_test = int(round(len(resolved) * test_ratio))
+    n_val = max(n_val, 0)
+    n_test = max(n_test, 0)
+    desired_holdout = n_val + n_test
+
+    clean_resolved = [x for x in clean_ids if x in index and x not in bad_ids and x not in unset_ids]
+    default_curated = Path("datasets/curated").resolve()
+    prefer_clean = bool(args.prefer_clean_for_val_test) or (curated_dir != default_curated)
+    min_clean = int(args.min_clean_for_val_test)
+
+    if prefer_clean and desired_holdout > 0:
+        if len(clean_resolved) >= max(desired_holdout, min_clean):
+            train_pool = [x for x in resolved if x not in set(clean_resolved)]
+            holdout_pool = list(clean_resolved)
+            hold_train, hold_val, hold_test = _split_ids(holdout_pool, seed=int(args.seed), val_ratio=val_ratio, test_ratio=test_ratio)
+            val_ids = hold_val
+            test_ids = hold_test
+            train_ids = sorted(set(train_pool) | set(hold_train))
+        else:
+            print(
+                f"WARNING: prefer-clean-for-val-test enabled but clean is small "
+                f"(clean_resolved={len(clean_resolved)} < required={max(desired_holdout, min_clean)}). "
+                "Falling back to val/test from clean+medium."
+            )
+            train_ids, val_ids, test_ids = _split_ids(resolved, seed=int(args.seed), val_ratio=val_ratio, test_ratio=test_ratio)
+    else:
+        train_ids, val_ids, test_ids = _split_ids(resolved, seed=int(args.seed), val_ratio=val_ratio, test_ratio=test_ratio)
 
     train_lines = [index[x] for x in train_ids]
     val_lines = [index[x] for x in val_ids]
@@ -126,11 +160,15 @@ def main() -> None:
     print(f"clean: {len(clean_ids)}")
     print(f"medium: {len(medium_ids)}")
     print(f"bad: {len(bad_ids)}")
+    print(f"unset: {len(unset_ids)}")
     print(f"included (clean+medium-bad): {len(included_ids)}")
     print(f"resolved (found in converted): {len(resolved)}")
     print(f"train: {len(train_lines)}")
     print(f"val: {len(val_lines)}")
     print(f"test: {len(test_lines)}")
+    if prefer_clean and desired_holdout > 0:
+        print(f"prefer_clean_for_val_test: True (min_clean_for_val_test={min_clean})")
+        print(f"clean_resolved: {len(clean_resolved)} desired_holdout: {desired_holdout}")
     if missing:
         print()
         print("WARNING: included ids not found in datasets/converted splits:")
@@ -145,8 +183,14 @@ def main() -> None:
             print(f"- {x}")
         if len(bad_missing) > 50:
             print(f"... ({len(bad_missing) - 50} more)")
+    if unset_missing:
+        print()
+        print("NOTE: unset ids not found in datasets/converted (ok):")
+        for x in unset_missing[:50]:
+            print(f"- {x}")
+        if len(unset_missing) > 50:
+            print(f"... ({len(unset_missing) - 50} more)")
 
 
 if __name__ == "__main__":
     main()
-
