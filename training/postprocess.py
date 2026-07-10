@@ -132,3 +132,47 @@ def apply_postprocess(mask: np.ndarray, cfg: dict | None) -> np.ndarray:
     out[(leaflet > 0) & (ring == 0)] = 1
     out[ring > 0] = 2
     return out
+
+
+POSTPROCESS_PRESETS: dict[str, dict] = {
+    "ring_erosion_r2": {"ring_erosion_radius": 2},
+}
+
+
+def postprocess_multiclass_mask(mask: np.ndarray, ring_erosion_radius: int = 0, *, preset: str | None = None) -> np.ndarray:
+    if mask.dtype != np.uint8:
+        mask_u8 = mask.astype(np.uint8)
+    else:
+        mask_u8 = mask
+
+    if mask_u8.ndim != 2:
+        raise ValueError(f"mask must be HxW uint8, got shape={mask_u8.shape} dtype={mask_u8.dtype}")
+
+    r = int(ring_erosion_radius)
+    if preset is not None:
+        p = POSTPROCESS_PRESETS.get(str(preset), None)
+        if p is None:
+            raise ValueError(f"Unknown preset: {preset!r}")
+        r = int(p.get("ring_erosion_radius", r))
+
+    if r <= 0:
+        return mask_u8.copy()
+
+    ring_src = (mask_u8 == 2)
+    if not bool(np.any(ring_src)):
+        return mask_u8.copy()
+
+    import cv2
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    ring_bin = (ring_src.astype(np.uint8) * 255)
+    ring_eroded = cv2.erode(ring_bin, kernel, iterations=1)
+    ring_dst = ring_eroded > 0
+
+    out = mask_u8.copy()
+    removed = ring_src & (~ring_dst)
+    if bool(np.any(removed)):
+        out[removed] = 0
+    if bool(np.any(ring_dst)):
+        out[ring_dst] = 2
+    return out

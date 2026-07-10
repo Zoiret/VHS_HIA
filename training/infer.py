@@ -40,6 +40,7 @@ def main() -> None:
     parser.add_argument("--num-classes", type=int, default=3)
     parser.add_argument("--encoder", type=str, default="efficientnet-b3")
     parser.add_argument("--encoder-weights", type=str, default="imagenet")
+    parser.add_argument("--postprocess-preset", type=str, default=None)
     args = parser.parse_args()
 
     import segmentation_models_pytorch as smp
@@ -71,6 +72,11 @@ def main() -> None:
     with torch.no_grad():
         logits = model(x)
         pred = torch.argmax(logits, dim=1)[0].detach().cpu().numpy().astype(np.uint8)
+
+    if args.postprocess_preset:
+        from postprocess import postprocess_multiclass_mask
+
+        pred = postprocess_multiclass_mask(pred, preset=str(args.postprocess_preset))
 
     args.out_mask.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(args.out_mask), pred)

@@ -105,7 +105,6 @@ def _shape_warnings(gt01: np.ndarray, pred01: np.ndarray) -> tuple[bool, bool, i
 
     return merged_suspect, extra_fragments, small_count, ratio, pr_areas
 
-def _overlay_rgb(image_rgb: np.ndarray, mask: np.ndarray, alpha: float, draw_ring: bool) -> np.ndarray:
 def _count_holes(mask01: np.ndarray) -> int:
     m = (mask01.astype(np.uint8) > 0).astype(np.uint8)
     if int(m.sum()) == 0:
@@ -121,8 +120,7 @@ def _count_holes(mask01: np.ndarray) -> int:
     return int(holes)
 
 
-    base = image_rgb.astype(np.float32)
-    base = image_rgb.astype(np.float32)
+def _overlay_rgb(image_rgb: np.ndarray, mask: np.ndarray, alpha: float, draw_ring: bool) -> np.ndarray:
     base = image_rgb.astype(np.float32)
     overlay = base.copy()
 
@@ -165,6 +163,7 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=Path("training/inference_preview"))
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--shape-report", action="store_true")
+    parser.add_argument("--postprocess-preset", type=str, default=None)
     args = parser.parse_args()
 
     import segmentation_models_pytorch as smp
@@ -234,6 +233,11 @@ def main() -> None:
         with torch.no_grad():
             logits = model(x)
             pred = torch.argmax(logits, dim=1)[0].detach().cpu().numpy().astype(np.uint8)
+
+        if (not leaflet_only) and args.postprocess_preset:
+            from postprocess import postprocess_multiclass_mask
+
+            pred = postprocess_multiclass_mask(pred, preset=str(args.postprocess_preset))
 
         dice_leaflet = _dice_for_class(gt, pred, 1)
         if leaflet_only:
