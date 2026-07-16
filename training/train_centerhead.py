@@ -15,7 +15,7 @@ import cv2
 
 from augmentations import get_train_augmentations, get_val_augmentations
 from dataset_centerhead import SegmentationWithCenterDataset
-from losses import CombinedCrossEntropyDiceLoss
+from losses import CenterNetFocalHeatmapLoss, CombinedCrossEntropyDiceLoss
 from models_centerhead import UnetPlusPlusSemanticCenterHead, load_semantic_checkpoint_non_strict
 from validate_centerhead import (
     _best_perm_sum,
@@ -178,6 +178,7 @@ def _build_model(cfg: dict) -> torch.nn.Module:
     )
 
     init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
+    center_from_scratch = True
     if init_path:
         missing, unexpected = load_semantic_checkpoint_non_strict(model, str(init_path))
         print(f"Loaded init checkpoint: {init_path}")
@@ -191,7 +192,58 @@ def _build_model(cfg: dict) -> torch.nn.Module:
             print(f"- {k}")
         if len(unexpected) > 50:
             print(f"... ({len(unexpected) - 50} more)")
+        center_missing = {"center_head.0.weight", "center_head.0.bias"}
+        center_from_scratch = bool(center_missing.issubset(set(missing)))
+
+    init_bias = (cfg.get("model") or {}).get("center_head_init_bias", None)
+    applied_bias = None
+    applied_sigmoid = None
+    if init_bias is not None and bool(center_from_scratch):
+        b = float(init_bias)
+        layer0 = None
+        try:
+            layer0 = model.center_head[0]
+        except Exception:
+            layer0 = None
+        if layer0 is None or not hasattr(layer0, "bias") or layer0.bias is None:
+            raise RuntimeError("center_head[0].bias not found for center_head_init_bias")
+        with torch.no_grad():
+            layer0.bias.fill_(b)
+        applied_bias = float(b)
+        applied_sigmoid = float(1.0 / (1.0 + np.exp(-b)))
+        print(f"center head initialized from scratch: {center_from_scratch}")
+        print(f"applied center bias: {applied_bias}")
+        print(f"sigmoid(initial bias): {applied_sigmoid:.6f}")
+    else:
+        print(f"center head initialized from scratch: {center_from_scratch}")
+        if init_bias is not None:
+            b = float(init_bias)
+            applied_sigmoid = float(1.0 / (1.0 + np.exp(-b)))
+            print(f"applied center bias: (skipped)")
+            print(f"sigmoid(initial bias): {applied_sigmoid:.6f}")
     return model
+
+
+def _build_center_loss(cfg: dict, device: torch.device, *, dataset_root: Path, train_txt: Path):
+    loss_cfg = cfg.get("center_loss") or {}
+    if not isinstance(loss_cfg, dict):
+        loss_cfg = {}
+    loss_type = str(loss_cfg.get("type", "")).strip().lower()
+    if not loss_type:
+        loss_type = "bce"
+
+    if loss_type == "centernet_focal":
+        alpha = float(loss_cfg.get("alpha", 2.0))
+        beta = float(loss_cfg.get("beta", 4.0))
+        loss_fn = CenterNetFocalHeatmapLoss(alpha=alpha, beta=beta).to(device)
+        return loss_fn, {"type": "centernet_focal", "alpha": alpha, "beta": beta}
+
+    pw = float((cfg.get("center") or {}).get("pos_weight", 0.0) or 0.0)
+    if pw <= 0.0:
+        pw = _compute_center_pos_weight(dataset_root, train_txt, thr=float((cfg.get("center") or {}).get("pos_weight_thr", 0.5)))
+    pw = float(min(max(pw, 1.0), float((cfg.get("center") or {}).get("pos_weight_max", 1000.0))))
+    loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pw], device=device)).to(device)
+    return loss_fn, {"type": "bce", "pos_weight": pw}
 
 
 def _freeze_base_enabled(cfg: dict) -> bool:
@@ -466,7 +518,8 @@ def _export_center_diagnostics(
             img_u8 = (imgs[i] * 255.0 + 0.5).astype(np.uint8)
             gt_center_u16 = (np.clip(gt_center[i, 0], 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
             pr_center_u16 = (np.clip(ctr_prob[i, 0], 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
-            thr_u8 = (ctr_prob[i, 0] >= float(center_thr)).astype(np.uint8) * 255
+            thr_u8_01 = (ctr_prob[i, 0] >= 0.1).astype(np.uint8) * 255
+            thr_u8_03 = (ctr_prob[i, 0] >= 0.3).astype(np.uint8) * 255
 
             leaf_union = pred_sem[i] == 1
             pred_pts_scored = _markers_from_center_map(ctr_prob[i, 0], leaf_union, float(center_thr), max_markers=3)
@@ -538,7 +591,8 @@ def _export_center_diagnostics(
                 cv2.imwrite(str(sd / "original.png"), cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR))
                 cv2.imwrite(str(sd / "gt_center.png"), gt_center_u16)
                 cv2.imwrite(str(sd / "pred_center_prob.png"), pr_center_u16)
-                cv2.imwrite(str(sd / "thresholded_0p3.png"), thr_u8)
+                cv2.imwrite(str(sd / "thresholded_0p1.png"), thr_u8_01)
+                cv2.imwrite(str(sd / "thresholded_0p3.png"), thr_u8_03)
 
                 markers_vis = cv2.cvtColor(img_u8.copy(), cv2.COLOR_RGB2BGR)
                 for j, (y, x, s) in enumerate(pred_pts_scored, start=1):
@@ -592,6 +646,84 @@ def _export_center_diagnostics(
             saved += 1
 
 
+def _threshold_sweep(
+    *,
+    model: torch.nn.Module,
+    loader,
+    num_classes: int,
+    device: torch.device,
+    semantic_loss_fn: torch.nn.Module,
+    center_loss_fn: torch.nn.Module,
+    instance_root: Path,
+    thresholds: list[float],
+) -> dict:
+    rows = []
+    best = None
+    for thr in thresholds:
+        m = validate_centerhead(
+            model=model,
+            loader=loader,
+            num_classes=num_classes,
+            device=device,
+            semantic_loss_fn=semantic_loss_fn,
+            center_loss_fn=center_loss_fn,
+            instance_root=instance_root,
+            center_thr=float(thr),
+        )
+        inst_score = _instance_score(m)
+        row = {
+            "threshold": float(thr),
+            "center_precision": m.get("center_precision"),
+            "center_recall": m.get("center_recall"),
+            "center_f1": m.get("center_f1"),
+            "center_count_acc": m.get("center_count_acc"),
+            "center_zero_cases": m.get("center_zero_cases"),
+            "center_extra_cases": m.get("center_extra_cases"),
+            "instance_exact_count_acc": m.get("instance_exact_count_acc"),
+            "instance_mean_matched_iou": m.get("instance_mean_matched_iou"),
+            "instance_score": float(inst_score) if inst_score is not None else None,
+        }
+        rows.append(row)
+        if best is None or float(row.get("center_f1") or 0.0) > float(best.get("center_f1") or 0.0):
+            best = row
+    return {"rows": rows, "best": best}
+
+
+def _maybe_run_threshold_sweep(
+    cfg: dict,
+    *,
+    out_dir: Path,
+    tag: str,
+    model: torch.nn.Module,
+    val_loader,
+    num_classes: int,
+    device: torch.device,
+    semantic_loss_fn: torch.nn.Module,
+    center_loss_fn: torch.nn.Module,
+    instance_root: Path,
+) -> None:
+    loss_cfg = cfg.get("center_loss") or {}
+    if not isinstance(loss_cfg, dict):
+        return
+    thr_list = loss_cfg.get("threshold_sweep", None)
+    if not isinstance(thr_list, list) or not thr_list:
+        return
+    thresholds = [float(x) for x in thr_list]
+    res = _threshold_sweep(
+        model=model,
+        loader=val_loader,
+        num_classes=num_classes,
+        device=device,
+        semantic_loss_fn=semantic_loss_fn,
+        center_loss_fn=center_loss_fn,
+        instance_root=instance_root,
+        thresholds=thresholds,
+    )
+    out_p = (out_dir / "threshold_sweeps").resolve()
+    out_p.mkdir(parents=True, exist_ok=True)
+    (out_p / f"{tag}.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def smoke_test(cfg: dict, device: torch.device) -> dict:
     out_dir = _get_save_dir(cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -636,15 +768,12 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
 
     ds_root = Path(cfg["dataset"]["root"]).resolve()
     train_txt = Path(cfg["dataset"]["train_txt"]).resolve()
-    pw = float((cfg.get("center") or {}).get("pos_weight", 0.0) or 0.0)
-    if pw <= 0.0:
-        pw = _compute_center_pos_weight(ds_root, train_txt, thr=float((cfg.get("center") or {}).get("pos_weight_thr", 0.5)))
-    pw = float(min(max(pw, 1.0), float((cfg.get("center") or {}).get("pos_weight_max", 1000.0))))
-    center_loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pw], device=device)).to(device)
+    center_loss_fn, center_loss_info = _build_center_loss(cfg, device=device, dataset_root=ds_root, train_txt=train_txt)
     lambda_center = float((cfg.get("center") or {}).get("lambda", 1.0))
 
     base_lr = float((cfg.get("train") or {}).get("lr_backbone", cfg["train"]["lr"]))
     head_lr = float((cfg.get("train") or {}).get("lr_center_head", base_lr * 10.0))
+    clip_norm = float((cfg.get("train") or {}).get("center_grad_clip_norm", 0.0) or 0.0)
     if freeze_base:
         optimizer = torch.optim.AdamW(
             [{"params": list(model.center_head.parameters()), "lr": head_lr}],
@@ -684,15 +813,87 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
         sem_logits = out["semantic"]
         center_logits = out["center"]
         loss_sem = semantic_loss_fn(sem_logits, masks)
-        loss_center = center_loss_fn(center_logits, centers)
+        if isinstance(center_loss_fn, CenterNetFocalHeatmapLoss):
+            with torch.no_grad():
+                pr0 = torch.sigmoid(center_logits.detach()).detach()
+                gt0 = centers.detach()
+                pos_exact = gt0 >= 0.9999
+                near = gt0 >= 0.1
+                far = gt0 < 0.1
+                prob_pos_mean = float(pr0[pos_exact].mean().item()) if bool(pos_exact.any().item()) else None
+                prob_near_mean = float(pr0[near].mean().item()) if bool(near.any().item()) else None
+                prob_far_mean = float(pr0[far].mean().item()) if bool(far.any().item()) else None
+
+            details = center_loss_fn(center_logits, centers, return_details=True)
+            loss_center = details["loss"]
+            center_pos_loss = float(details["pos_loss"].item())
+            center_neg_loss = float(details["neg_loss"].item())
+            center_num_pos = float(details["num_pos"].item())
+            center_mean_pred = float(details["mean_pred"].item())
+            if float(center_num_pos) <= 0.0:
+                raise SystemExit("Freeze smoke test failed: focal num_pos == 0")
+            with torch.no_grad():
+                pr = torch.sigmoid(center_logits).detach()
+                pos_frac_005 = float((pr >= 0.05).float().mean().item())
+                pos_frac_01 = float((pr >= 0.1).float().mean().item())
+                pos_frac_03 = float((pr >= 0.3).float().mean().item())
+                pos_frac_05 = float((pr >= 0.5).float().mean().item())
+        else:
+            loss_center = center_loss_fn(center_logits, centers)
+            center_pos_loss = None
+            center_neg_loss = None
+            center_num_pos = None
+            center_mean_pred = float(torch.sigmoid(center_logits).detach().mean().item())
+            with torch.no_grad():
+                pr = torch.sigmoid(center_logits).detach()
+                pos_frac_005 = float((pr >= 0.05).float().mean().item())
+                pos_frac_01 = float((pr >= 0.1).float().mean().item())
+                pos_frac_03 = float((pr >= 0.3).float().mean().item())
+                pos_frac_05 = float((pr >= 0.5).float().mean().item())
         loss = loss_center if freeze_base else (loss_sem + float(lambda_center) * loss_center)
+
+        if not bool(torch.isfinite(loss).all().item()):
+            raise SystemExit("Smoke test failed: loss is not finite")
+
         loss.backward()
+
+        grad_mean_abs = float(next(iter(model.center_head.parameters())).grad.detach().abs().mean().item())
+        grad_max_abs = float(next(iter(model.center_head.parameters())).grad.detach().abs().max().item())
+        if not np.isfinite(grad_mean_abs) or not np.isfinite(grad_max_abs):
+            raise SystemExit("Smoke test failed: center grad is not finite")
+
+        grad_norm_before = None
+        grad_norm_after = None
+        if float(clip_norm) > 0.0:
+            params = list(model.center_head.parameters())
+            with torch.no_grad():
+                s = 0.0
+                for p in params:
+                    if p.grad is None:
+                        continue
+                    s += float(torch.sum(p.grad.detach().float() ** 2).item())
+                grad_norm_before = float(np.sqrt(s))
+            torch.nn.utils.clip_grad_norm_(params, max_norm=float(clip_norm))
+            with torch.no_grad():
+                s = 0.0
+                for p in params:
+                    if p.grad is None:
+                        continue
+                    s += float(torch.sum(p.grad.detach().float() ** 2).item())
+                grad_norm_after = float(np.sqrt(s))
+
         optimizer.step()
         with torch.no_grad():
             sem_after = model(images)["semantic"].detach().clone() if freeze_base else None
         sem_delta = None
         if freeze_base and sem_before is not None and sem_after is not None:
             sem_delta = float((sem_before - sem_after).abs().max().item())
+        params_finite = True
+        for p in model.center_head.parameters():
+            if not bool(torch.isfinite(p.detach()).all().item()):
+                params_finite = False
+                break
+        logits_finite = bool(torch.isfinite(center_logits.detach()).all().item())
         grad = next(iter(model.center_head.parameters())).grad
         grad_norm = float(grad.detach().abs().mean().item()) if grad is not None else 0.0
         base_grad_any = False
@@ -708,14 +909,31 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             "loss_center": float(loss_center.item()),
             "loss_total": float(loss.item()),
             "center_grad_mean_abs": grad_norm,
+            "center_grad_max_abs": float(grad_max_abs),
+            "grad_norm_before_clip": grad_norm_before,
+            "grad_norm_after_clip": grad_norm_after,
+            "center_grad_all_finite": bool(np.isfinite(grad_mean_abs) and np.isfinite(grad_max_abs)),
             "base_grad_any": bool(base_grad_any),
             "base_eval_mode": bool(not model.base.training),
             "center_train_mode": bool(model.center_head.training),
             "semantic_logits_max_abs_delta_after_step": sem_delta,
             "bn_running_stats_max_abs_delta_after_step": bn_delta,
-            "pos_weight": float(pw),
+            "center_loss": center_loss_info,
             "lambda_center": float(lambda_center),
             "freeze_base": bool(freeze_base),
+            "focal_pos_loss": center_pos_loss,
+            "focal_neg_loss": center_neg_loss,
+            "focal_num_pos": center_num_pos,
+            "center_mean_pred_prob": center_mean_pred,
+            "center_prob_mean_pos_exact": prob_pos_mean if isinstance(center_loss_fn, CenterNetFocalHeatmapLoss) else None,
+            "center_prob_mean_near": prob_near_mean if isinstance(center_loss_fn, CenterNetFocalHeatmapLoss) else None,
+            "center_prob_mean_far": prob_far_mean if isinstance(center_loss_fn, CenterNetFocalHeatmapLoss) else None,
+            "center_pos_frac_thr_0p1": pos_frac_01,
+            "center_pos_frac_thr_0p3": pos_frac_03,
+            "center_pos_frac_thr_0p5": pos_frac_05,
+            "center_pos_frac_thr_0p05": pos_frac_005,
+            "parameters_finite_after_step": bool(params_finite),
+            "logits_finite_after_step": bool(logits_finite),
         }
 
     if freeze_base:
@@ -791,11 +1009,7 @@ def train(cfg: dict, device: torch.device) -> None:
 
     ds_root = Path(cfg["dataset"]["root"]).resolve()
     train_txt = Path(cfg["dataset"]["train_txt"]).resolve()
-    pw = float((cfg.get("center") or {}).get("pos_weight", 0.0) or 0.0)
-    if pw <= 0.0:
-        pw = _compute_center_pos_weight(ds_root, train_txt, thr=float((cfg.get("center") or {}).get("pos_weight_thr", 0.5)))
-    pw = float(min(max(pw, 1.0), float((cfg.get("center") or {}).get("pos_weight_max", 1000.0))))
-    center_loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pw], device=device)).to(device)
+    center_loss_fn, center_loss_info = _build_center_loss(cfg, device=device, dataset_root=ds_root, train_txt=train_txt)
     lambda_center = float((cfg.get("center") or {}).get("lambda", 1.0))
 
     base_lr = float((cfg.get("train") or {}).get("lr_backbone", cfg["train"]["lr"]))
@@ -872,6 +1086,10 @@ def train(cfg: dict, device: torch.device) -> None:
                     "instance_fragmented_rate",
                     "instance_mixed_rate",
                     "instance_perfect_rate",
+                    "center_prob_mean_pos",
+                    "center_prob_mean_near",
+                    "center_prob_mean_far",
+                    "center_prob_mean_max",
                     "lr_backbone",
                     "lr_center_head",
                 ]
@@ -934,6 +1152,10 @@ def train(cfg: dict, device: torch.device) -> None:
                 float(val_metrics0["instance_fragmented_rate"]),
                 float(val_metrics0.get("instance_mixed_rate")) if val_metrics0.get("instance_mixed_rate") is not None else "",
                 float(val_metrics0.get("instance_perfect_rate")) if val_metrics0.get("instance_perfect_rate") is not None else "",
+                float(val_metrics0.get("center_prob_mean_pos")) if val_metrics0.get("center_prob_mean_pos") is not None else "",
+                float(val_metrics0.get("center_prob_mean_near")) if val_metrics0.get("center_prob_mean_near") is not None else "",
+                float(val_metrics0.get("center_prob_mean_far")) if val_metrics0.get("center_prob_mean_far") is not None else "",
+                float(val_metrics0.get("center_prob_mean_max")) if val_metrics0.get("center_prob_mean_max") is not None else "",
                 "" if freeze_base else float(optimizer.param_groups[0]["lr"]),
                 float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"]),
             ]
@@ -949,6 +1171,18 @@ def train(cfg: dict, device: torch.device) -> None:
             center_thr=center_thr,
             tag="epoch0",
             max_samples=20,
+        )
+        _maybe_run_threshold_sweep(
+            cfg,
+            out_dir=out_dir,
+            tag="epoch0",
+            model=model,
+            val_loader=val_loader,
+            num_classes=num_classes,
+            device=device,
+            semantic_loss_fn=semantic_loss_fn,
+            center_loss_fn=center_loss_fn,
+            instance_root=instance_root,
         )
 
     for epoch in range(1, epochs + 1):
@@ -1032,6 +1266,10 @@ def train(cfg: dict, device: torch.device) -> None:
                     float(val_metrics["instance_fragmented_rate"]),
                     float(val_metrics.get("instance_mixed_rate")) if val_metrics.get("instance_mixed_rate") is not None else "",
                     float(val_metrics.get("instance_perfect_rate")) if val_metrics.get("instance_perfect_rate") is not None else "",
+                    float(val_metrics.get("center_prob_mean_pos")) if val_metrics.get("center_prob_mean_pos") is not None else "",
+                    float(val_metrics.get("center_prob_mean_near")) if val_metrics.get("center_prob_mean_near") is not None else "",
+                    float(val_metrics.get("center_prob_mean_far")) if val_metrics.get("center_prob_mean_far") is not None else "",
+                    float(val_metrics.get("center_prob_mean_max")) if val_metrics.get("center_prob_mean_max") is not None else "",
                     "" if freeze_base else lr_backbone_now,
                     lr_center_now,
                 ]
@@ -1065,6 +1303,18 @@ def train(cfg: dict, device: torch.device) -> None:
                     tag="best_center_f1",
                     max_samples=20,
                 )
+                _maybe_run_threshold_sweep(
+                    cfg,
+                    out_dir=out_dir,
+                    tag="best_center_f1",
+                    model=model,
+                    val_loader=val_loader,
+                    num_classes=num_classes,
+                    device=device,
+                    semantic_loss_fn=semantic_loss_fn,
+                    center_loss_fn=center_loss_fn,
+                    instance_root=instance_root,
+                )
             improved = True
         if inst_score is not None and (best_instance is None or float(inst_score) > float(best_instance)):
             best_instance = float(inst_score)
@@ -1081,6 +1331,18 @@ def train(cfg: dict, device: torch.device) -> None:
                     tag="best_instance_score",
                     max_samples=20,
                 )
+                _maybe_run_threshold_sweep(
+                    cfg,
+                    out_dir=out_dir,
+                    tag="best_instance_score",
+                    model=model,
+                    val_loader=val_loader,
+                    num_classes=num_classes,
+                    device=device,
+                    semantic_loss_fn=semantic_loss_fn,
+                    center_loss_fn=center_loss_fn,
+                    instance_root=instance_root,
+                )
             else:
                 _export_val_visuals(out_dir, model, val_loader, device, max_samples=20)
             improved = True
@@ -1095,6 +1357,18 @@ def train(cfg: dict, device: torch.device) -> None:
                 center_thr=center_thr,
                 tag=f"epoch{epoch}",
                 max_samples=20,
+            )
+            _maybe_run_threshold_sweep(
+                cfg,
+                out_dir=out_dir,
+                tag=f"epoch{epoch}",
+                model=model,
+                val_loader=val_loader,
+                num_classes=num_classes,
+                device=device,
+                semantic_loss_fn=semantic_loss_fn,
+                center_loss_fn=center_loss_fn,
+                instance_root=instance_root,
             )
 
         if scheduler is not None:
@@ -1148,7 +1422,7 @@ def train(cfg: dict, device: torch.device) -> None:
                 "best_epoch_center_f1": best_epoch_center,
                 "best_instance_score": best_instance,
                 "best_epoch_instance_score": best_epoch_instance,
-                "pos_weight": pw,
+                "center_loss": center_loss_info,
                 "lambda_center": lambda_center,
             },
             ensure_ascii=False,

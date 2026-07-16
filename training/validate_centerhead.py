@@ -227,6 +227,14 @@ def validate_centerhead(
     inst_mean_iou_sum = 0.0
     inst_median_iou_list = []
     inst_perfect = 0
+    prob_pos_sum = 0.0
+    prob_pos_n = 0
+    prob_near_sum = 0.0
+    prob_near_n = 0
+    prob_far_sum = 0.0
+    prob_far_n = 0
+    prob_max_sum = 0.0
+    prob_max_n = 0
 
     for batch in tqdm(loader, desc="Validate(centerhead)", leave=False):
         images = batch["image"].to(device, non_blocking=True)
@@ -297,6 +305,23 @@ def validate_centerhead(
                 zero_center_cases += 1
             if int(len(pred_pts)) > 3:
                 extra_center_cases += 1
+
+            gt_center_map = gt_centers[i, 0]
+            pr_center_map = pred_center[i, 0]
+            pos_exact = gt_center_map >= 0.9999
+            near = gt_center_map >= 0.1
+            far = gt_center_map < 0.1
+            if bool(np.any(pos_exact)):
+                prob_pos_sum += float(np.mean(pr_center_map[pos_exact]))
+                prob_pos_n += 1
+            if bool(np.any(near)):
+                prob_near_sum += float(np.mean(pr_center_map[near]))
+                prob_near_n += 1
+            if bool(np.any(far)):
+                prob_far_sum += float(np.mean(pr_center_map[far]))
+                prob_far_n += 1
+            prob_max_sum += float(np.max(pr_center_map))
+            prob_max_n += 1
 
             sid = Path(str(image_paths[i])).stem if isinstance(image_paths[i], str) else None
             if not sid:
@@ -387,6 +412,10 @@ def validate_centerhead(
     inst_fragmented_rate = float(inst_fragmented / max(inst_n, 1))
     inst_mixed_rate = float(inst_mixed / max(inst_n, 1))
     inst_exact_acc = float(inst_exact / max(inst_n, 1))
+    prob_pos_mean = float(prob_pos_sum / max(prob_pos_n, 1))
+    prob_near_mean = float(prob_near_sum / max(prob_near_n, 1))
+    prob_far_mean = float(prob_far_sum / max(prob_far_n, 1))
+    prob_max_mean = float(prob_max_sum / max(prob_max_n, 1))
 
     return {
         "semantic_loss": float(total_sem_loss / max(n_batches, 1)),
@@ -411,4 +440,8 @@ def validate_centerhead(
         "instance_mean_matched_iou": inst_mean_iou,
         "instance_median_matched_iou": inst_median_iou,
         "instance_perfect_rate": inst_perfect_rate,
+        "center_prob_mean_pos": prob_pos_mean,
+        "center_prob_mean_near": prob_near_mean,
+        "center_prob_mean_far": prob_far_mean,
+        "center_prob_mean_max": prob_max_mean,
     }

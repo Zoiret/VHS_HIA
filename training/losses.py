@@ -60,3 +60,43 @@ class CombinedCrossEntropyDiceLoss(nn.Module):
         loss_dice = self.dice(logits, target)
         loss = self.ce_coef * loss_ce + self.dice_coef * loss_dice
         return loss
+
+
+class CenterNetFocalHeatmapLoss(nn.Module):
+    def __init__(self, alpha: float = 2.0, beta: float = 4.0, eps: float = 1e-4) -> None:
+        super().__init__()
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.eps = float(eps)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor, *, return_details: bool = False):
+        pred = torch.sigmoid(logits)
+        pred = torch.clamp(pred, min=self.eps, max=1.0 - self.eps)
+
+        pos = target == 1.0
+        neg = ~pos
+
+        neg_weight = torch.pow(1.0 - target, self.beta)
+
+        pos_loss = -torch.log(pred) * torch.pow(1.0 - pred, self.alpha) * pos.float()
+        neg_loss = -torch.log(1.0 - pred) * torch.pow(pred, self.alpha) * neg_weight * neg.float()
+
+        num_pos = int(pos.sum().item())
+        loss_sum = pos_loss.sum() + neg_loss.sum()
+        if num_pos > 0:
+            loss = loss_sum / float(num_pos)
+        else:
+            loss = neg_loss.sum()
+
+        if not torch.isfinite(loss).all().item():
+            raise RuntimeError("CenterNetFocalHeatmapLoss produced non-finite loss")
+
+        if not return_details:
+            return loss
+        return {
+            "loss": loss,
+            "pos_loss": pos_loss.sum().detach(),
+            "neg_loss": neg_loss.sum().detach(),
+            "num_pos": torch.tensor(float(num_pos), device=logits.device),
+            "mean_pred": pred.mean().detach(),
+        }
