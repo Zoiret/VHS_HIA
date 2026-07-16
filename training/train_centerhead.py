@@ -17,7 +17,19 @@ from augmentations import get_train_augmentations, get_val_augmentations
 from dataset_centerhead import SegmentationWithCenterDataset
 from losses import CombinedCrossEntropyDiceLoss
 from models_centerhead import UnetPlusPlusSemanticCenterHead, load_semantic_checkpoint_non_strict
-from validate_centerhead import validate_centerhead
+from validate_centerhead import (
+    _best_perm_sum,
+    _case_type,
+    _connected_components,
+    _extract_metadata_centers,
+    _fallback_marker,
+    _geometry_topo_u8,
+    _iou_matrix,
+    _keep_top3_by_area,
+    _markers_from_center_map,
+    _watershed,
+    validate_centerhead,
+)
 
 
 def _read_yaml(path: Path) -> dict:
@@ -182,6 +194,60 @@ def _build_model(cfg: dict) -> torch.nn.Module:
     return model
 
 
+def _freeze_base_enabled(cfg: dict) -> bool:
+    return bool((cfg.get("train") or {}).get("freeze_base", False))
+
+
+def _apply_freeze_base(model: UnetPlusPlusSemanticCenterHead) -> dict:
+    for p in model.base.parameters():
+        p.requires_grad = False
+    for p in model.center_head.parameters():
+        p.requires_grad = True
+    model.freeze_base = True
+    total_params = int(sum(int(p.numel()) for p in model.parameters()))
+    trainable_params = int(sum(int(p.numel()) for p in model.parameters() if bool(p.requires_grad)))
+    trainable_names = [n for (n, p) in model.named_parameters() if bool(p.requires_grad)]
+    assert all(n.startswith("center_head.") for n in trainable_names), f"Non-center_head trainable params found: {trainable_names[:10]}"
+    return {"total_params": total_params, "trainable_params": trainable_params, "trainable_names": trainable_names}
+
+
+def _set_train_modes(model: UnetPlusPlusSemanticCenterHead, *, freeze_base: bool) -> None:
+    if freeze_base:
+        model.center_head.train()
+        model.base.eval()
+    else:
+        model.train()
+
+
+def _collect_batchnorm_stats(model: torch.nn.Module) -> list[tuple[str, torch.Tensor, torch.Tensor]]:
+    out = []
+    for name, m in model.named_modules():
+        rm = getattr(m, "running_mean", None)
+        rv = getattr(m, "running_var", None)
+        if rm is None or rv is None:
+            continue
+        if not torch.is_tensor(rm) or not torch.is_tensor(rv):
+            continue
+        out.append((name, rm.detach().clone(), rv.detach().clone()))
+    return out
+
+
+def _max_bn_delta(model: torch.nn.Module, ref: list[tuple[str, torch.Tensor, torch.Tensor]]) -> float:
+    max_d = 0.0
+    for name, rm0, rv0 in ref:
+        m = dict(model.named_modules()).get(name, None)
+        if m is None:
+            continue
+        rm = getattr(m, "running_mean", None)
+        rv = getattr(m, "running_var", None)
+        if rm is None or rv is None:
+            continue
+        d1 = float((rm.detach() - rm0).abs().max().item()) if rm.numel() else 0.0
+        d2 = float((rv.detach() - rv0).abs().max().item()) if rv.numel() else 0.0
+        max_d = max(max_d, d1, d2)
+    return float(max_d)
+
+
 def _save_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer, epoch: int, cfg: dict, extra: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -340,6 +406,192 @@ def _export_center_baseline(out_dir: Path, model: torch.nn.Module, loader, devic
             saved += 1
 
 
+def _colorize_instances_u8(inst_u8: np.ndarray) -> np.ndarray:
+    h, w = inst_u8.shape[:2]
+    out = np.zeros((h, w, 3), dtype=np.uint8)
+    colors = {
+        0: (0, 0, 0),
+        1: (0, 255, 0),
+        2: (255, 0, 0),
+        3: (0, 0, 255),
+    }
+    for k, c in colors.items():
+        out[inst_u8 == int(k)] = np.asarray(c, dtype=np.uint8)
+    return out
+
+
+def _export_center_diagnostics(
+    out_dir: Path,
+    model: UnetPlusPlusSemanticCenterHead,
+    loader,
+    device: torch.device,
+    *,
+    instance_root: Path,
+    center_thr: float,
+    tag: str,
+    max_samples: int = 20,
+) -> None:
+    out_root = (out_dir / "center_output_diagnostics" / str(tag)).resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    model.eval()
+    saved = 0
+    for batch in loader:
+        if saved >= int(max_samples):
+            break
+
+        images = batch["image"].to(device)
+        image_paths = batch.get("image_path", None)
+        meta_paths = batch.get("metadata_path", None)
+        if not isinstance(image_paths, list):
+            image_paths = [None for _ in range(int(images.shape[0]))]
+        if not isinstance(meta_paths, list):
+            meta_paths = [None for _ in range(int(images.shape[0]))]
+
+        with torch.no_grad():
+            out = model(images)
+            sem_logits = out["semantic"]
+            ctr_logits = out["center"]
+            pred_sem = torch.argmax(sem_logits, dim=1).detach().cpu().numpy().astype(np.uint8)
+            ctr_prob = torch.sigmoid(ctr_logits).detach().cpu().numpy().astype(np.float32)
+
+        imgs = images.detach().cpu().clamp(0.0, 1.0).numpy().transpose(0, 2, 3, 1)
+        gt_center = batch["center"].detach().cpu().numpy().astype(np.float32)
+
+        for i in range(int(pred_sem.shape[0])):
+            if saved >= int(max_samples):
+                break
+            sid = Path(str(image_paths[i])).stem if isinstance(image_paths[i], str) else f"sample_{saved}"
+
+            img_u8 = (imgs[i] * 255.0 + 0.5).astype(np.uint8)
+            gt_center_u16 = (np.clip(gt_center[i, 0], 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
+            pr_center_u16 = (np.clip(ctr_prob[i, 0], 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
+            thr_u8 = (ctr_prob[i, 0] >= float(center_thr)).astype(np.uint8) * 255
+
+            leaf_union = pred_sem[i] == 1
+            pred_pts_scored = _markers_from_center_map(ctr_prob[i, 0], leaf_union, float(center_thr), max_markers=3)
+            pred_pts = [(y, x) for (y, x, _) in pred_pts_scored]
+
+            mp = meta_paths[i] if i < len(meta_paths) else None
+            gt_pts = _extract_metadata_centers(str(mp)) if isinstance(mp, str) and mp else []
+
+            if int(len(pred_pts)) == 0:
+                center_bucket = "zero_centers"
+            elif int(len(pred_pts)) == int(len(gt_pts)):
+                center_bucket = "correct_center_count"
+            else:
+                center_bucket = "extra_centers"
+
+            gt_inst_path = (instance_root / "instance_masks" / f"{sid}.png").resolve()
+            gt_inst_src = cv2.imread(str(gt_inst_path), cv2.IMREAD_UNCHANGED)
+            if gt_inst_src is None:
+                saved += 1
+                continue
+            if gt_inst_src.ndim == 3:
+                gt_inst_src = gt_inst_src[:, :, 0]
+            gt_inst = gt_inst_src.astype(np.uint8)
+            if gt_inst.shape[:2] != pred_sem[i].shape[:2]:
+                h, w = pred_sem[i].shape[:2]
+                gh, gw = gt_inst.shape[:2]
+                y0 = (gh - h) // 2
+                x0 = (gw - w) // 2
+                gt_inst = gt_inst[y0 : y0 + h, x0 : x0 + w]
+
+            gt_k = int(len([k for k in [1, 2, 3] if int(np.sum(gt_inst == k)) > 0]))
+            labels_cc, cc_k = _connected_components(leaf_union.astype(np.uint8))
+            pred_inst = np.zeros_like(gt_inst, dtype=np.uint8)
+            next_lab = 1
+            for comp_id in range(1, int(cc_k) + 1):
+                comp01 = labels_cc == comp_id
+                in_markers = [(y, x) for (y, x) in pred_pts if bool(comp01[int(y), int(x)])]
+                if len(in_markers) == 0:
+                    fb = _fallback_marker(comp01)
+                    if fb is not None:
+                        in_markers = [fb]
+                if len(in_markers) <= 1:
+                    pred_inst[comp01] = np.uint8(next_lab)
+                    next_lab += 1
+                    continue
+                topo = _geometry_topo_u8(comp01.astype(np.uint8))
+                seg = _watershed(comp01.astype(np.uint8), in_markers, topo)
+                seg, seg_k = _keep_top3_by_area(seg)
+                if seg_k <= 1:
+                    pred_inst[comp01] = np.uint8(next_lab)
+                    next_lab += 1
+                    continue
+                for local in range(1, int(seg_k) + 1):
+                    pred_inst[seg == local] = np.uint8(next_lab)
+                    next_lab += 1
+            pred_inst, pred_k = _keep_top3_by_area(pred_inst)
+
+            case = _case_type(gt_k, int(pred_k))
+            inst_bucket = str(case)
+            if inst_bucket == "correct":
+                inst_bucket = "correct_instances"
+            if inst_bucket not in {"merged", "fragmented", "mixed", "correct_instances"}:
+                inst_bucket = "correct_instances"
+
+            sd_center = (out_root / center_bucket / sid).resolve()
+            sd_inst = (out_root / inst_bucket / sid).resolve()
+            for sd in [sd_center, sd_inst]:
+                sd.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(sd / "original.png"), cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR))
+                cv2.imwrite(str(sd / "gt_center.png"), gt_center_u16)
+                cv2.imwrite(str(sd / "pred_center_prob.png"), pr_center_u16)
+                cv2.imwrite(str(sd / "thresholded_0p3.png"), thr_u8)
+
+                markers_vis = cv2.cvtColor(img_u8.copy(), cv2.COLOR_RGB2BGR)
+                for j, (y, x, s) in enumerate(pred_pts_scored, start=1):
+                    cv2.circle(markers_vis, (int(x), int(y)), 6, (255, 0, 0), 2)
+                    cv2.putText(markers_vis, str(j), (int(x) + 7, int(y) - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1, cv2.LINE_AA)
+                    cv2.putText(markers_vis, f"{float(s):.2f}", (int(x) + 7, int(y) + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1, cv2.LINE_AA)
+                for j, (y, x) in enumerate(gt_pts, start=1):
+                    cv2.circle(markers_vis, (int(x), int(y)), 6, (0, 255, 255), 2)
+                cv2.imwrite(str(sd / "markers.png"), markers_vis)
+
+                cv2.imwrite(str(sd / "gt_instance_mask.png"), gt_inst.astype(np.uint8))
+                cv2.imwrite(str(sd / "reconstructed_instances.png"), pred_inst.astype(np.uint8))
+
+                iou_mat = _iou_matrix(gt_inst, pred_inst, gt_k, int(pred_k))
+                sum_iou = _best_perm_sum(iou_mat)
+                mean_iou = float(sum_iou / max(gt_k, 1))
+                (sd / "metrics.json").write_text(
+                    json.dumps(
+                        {
+                            "sample": sid,
+                            "tag": str(tag),
+                            "center_thr": float(center_thr),
+                            "gt_center_count": int(len(gt_pts)),
+                            "pred_center_count": int(len(pred_pts)),
+                            "gt_instance_count": int(gt_k),
+                            "pred_instance_count": int(pred_k),
+                            "case": str(case),
+                            "mean_matched_iou": float(mean_iou),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+
+                a = cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR)
+                b = cv2.applyColorMap(((gt_center_u16.astype(np.float32) / 65535.0) * 255.0 + 0.5).astype(np.uint8), cv2.COLORMAP_VIRIDIS)
+                c = cv2.applyColorMap(((pr_center_u16.astype(np.float32) / 65535.0) * 255.0 + 0.5).astype(np.uint8), cv2.COLORMAP_VIRIDIS)
+                d = cv2.addWeighted(
+                    cv2.cvtColor(_colorize_instances_u8(gt_inst), cv2.COLOR_RGB2BGR),
+                    0.5,
+                    cv2.cvtColor(_colorize_instances_u8(pred_inst), cv2.COLOR_RGB2BGR),
+                    0.5,
+                    0.0,
+                )
+                top = np.concatenate([a, b], axis=1)
+                bot = np.concatenate([c, d], axis=1)
+                grid = np.concatenate([top, bot], axis=0)
+                cv2.imwrite(str(sd / "compare.png"), grid)
+
+            saved += 1
+
+
 def smoke_test(cfg: dict, device: torch.device) -> dict:
     out_dir = _get_save_dir(cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -357,9 +609,17 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
     print(f"AMP: {amp_enabled}")
     print(f"batch_size: {int((cfg.get('train') or {}).get('batch_size', 1))}")
 
+    freeze_base = _freeze_base_enabled(cfg)
     train_loader, val_loader = _build_loaders(cfg, device=device)
     model = _build_model(cfg).to(device)
-    model.train()
+    if freeze_base:
+        freeze_info = _apply_freeze_base(model)
+        print("=== FREEZE BASE ===")
+        print(f"total_params: {freeze_info['total_params']}")
+        print(f"trainable_params: {freeze_info['trainable_params']}")
+        for n in freeze_info["trainable_names"]:
+            print(f"trainable: {n}")
+    _set_train_modes(model, freeze_base=freeze_base)
 
     num_classes = int(cfg["model"]["classes"])
     class_weights_cfg = (cfg.get("loss") or {}).get("ce_class_weights", None)
@@ -385,51 +645,62 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
 
     base_lr = float((cfg.get("train") or {}).get("lr_backbone", cfg["train"]["lr"]))
     head_lr = float((cfg.get("train") or {}).get("lr_center_head", base_lr * 10.0))
-    params_base = []
-    params_head = []
-    for n, p in model.named_parameters():
-        if not p.requires_grad:
-            continue
-        if n.startswith("center_head.") or ".center_head." in n:
-            params_head.append(p)
-        else:
-            params_base.append(p)
-    optimizer = torch.optim.AdamW(
-        [{"params": params_base, "lr": base_lr}, {"params": params_head, "lr": head_lr}],
-        weight_decay=float(cfg["train"]["weight_decay"]),
-    )
+    if freeze_base:
+        optimizer = torch.optim.AdamW(
+            [{"params": list(model.center_head.parameters()), "lr": head_lr}],
+            weight_decay=float(cfg["train"]["weight_decay"]),
+        )
+    else:
+        params_base = []
+        params_head = []
+        for n, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if n.startswith("center_head.") or ".center_head." in n:
+                params_head.append(p)
+            else:
+                params_base.append(p)
+        optimizer = torch.optim.AdamW(
+            [{"params": params_base, "lr": base_lr}, {"params": params_head, "lr": head_lr}],
+            weight_decay=float(cfg["train"]["weight_decay"]),
+        )
 
     steps = int((cfg.get("train") or {}).get("smoke_steps", 2))
     train_it = iter(train_loader)
     last = {}
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
+    bn_ref = _collect_batchnorm_stats(model.base) if freeze_base else []
     for _ in range(int(steps)):
         batch = next(train_it)
         images = batch["image"].to(device)
         masks = batch["mask"].to(device)
         centers = batch["center"].to(device)
         optimizer.zero_grad(set_to_none=True)
+        _set_train_modes(model, freeze_base=freeze_base)
+        with torch.no_grad():
+            sem_before = model(images)["semantic"].detach().clone() if freeze_base else None
         out = model(images)
         sem_logits = out["semantic"]
         center_logits = out["center"]
         loss_sem = semantic_loss_fn(sem_logits, masks)
         loss_center = center_loss_fn(center_logits, centers)
-        loss = loss_sem + float(lambda_center) * loss_center
+        loss = loss_center if freeze_base else (loss_sem + float(lambda_center) * loss_center)
         loss.backward()
         optimizer.step()
+        with torch.no_grad():
+            sem_after = model(images)["semantic"].detach().clone() if freeze_base else None
+        sem_delta = None
+        if freeze_base and sem_before is not None and sem_after is not None:
+            sem_delta = float((sem_before - sem_after).abs().max().item())
         grad = next(iter(model.center_head.parameters())).grad
         grad_norm = float(grad.detach().abs().mean().item()) if grad is not None else 0.0
-        enc_grad_ok = None
-        for p in model.base.encoder.parameters():
+        base_grad_any = False
+        for p in model.base.parameters():
             if p.grad is not None:
-                enc_grad_ok = bool(torch.isfinite(p.grad).all().item())
+                base_grad_any = True
                 break
-        dec_grad_ok = None
-        for p in model.base.decoder.parameters():
-            if p.grad is not None:
-                dec_grad_ok = bool(torch.isfinite(p.grad).all().item())
-                break
+        bn_delta = _max_bn_delta(model.base, bn_ref) if freeze_base else None
         last = {
             "semantic_shape": tuple(sem_logits.shape),
             "center_shape": tuple(center_logits.shape),
@@ -437,11 +708,29 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             "loss_center": float(loss_center.item()),
             "loss_total": float(loss.item()),
             "center_grad_mean_abs": grad_norm,
-            "encoder_grad_finite": enc_grad_ok,
-            "decoder_grad_finite": dec_grad_ok,
+            "base_grad_any": bool(base_grad_any),
+            "base_eval_mode": bool(not model.base.training),
+            "center_train_mode": bool(model.center_head.training),
+            "semantic_logits_max_abs_delta_after_step": sem_delta,
+            "bn_running_stats_max_abs_delta_after_step": bn_delta,
             "pos_weight": float(pw),
             "lambda_center": float(lambda_center),
+            "freeze_base": bool(freeze_base),
         }
+
+    if freeze_base:
+        if bool(last.get("base_grad_any", False)):
+            raise SystemExit("Freeze smoke test failed: base_grad_any=true")
+        if not bool(last.get("base_eval_mode", False)):
+            raise SystemExit("Freeze smoke test failed: base is not in eval mode")
+        if not bool(last.get("center_train_mode", False)):
+            raise SystemExit("Freeze smoke test failed: center_head is not in train mode")
+        if (last.get("semantic_logits_max_abs_delta_after_step") is None) or float(last["semantic_logits_max_abs_delta_after_step"]) != 0.0:
+            raise SystemExit(f"Freeze smoke test failed: semantic logits changed (delta={last.get('semantic_logits_max_abs_delta_after_step')})")
+        if (last.get("bn_running_stats_max_abs_delta_after_step") is None) or float(last["bn_running_stats_max_abs_delta_after_step"]) != 0.0:
+            raise SystemExit(f"Freeze smoke test failed: BatchNorm stats changed (delta={last.get('bn_running_stats_max_abs_delta_after_step')})")
+        if float(last.get("center_grad_mean_abs", 0.0)) <= 0.0:
+            raise SystemExit("Freeze smoke test failed: center grad is zero")
 
     model.eval()
     val_it = iter(val_loader)
@@ -475,8 +764,18 @@ def train(cfg: dict, device: torch.device) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    freeze_base = _freeze_base_enabled(cfg)
     train_loader, val_loader = _build_loaders(cfg, device=device)
     model = _build_model(cfg).to(device)
+    freeze_info = None
+    if freeze_base:
+        freeze_info = _apply_freeze_base(model)
+        print("=== FREEZE BASE ===")
+        print(f"total_params: {freeze_info['total_params']}")
+        print(f"trainable_params: {freeze_info['trainable_params']}")
+        print("trainable parameter groups:")
+        for n in freeze_info["trainable_names"]:
+            print(f"- {n}")
 
     num_classes = int(cfg["model"]["classes"])
     class_weights_cfg = (cfg.get("loss") or {}).get("ce_class_weights", None)
@@ -501,19 +800,25 @@ def train(cfg: dict, device: torch.device) -> None:
 
     base_lr = float((cfg.get("train") or {}).get("lr_backbone", cfg["train"]["lr"]))
     head_lr = float((cfg.get("train") or {}).get("lr_center_head", base_lr * 10.0))
-    params_base = []
-    params_head = []
-    for n, p in model.named_parameters():
-        if not p.requires_grad:
-            continue
-        if n.startswith("center_head.") or ".center_head." in n:
-            params_head.append(p)
-        else:
-            params_base.append(p)
-    optimizer = torch.optim.AdamW(
-        [{"params": params_base, "lr": base_lr}, {"params": params_head, "lr": head_lr}],
-        weight_decay=float(cfg["train"]["weight_decay"]),
-    )
+    if freeze_base:
+        optimizer = torch.optim.AdamW(
+            [{"params": list(model.center_head.parameters()), "lr": head_lr}],
+            weight_decay=float(cfg["train"]["weight_decay"]),
+        )
+    else:
+        params_base = []
+        params_head = []
+        for n, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if n.startswith("center_head.") or ".center_head." in n:
+                params_head.append(p)
+            else:
+                params_base.append(p)
+        optimizer = torch.optim.AdamW(
+            [{"params": params_base, "lr": base_lr}, {"params": params_head, "lr": head_lr}],
+            weight_decay=float(cfg["train"]["weight_decay"]),
+        )
 
     scheduler_cfg = cfg.get("scheduler") or {}
     scheduler = None
@@ -582,8 +887,72 @@ def train(cfg: dict, device: torch.device) -> None:
     best_epoch_instance = None
     no_improve = 0
 
+    center_thr = float((cfg.get("center") or {}).get("marker_thr", 0.3))
+    semantic_mean_fg0 = None
+
+    _set_train_modes(model, freeze_base=freeze_base)
+    val_metrics0 = validate_centerhead(
+        model=model,
+        loader=val_loader,
+        num_classes=num_classes,
+        device=device,
+        semantic_loss_fn=semantic_loss_fn,
+        center_loss_fn=center_loss_fn,
+        instance_root=instance_root,
+        center_thr=center_thr,
+    )
+    mean_fg0 = val_metrics0.get("mean_dice_fg", None)
+    semantic_mean_fg0 = float(mean_fg0) if mean_fg0 is not None else None
+    inst_score0 = _instance_score(val_metrics0)
+
+    with metrics_csv.open("a", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(
+            [
+                0,
+                "",
+                float(val_metrics0["semantic_loss"]),
+                float(val_metrics0["center_loss"]),
+                float(mean_fg0) if mean_fg0 is not None else "",
+                float(val_metrics0["dice"][1]) if isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 1 else "",
+                float(val_metrics0["dice"][2]) if isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 2 else "",
+                float(val_metrics0.get("center_f1")) if val_metrics0.get("center_f1") is not None else "",
+                float(val_metrics0.get("center_precision")) if val_metrics0.get("center_precision") is not None else "",
+                float(val_metrics0.get("center_recall")) if val_metrics0.get("center_recall") is not None else "",
+                float(val_metrics0.get("center_pos_frac")) if val_metrics0.get("center_pos_frac") is not None else "",
+                float(val_metrics0.get("center_pred_count_mean")) if val_metrics0.get("center_pred_count_mean") is not None else "",
+                float(val_metrics0.get("center_gt_count_mean")) if val_metrics0.get("center_gt_count_mean") is not None else "",
+                int(val_metrics0.get("center_zero_cases")) if val_metrics0.get("center_zero_cases") is not None else "",
+                int(val_metrics0.get("center_extra_cases")) if val_metrics0.get("center_extra_cases") is not None else "",
+                float(val_metrics0.get("center_loc_err_px")) if val_metrics0.get("center_loc_err_px") is not None else "",
+                float(val_metrics0.get("center_count_acc")) if val_metrics0.get("center_count_acc") is not None else "",
+                float(inst_score0) if inst_score0 is not None else "",
+                float(val_metrics0["instance_exact_count_acc"]),
+                float(val_metrics0["instance_mean_matched_iou"]),
+                float(val_metrics0.get("instance_median_matched_iou")) if val_metrics0.get("instance_median_matched_iou") is not None else "",
+                float(val_metrics0["instance_merged_rate"]),
+                float(val_metrics0["instance_fragmented_rate"]),
+                float(val_metrics0.get("instance_mixed_rate")) if val_metrics0.get("instance_mixed_rate") is not None else "",
+                float(val_metrics0.get("instance_perfect_rate")) if val_metrics0.get("instance_perfect_rate") is not None else "",
+                "" if freeze_base else float(optimizer.param_groups[0]["lr"]),
+                float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"]),
+            ]
+        )
+
+    if freeze_base:
+        _export_center_diagnostics(
+            out_dir,
+            model,
+            val_loader,
+            device,
+            instance_root=instance_root,
+            center_thr=center_thr,
+            tag="epoch0",
+            max_samples=20,
+        )
+
     for epoch in range(1, epochs + 1):
-        model.train()
+        _set_train_modes(model, freeze_base=freeze_base)
         running = 0.0
         n_batches = 0
         t0 = time.perf_counter()
@@ -600,7 +969,7 @@ def train(cfg: dict, device: torch.device) -> None:
                 center_logits = out["center"]
                 loss_sem = semantic_loss_fn(sem_logits, masks)
                 loss_center = center_loss_fn(center_logits, centers)
-                loss = loss_sem + float(lambda_center) * loss_center
+                loss = loss_center if freeze_base else (loss_sem + float(lambda_center) * loss_center)
 
             if amp_enabled:
                 scaler.scale(loss).backward()
@@ -624,15 +993,15 @@ def train(cfg: dict, device: torch.device) -> None:
             semantic_loss_fn=semantic_loss_fn,
             center_loss_fn=center_loss_fn,
             instance_root=instance_root,
-            center_thr=float((cfg.get("center") or {}).get("marker_thr", 0.3)),
+            center_thr=center_thr,
         )
 
         mean_fg = val_metrics.get("mean_dice_fg", None)
         center_f1 = val_metrics.get("center_f1", None)
         inst_score = _instance_score(val_metrics)
 
-        lr_backbone_now = float(optimizer.param_groups[0]["lr"])
-        lr_center_now = float(optimizer.param_groups[1]["lr"])
+        lr_backbone_now = 0.0 if freeze_base else float(optimizer.param_groups[0]["lr"])
+        lr_center_now = float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"])
 
         with metrics_csv.open("a", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
@@ -643,8 +1012,8 @@ def train(cfg: dict, device: torch.device) -> None:
                     float(val_metrics["semantic_loss"]),
                     float(val_metrics["center_loss"]),
                     float(mean_fg) if mean_fg is not None else "",
-                    float((val_metrics.get("dice") or {}).get("leaflet", "")) if isinstance(val_metrics.get("dice"), dict) else "",
-                    float((val_metrics.get("dice") or {}).get("fibrous_ring", "")) if isinstance(val_metrics.get("dice"), dict) else "",
+                    float(val_metrics["dice"][1]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 1 else "",
+                    float(val_metrics["dice"][2]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 2 else "",
                     float(center_f1) if center_f1 is not None else "",
                     float(val_metrics.get("center_precision")) if val_metrics.get("center_precision") is not None else "",
                     float(val_metrics.get("center_recall")) if val_metrics.get("center_recall") is not None else "",
@@ -663,15 +1032,20 @@ def train(cfg: dict, device: torch.device) -> None:
                     float(val_metrics["instance_fragmented_rate"]),
                     float(val_metrics.get("instance_mixed_rate")) if val_metrics.get("instance_mixed_rate") is not None else "",
                     float(val_metrics.get("instance_perfect_rate")) if val_metrics.get("instance_perfect_rate") is not None else "",
-                    lr_backbone_now,
+                    "" if freeze_base else lr_backbone_now,
                     lr_center_now,
                 ]
             )
 
+        if freeze_base and semantic_mean_fg0 is not None and mean_fg is not None:
+            dev = abs(float(mean_fg) - float(semantic_mean_fg0))
+            if float(dev) > 0.002:
+                raise SystemExit(f"Freeze stability check failed: |mean_fg - mean_fg0|={dev:.6f} > 0.002")
+
         _save_checkpoint(out_dir / "last.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics})
 
         improved = False
-        if mean_fg is not None and (best_mean_fg is None or float(mean_fg) > float(best_mean_fg)):
+        if (not freeze_base) and mean_fg is not None and (best_mean_fg is None or float(mean_fg) > float(best_mean_fg)):
             best_mean_fg = float(mean_fg)
             best_epoch_mean_fg = int(epoch)
             _save_checkpoint(out_dir / "best_mean_fg.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics})
@@ -680,13 +1054,48 @@ def train(cfg: dict, device: torch.device) -> None:
             best_center_f1 = float(center_f1)
             best_epoch_center = int(epoch)
             _save_checkpoint(out_dir / "best_center_f1.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics})
+            if freeze_base:
+                _export_center_diagnostics(
+                    out_dir,
+                    model,
+                    val_loader,
+                    device,
+                    instance_root=instance_root,
+                    center_thr=center_thr,
+                    tag="best_center_f1",
+                    max_samples=20,
+                )
             improved = True
         if inst_score is not None and (best_instance is None or float(inst_score) > float(best_instance)):
             best_instance = float(inst_score)
             best_epoch_instance = int(epoch)
             _save_checkpoint(out_dir / "best_instance_score.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics})
-            _export_val_visuals(out_dir, model, val_loader, device, max_samples=20)
+            if freeze_base:
+                _export_center_diagnostics(
+                    out_dir,
+                    model,
+                    val_loader,
+                    device,
+                    instance_root=instance_root,
+                    center_thr=center_thr,
+                    tag="best_instance_score",
+                    max_samples=20,
+                )
+            else:
+                _export_val_visuals(out_dir, model, val_loader, device, max_samples=20)
             improved = True
+
+        if freeze_base and int(epoch) in {5, 10, 15, 20}:
+            _export_center_diagnostics(
+                out_dir,
+                model,
+                val_loader,
+                device,
+                instance_root=instance_root,
+                center_thr=center_thr,
+                tag=f"epoch{epoch}",
+                max_samples=20,
+            )
 
         if scheduler is not None:
             monitor_key = str((scheduler_cfg or {}).get("monitor", early_monitor))
@@ -713,11 +1122,18 @@ def train(cfg: dict, device: torch.device) -> None:
                 no_improve += 1
 
         dt = time.perf_counter() - t0
-        print(
-            f"epoch={epoch} time={dt:.1f}s train_loss={train_loss:.6f} "
-            f"mean_fg={mean_fg} center_f1={center_f1} instance_score={inst_score} "
-            f"lr_backbone={lr_backbone_now:.2e} lr_center={lr_center_now:.2e}"
-        )
+        if freeze_base:
+            print(
+                f"epoch={epoch} time={dt:.1f}s train_center_loss={train_loss:.6f} "
+                f"mean_fg={mean_fg} center_f1={center_f1} instance_score={inst_score} "
+                f"lr_center={lr_center_now:.2e}"
+            )
+        else:
+            print(
+                f"epoch={epoch} time={dt:.1f}s train_loss={train_loss:.6f} "
+                f"mean_fg={mean_fg} center_f1={center_f1} instance_score={inst_score} "
+                f"lr_backbone={lr_backbone_now:.2e} lr_center={lr_center_now:.2e}"
+            )
 
         if no_improve >= int(early_patience):
             print(f"Early stopping: no improvement for {no_improve} epochs (monitor={early_monitor})")

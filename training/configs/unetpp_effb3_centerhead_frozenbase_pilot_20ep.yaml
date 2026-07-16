@@ -1,0 +1,69 @@
+seed: 1337
+
+dataset:
+  root: datasets/converted_leaflet_distance
+  train_txt: datasets/converted_leaflet_distance/train.txt
+  val_txt: datasets/converted_leaflet_distance/val.txt
+  test_txt: datasets/converted_leaflet_distance/test.txt
+  instance_root: datasets/converted_leaflet_instances
+
+model:
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+
+loss:
+  ce_class_weights:
+    - 0.2
+    - 1.0
+    - 2.5
+  ce_coef: 0.3
+  dice_coef: 0.7
+
+center:
+  lambda: 1.0
+  marker_thr: 0.3
+  pos_weight: 1000.0
+  pos_weight_thr: 0.5
+  pos_weight_max: 1000.0
+
+augment:
+  rotate90: true
+  hflip: true
+  vflip: true
+  brightness_contrast: true
+  gamma: true
+
+scheduler:
+  type: reduce_on_plateau
+  monitor: instance_score
+  mode: max
+  factor: 0.5
+  patience: 8
+  min_lr: 0.000001
+
+early_stopping:
+  monitor: instance_score
+  mode: max
+  patience: 20
+
+train:
+  save_dir: training/runs/unetpp_effb3_centerhead_frozenbase_pilot_20ep
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth
+  epochs: 20
+  batch_size: 8
+  lr: 0.0001
+  lr_backbone: 0.00001
+  lr_center_head: 0.0001
+  weight_decay: 0.00001
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  amp: true
+  log_every: 10
+  smoke_steps: 2
+  freeze_base: true
+

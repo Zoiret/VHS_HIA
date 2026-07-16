@@ -23,6 +23,7 @@ class UnetPlusPlusSemanticCenterHead(torch.nn.Module):
             raise RuntimeError("Unet++ decoder out_channels not found")
 
         self.center_head = SegmentationHead(in_channels=int(out_channels[-1]), out_channels=1, activation=None, kernel_size=3)
+        self.freeze_base = False
 
     @property
     def encoder(self):
@@ -37,10 +38,17 @@ class UnetPlusPlusSemanticCenterHead(torch.nn.Module):
         return self.base.segmentation_head
 
     def forward(self, x: torch.Tensor) -> dict:
-        features = self.encoder(x)
-        decoder_output = self.decoder(features)
-        semantic = self.segmentation_head(decoder_output)
-        center = self.center_head(decoder_output)
+        if bool(getattr(self, "freeze_base", False)):
+            with torch.no_grad():
+                features = self.encoder(x)
+                decoder_output = self.decoder(features)
+                semantic = self.segmentation_head(decoder_output)
+            center = self.center_head(decoder_output.detach())
+        else:
+            features = self.encoder(x)
+            decoder_output = self.decoder(features)
+            semantic = self.segmentation_head(decoder_output)
+            center = self.center_head(decoder_output)
         return {"semantic": semantic, "center": center}
 
 
