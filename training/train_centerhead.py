@@ -283,6 +283,15 @@ def _collect_batchnorm_stats(model: torch.nn.Module) -> list[tuple[str, torch.Te
     return out
 
 
+def _grad_l2_norm(params: list[torch.nn.Parameter]) -> float:
+    s = 0.0
+    for p in params:
+        if p.grad is None:
+            continue
+        s += float(torch.sum(p.grad.detach().float() ** 2).item())
+    return float(np.sqrt(max(s, 0.0)))
+
+
 def _max_bn_delta(model: torch.nn.Module, ref: list[tuple[str, torch.Tensor, torch.Tensor]]) -> float:
     max_d = 0.0
     for name, rm0, rv0 in ref:
@@ -311,6 +320,20 @@ def _save_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.
         },
         str(path),
     )
+
+
+def _center_head_output_bias(model: torch.nn.Module) -> float | None:
+    layer = model.center_head_output_layer()
+    if layer is None or not hasattr(layer, "bias") or layer.bias is None:
+        return None
+    return float(layer.bias.detach().mean().item())
+
+
+def _center_head_weight_norm(model: torch.nn.Module) -> float | None:
+    layer = model.center_head_output_layer()
+    if layer is None or not hasattr(layer, "weight") or layer.weight is None:
+        return None
+    return float(layer.weight.detach().float().norm().item())
 
 
 def _instance_score(metrics: dict) -> float | None:
@@ -517,6 +540,8 @@ def _export_center_diagnostics(
             img_u8 = (imgs[i] * 255.0 + 0.5).astype(np.uint8)
             gt_center_u16 = (np.clip(gt_center[i, 0], 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
             pr_center_u16 = (np.clip(ctr_prob[i, 0], 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
+            thr_u8_001 = (ctr_prob[i, 0] >= 0.01).astype(np.uint8) * 255
+            thr_u8_003 = (ctr_prob[i, 0] >= 0.03).astype(np.uint8) * 255
             thr_u8_01 = (ctr_prob[i, 0] >= 0.1).astype(np.uint8) * 255
             thr_u8_03 = (ctr_prob[i, 0] >= 0.3).astype(np.uint8) * 255
 
@@ -526,13 +551,6 @@ def _export_center_diagnostics(
 
             mp = meta_paths[i] if i < len(meta_paths) else None
             gt_pts = _extract_metadata_centers(str(mp)) if isinstance(mp, str) and mp else []
-
-            if int(len(pred_pts)) == 0:
-                center_bucket = "zero_centers"
-            elif int(len(pred_pts)) == int(len(gt_pts)):
-                center_bucket = "correct_center_count"
-            else:
-                center_bucket = "extra_centers"
 
             gt_inst_path = (instance_root / "instance_masks" / f"{sid}.png").resolve()
             gt_inst_src = cv2.imread(str(gt_inst_path), cv2.IMREAD_UNCHANGED)
@@ -579,17 +597,28 @@ def _export_center_diagnostics(
             case = _case_type(gt_k, int(pred_k))
             inst_bucket = str(case)
             if inst_bucket == "correct":
-                inst_bucket = "correct_instances"
-            if inst_bucket not in {"merged", "fragmented", "mixed", "correct_instances"}:
-                inst_bucket = "correct_instances"
+                inst_bucket = "correct"
+            if inst_bucket not in {"merged", "fragmented", "mixed", "correct"}:
+                inst_bucket = "correct"
 
-            sd_center = (out_root / center_bucket / sid).resolve()
-            sd_inst = (out_root / inst_bucket / sid).resolve()
-            for sd in [sd_center, sd_inst]:
+            buckets = [inst_bucket]
+            if int(len(pred_pts)) == 0:
+                buckets.append("zero_centers")
+            if int(len(pred_pts)) > int(len(gt_pts)):
+                buckets.append("extra_centers")
+            if int(len(pred_pts)) != int(len(gt_pts)):
+                buckets.append("incorrect_count")
+            else:
+                buckets.append("correct")
+
+            for bucket in sorted(set(buckets)):
+                sd = (out_root / bucket / sid).resolve()
                 sd.mkdir(parents=True, exist_ok=True)
                 cv2.imwrite(str(sd / "original.png"), cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR))
                 cv2.imwrite(str(sd / "gt_center.png"), gt_center_u16)
                 cv2.imwrite(str(sd / "pred_center_prob.png"), pr_center_u16)
+                cv2.imwrite(str(sd / "thresholded_0p01.png"), thr_u8_001)
+                cv2.imwrite(str(sd / "thresholded_0p03.png"), thr_u8_003)
                 cv2.imwrite(str(sd / "thresholded_0p1.png"), thr_u8_01)
                 cv2.imwrite(str(sd / "thresholded_0p3.png"), thr_u8_03)
 
@@ -676,16 +705,30 @@ def _threshold_sweep(
             "center_recall": m.get("center_recall"),
             "center_f1": m.get("center_f1"),
             "center_count_acc": m.get("center_count_acc"),
+            "center_loc_err_px": m.get("center_loc_err_px"),
             "center_zero_cases": m.get("center_zero_cases"),
             "center_extra_cases": m.get("center_extra_cases"),
             "instance_exact_count_acc": m.get("instance_exact_count_acc"),
+            "instance_merged_rate": m.get("instance_merged_rate"),
+            "instance_fragmented_rate": m.get("instance_fragmented_rate"),
             "instance_mean_matched_iou": m.get("instance_mean_matched_iou"),
+            "instance_perfect_rate": m.get("instance_perfect_rate"),
             "instance_score": float(inst_score) if inst_score is not None else None,
         }
         rows.append(row)
-        if best is None or float(row.get("center_f1") or 0.0) > float(best.get("center_f1") or 0.0):
-            best = row
-    return {"rows": rows, "best": best}
+    def _pick_best(key: str) -> dict | None:
+        best_row = None
+        for r in rows:
+            if best_row is None or float(r.get(key) or 0.0) > float(best_row.get(key) or 0.0):
+                best_row = r
+        return best_row
+    return {
+        "rows": rows,
+        "best": _pick_best("center_f1"),
+        "best_center_f1": _pick_best("center_f1"),
+        "best_center_count_acc": _pick_best("center_count_acc"),
+        "best_instance_score": _pick_best("instance_score"),
+    }
 
 
 def _maybe_run_threshold_sweep(
@@ -700,13 +743,13 @@ def _maybe_run_threshold_sweep(
     semantic_loss_fn: torch.nn.Module,
     center_loss_fn: torch.nn.Module,
     instance_root: Path,
-) -> None:
+) -> dict | None:
     loss_cfg = cfg.get("center_loss") or {}
     if not isinstance(loss_cfg, dict):
-        return
+        return None
     thr_list = loss_cfg.get("threshold_sweep", None)
     if not isinstance(thr_list, list) or not thr_list:
-        return
+        return None
     thresholds = [float(x) for x in thr_list]
     res = _threshold_sweep(
         model=model,
@@ -721,6 +764,7 @@ def _maybe_run_threshold_sweep(
     out_p = (out_dir / "threshold_sweeps").resolve()
     out_p.mkdir(parents=True, exist_ok=True)
     (out_p / f"{tag}.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+    return res
 
 
 def smoke_test(cfg: dict, device: torch.device) -> dict:
@@ -1089,6 +1133,19 @@ def train(cfg: dict, device: torch.device) -> None:
                     "center_prob_mean_near",
                     "center_prob_mean_far",
                     "center_prob_mean_max",
+                    "sweep_best_threshold_center_f1",
+                    "sweep_best_center_f1",
+                    "sweep_best_threshold_center_count_acc",
+                    "sweep_best_center_count_acc",
+                    "sweep_best_threshold_instance_score",
+                    "sweep_best_instance_score",
+                    "sweep_best_instance_mean_matched_iou",
+                    "train_grad_norm_mean_before_clip",
+                    "train_grad_norm_max_before_clip",
+                    "train_batches_clipped_pct",
+                    "train_grad_norm_mean_after_clip",
+                    "center_head_weight_norm",
+                    "center_head_output_bias",
                     "lr_backbone",
                     "lr_center_head",
                 ]
@@ -1098,9 +1155,11 @@ def train(cfg: dict, device: torch.device) -> None:
 
     best_mean_fg = None
     best_center_f1 = None
+    best_center_count_acc = None
     best_instance = None
     best_epoch_mean_fg = None
     best_epoch_center = None
+    best_epoch_center_count_acc = None
     best_epoch_instance = None
     no_improve = 0
 
@@ -1121,6 +1180,21 @@ def train(cfg: dict, device: torch.device) -> None:
     mean_fg0 = val_metrics0.get("mean_dice_fg", None)
     semantic_mean_fg0 = float(mean_fg0) if mean_fg0 is not None else None
     inst_score0 = _instance_score(val_metrics0)
+    sweep0 = _maybe_run_threshold_sweep(
+        cfg,
+        out_dir=out_dir,
+        tag="epoch0",
+        model=model,
+        val_loader=val_loader,
+        num_classes=num_classes,
+        device=device,
+        semantic_loss_fn=semantic_loss_fn,
+        center_loss_fn=center_loss_fn,
+        instance_root=instance_root,
+    ) if freeze_base else None
+    sweep0_center = (sweep0 or {}).get("best_center_f1") if isinstance(sweep0, dict) else None
+    sweep0_count = (sweep0 or {}).get("best_center_count_acc") if isinstance(sweep0, dict) else None
+    sweep0_inst = (sweep0 or {}).get("best_instance_score") if isinstance(sweep0, dict) else None
 
     with metrics_csv.open("a", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
@@ -1155,6 +1229,19 @@ def train(cfg: dict, device: torch.device) -> None:
                 float(val_metrics0.get("center_prob_mean_near")) if val_metrics0.get("center_prob_mean_near") is not None else "",
                 float(val_metrics0.get("center_prob_mean_far")) if val_metrics0.get("center_prob_mean_far") is not None else "",
                 float(val_metrics0.get("center_prob_mean_max")) if val_metrics0.get("center_prob_mean_max") is not None else "",
+                float(sweep0_center.get("threshold")) if isinstance(sweep0_center, dict) and sweep0_center.get("threshold") is not None else "",
+                float(sweep0_center.get("center_f1")) if isinstance(sweep0_center, dict) and sweep0_center.get("center_f1") is not None else "",
+                float(sweep0_count.get("threshold")) if isinstance(sweep0_count, dict) and sweep0_count.get("threshold") is not None else "",
+                float(sweep0_count.get("center_count_acc")) if isinstance(sweep0_count, dict) and sweep0_count.get("center_count_acc") is not None else "",
+                float(sweep0_inst.get("threshold")) if isinstance(sweep0_inst, dict) and sweep0_inst.get("threshold") is not None else "",
+                float(sweep0_inst.get("instance_score")) if isinstance(sweep0_inst, dict) and sweep0_inst.get("instance_score") is not None else "",
+                float(sweep0_inst.get("instance_mean_matched_iou")) if isinstance(sweep0_inst, dict) and sweep0_inst.get("instance_mean_matched_iou") is not None else "",
+                "",
+                "",
+                "",
+                "",
+                float(_center_head_weight_norm(model)) if _center_head_weight_norm(model) is not None else "",
+                float(_center_head_output_bias(model)) if _center_head_output_bias(model) is not None else "",
                 "" if freeze_base else float(optimizer.param_groups[0]["lr"]),
                 float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"]),
             ]
@@ -1167,29 +1254,24 @@ def train(cfg: dict, device: torch.device) -> None:
             val_loader,
             device,
             instance_root=instance_root,
-            center_thr=center_thr,
+            center_thr=float(sweep0_center.get("threshold")) if isinstance(sweep0_center, dict) and sweep0_center.get("threshold") is not None else center_thr,
             tag="epoch0",
             max_samples=20,
         )
-        _maybe_run_threshold_sweep(
-            cfg,
-            out_dir=out_dir,
-            tag="epoch0",
-            model=model,
-            val_loader=val_loader,
-            num_classes=num_classes,
-            device=device,
-            semantic_loss_fn=semantic_loss_fn,
-            center_loss_fn=center_loss_fn,
-            instance_root=instance_root,
-        )
+        (out_dir / "epoch0_metrics.json").write_text(json.dumps({"val_metrics": val_metrics0, "instance_score": inst_score0, "threshold_sweep": sweep0}, ensure_ascii=False, indent=2), encoding="utf-8")
 
     for epoch in range(1, epochs + 1):
         _set_train_modes(model, freeze_base=freeze_base)
         running = 0.0
         n_batches = 0
+        grad_norm_before_sum = 0.0
+        grad_norm_before_max = 0.0
+        grad_norm_after_sum = 0.0
+        clipped_batches = 0
         t0 = time.perf_counter()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", unit="batch")
+        center_params = list(model.center_head.parameters())
+        clip_norm = float((cfg.get("train") or {}).get("center_grad_clip_norm", 0.0) or 0.0)
         for bi, batch in enumerate(pbar, start=1):
             images = batch["image"].to(device, non_blocking=True)
             masks = batch["mask"].to(device, non_blocking=True)
@@ -1206,10 +1288,29 @@ def train(cfg: dict, device: torch.device) -> None:
 
             if amp_enabled:
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                grad_before = _grad_l2_norm(center_params)
+                grad_norm_before_sum += float(grad_before)
+                grad_norm_before_max = max(float(grad_norm_before_max), float(grad_before))
+                if float(clip_norm) > 0.0:
+                    if float(grad_before) > float(clip_norm):
+                        clipped_batches += 1
+                    torch.nn.utils.clip_grad_norm_(center_params, max_norm=float(clip_norm))
+                grad_after = _grad_l2_norm(center_params)
+                grad_norm_after_sum += float(grad_after)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
+                grad_before = _grad_l2_norm(center_params)
+                grad_norm_before_sum += float(grad_before)
+                grad_norm_before_max = max(float(grad_norm_before_max), float(grad_before))
+                if float(clip_norm) > 0.0:
+                    if float(grad_before) > float(clip_norm):
+                        clipped_batches += 1
+                    torch.nn.utils.clip_grad_norm_(center_params, max_norm=float(clip_norm))
+                grad_after = _grad_l2_norm(center_params)
+                grad_norm_after_sum += float(grad_after)
                 optimizer.step()
 
             running += float(loss.item())
@@ -1232,9 +1333,32 @@ def train(cfg: dict, device: torch.device) -> None:
         mean_fg = val_metrics.get("mean_dice_fg", None)
         center_f1 = val_metrics.get("center_f1", None)
         inst_score = _instance_score(val_metrics)
+        sweep_res = _maybe_run_threshold_sweep(
+            cfg,
+            out_dir=out_dir,
+            tag=f"epoch{epoch}",
+            model=model,
+            val_loader=val_loader,
+            num_classes=num_classes,
+            device=device,
+            semantic_loss_fn=semantic_loss_fn,
+            center_loss_fn=center_loss_fn,
+            instance_root=instance_root,
+        ) if freeze_base else None
+        sweep_best_center = (sweep_res or {}).get("best_center_f1") if isinstance(sweep_res, dict) else None
+        sweep_best_count = (sweep_res or {}).get("best_center_count_acc") if isinstance(sweep_res, dict) else None
+        sweep_best_inst = (sweep_res or {}).get("best_instance_score") if isinstance(sweep_res, dict) else None
+        center_f1_for_ckpt = float(sweep_best_center.get("center_f1")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("center_f1") is not None else (float(center_f1) if center_f1 is not None else None)
+        center_count_acc_for_ckpt = float(sweep_best_count.get("center_count_acc")) if isinstance(sweep_best_count, dict) and sweep_best_count.get("center_count_acc") is not None else (float(val_metrics.get("center_count_acc")) if val_metrics.get("center_count_acc") is not None else None)
+        inst_score_for_ckpt = float(sweep_best_inst.get("instance_score")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_score") is not None else (float(inst_score) if inst_score is not None else None)
 
         lr_backbone_now = 0.0 if freeze_base else float(optimizer.param_groups[0]["lr"])
         lr_center_now = float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"])
+        grad_norm_mean_before = float(grad_norm_before_sum / max(n_batches, 1))
+        grad_norm_mean_after = float(grad_norm_after_sum / max(n_batches, 1))
+        clipped_pct = float(100.0 * float(clipped_batches) / float(max(n_batches, 1)))
+        center_w_norm = _center_head_weight_norm(model)
+        center_bias = _center_head_output_bias(model)
 
         with metrics_csv.open("a", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
@@ -1269,6 +1393,19 @@ def train(cfg: dict, device: torch.device) -> None:
                     float(val_metrics.get("center_prob_mean_near")) if val_metrics.get("center_prob_mean_near") is not None else "",
                     float(val_metrics.get("center_prob_mean_far")) if val_metrics.get("center_prob_mean_far") is not None else "",
                     float(val_metrics.get("center_prob_mean_max")) if val_metrics.get("center_prob_mean_max") is not None else "",
+                    float(sweep_best_center.get("threshold")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("threshold") is not None else "",
+                    float(sweep_best_center.get("center_f1")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("center_f1") is not None else "",
+                    float(sweep_best_count.get("threshold")) if isinstance(sweep_best_count, dict) and sweep_best_count.get("threshold") is not None else "",
+                    float(sweep_best_count.get("center_count_acc")) if isinstance(sweep_best_count, dict) and sweep_best_count.get("center_count_acc") is not None else "",
+                    float(sweep_best_inst.get("threshold")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("threshold") is not None else "",
+                    float(sweep_best_inst.get("instance_score")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_score") is not None else "",
+                    float(sweep_best_inst.get("instance_mean_matched_iou")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_mean_matched_iou") is not None else "",
+                    grad_norm_mean_before,
+                    grad_norm_before_max,
+                    clipped_pct,
+                    grad_norm_mean_after,
+                    float(center_w_norm) if center_w_norm is not None else "",
+                    float(center_bias) if center_bias is not None else "",
                     "" if freeze_base else lr_backbone_now,
                     lr_center_now,
                 ]
@@ -1279,7 +1416,7 @@ def train(cfg: dict, device: torch.device) -> None:
             if float(dev) > 0.002:
                 raise SystemExit(f"Freeze stability check failed: |mean_fg - mean_fg0|={dev:.6f} > 0.002")
 
-        _save_checkpoint(out_dir / "last.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics})
+        _save_checkpoint(out_dir / "last.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics, "threshold_sweep": sweep_res})
 
         improved = False
         if (not freeze_base) and mean_fg is not None and (best_mean_fg is None or float(mean_fg) > float(best_mean_fg)):
@@ -1287,10 +1424,10 @@ def train(cfg: dict, device: torch.device) -> None:
             best_epoch_mean_fg = int(epoch)
             _save_checkpoint(out_dir / "best_mean_fg.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics})
             improved = True
-        if center_f1 is not None and (best_center_f1 is None or float(center_f1) > float(best_center_f1)):
-            best_center_f1 = float(center_f1)
+        if center_f1_for_ckpt is not None and (best_center_f1 is None or float(center_f1_for_ckpt) > float(best_center_f1)):
+            best_center_f1 = float(center_f1_for_ckpt)
             best_epoch_center = int(epoch)
-            _save_checkpoint(out_dir / "best_center_f1.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics})
+            _save_checkpoint(out_dir / "best_center_f1.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics, "threshold_sweep": sweep_res, "best_threshold_metrics": sweep_best_center})
             if freeze_base:
                 _export_center_diagnostics(
                     out_dir,
@@ -1298,27 +1435,20 @@ def train(cfg: dict, device: torch.device) -> None:
                     val_loader,
                     device,
                     instance_root=instance_root,
-                    center_thr=center_thr,
+                    center_thr=float(sweep_best_center.get("threshold")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("threshold") is not None else center_thr,
                     tag="best_center_f1",
                     max_samples=20,
-                )
-                _maybe_run_threshold_sweep(
-                    cfg,
-                    out_dir=out_dir,
-                    tag="best_center_f1",
-                    model=model,
-                    val_loader=val_loader,
-                    num_classes=num_classes,
-                    device=device,
-                    semantic_loss_fn=semantic_loss_fn,
-                    center_loss_fn=center_loss_fn,
-                    instance_root=instance_root,
                 )
             improved = True
-        if inst_score is not None and (best_instance is None or float(inst_score) > float(best_instance)):
-            best_instance = float(inst_score)
+        if center_count_acc_for_ckpt is not None and (best_center_count_acc is None or float(center_count_acc_for_ckpt) > float(best_center_count_acc)):
+            best_center_count_acc = float(center_count_acc_for_ckpt)
+            best_epoch_center_count_acc = int(epoch)
+            _save_checkpoint(out_dir / "best_center_count_acc.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics, "threshold_sweep": sweep_res, "best_threshold_metrics": sweep_best_count})
+            improved = True
+        if inst_score_for_ckpt is not None and (best_instance is None or float(inst_score_for_ckpt) > float(best_instance)):
+            best_instance = float(inst_score_for_ckpt)
             best_epoch_instance = int(epoch)
-            _save_checkpoint(out_dir / "best_instance_score.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics})
+            _save_checkpoint(out_dir / "best_instance_score.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics, "threshold_sweep": sweep_res, "best_threshold_metrics": sweep_best_inst})
             if freeze_base:
                 _export_center_diagnostics(
                     out_dir,
@@ -1326,48 +1456,24 @@ def train(cfg: dict, device: torch.device) -> None:
                     val_loader,
                     device,
                     instance_root=instance_root,
-                    center_thr=center_thr,
+                    center_thr=float(sweep_best_inst.get("threshold")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("threshold") is not None else center_thr,
                     tag="best_instance_score",
                     max_samples=20,
-                )
-                _maybe_run_threshold_sweep(
-                    cfg,
-                    out_dir=out_dir,
-                    tag="best_instance_score",
-                    model=model,
-                    val_loader=val_loader,
-                    num_classes=num_classes,
-                    device=device,
-                    semantic_loss_fn=semantic_loss_fn,
-                    center_loss_fn=center_loss_fn,
-                    instance_root=instance_root,
                 )
             else:
                 _export_val_visuals(out_dir, model, val_loader, device, max_samples=20)
             improved = True
 
-        if freeze_base and int(epoch) in {5, 10, 15, 20}:
+        if freeze_base and int(epoch) in {1, 5, 10, 15, 20}:
             _export_center_diagnostics(
                 out_dir,
                 model,
                 val_loader,
                 device,
                 instance_root=instance_root,
-                center_thr=center_thr,
+                center_thr=float(sweep_best_center.get("threshold")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("threshold") is not None else center_thr,
                 tag=f"epoch{epoch}",
                 max_samples=20,
-            )
-            _maybe_run_threshold_sweep(
-                cfg,
-                out_dir=out_dir,
-                tag=f"epoch{epoch}",
-                model=model,
-                val_loader=val_loader,
-                num_classes=num_classes,
-                device=device,
-                semantic_loss_fn=semantic_loss_fn,
-                center_loss_fn=center_loss_fn,
-                instance_root=instance_root,
             )
 
         if scheduler is not None:
@@ -1398,7 +1504,8 @@ def train(cfg: dict, device: torch.device) -> None:
         if freeze_base:
             print(
                 f"epoch={epoch} time={dt:.1f}s train_center_loss={train_loss:.6f} "
-                f"mean_fg={mean_fg} center_f1={center_f1} instance_score={inst_score} "
+                f"mean_fg={mean_fg} center_f1={center_f1_for_ckpt} instance_score={inst_score_for_ckpt} "
+                f"grad_mean={grad_norm_mean_before:.4f} grad_max={grad_norm_before_max:.4f} clipped={clipped_pct:.1f}% "
                 f"lr_center={lr_center_now:.2e}"
             )
         else:
@@ -1419,6 +1526,8 @@ def train(cfg: dict, device: torch.device) -> None:
                 "best_epoch_mean_fg": best_epoch_mean_fg,
                 "best_center_f1": best_center_f1,
                 "best_epoch_center_f1": best_epoch_center,
+                "best_center_count_acc": best_center_count_acc,
+                "best_epoch_center_count_acc": best_epoch_center_count_acc,
                 "best_instance_score": best_instance,
                 "best_epoch_instance_score": best_epoch_instance,
                 "center_loss": center_loss_info,
