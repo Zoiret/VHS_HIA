@@ -170,11 +170,13 @@ def _build_model(cfg: dict) -> torch.nn.Module:
     encoder = cfg["model"].get("encoder") or cfg["model"].get("encoder_name")
     if not encoder:
         raise SystemExit("Config: model.encoder_name is required")
+    center_head_type = str((cfg.get("model") or {}).get("center_head_type", "linear_1x1")).strip().lower() or "linear_1x1"
     model = UnetPlusPlusSemanticCenterHead(
         encoder_name=str(encoder),
         encoder_weights=cfg["model"].get("encoder_weights", None),
         in_channels=int(cfg["model"]["in_channels"]),
         classes=int(cfg["model"]["classes"]),
+        center_head_type=center_head_type,
     )
 
     init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
@@ -192,21 +194,18 @@ def _build_model(cfg: dict) -> torch.nn.Module:
             print(f"- {k}")
         if len(unexpected) > 50:
             print(f"... ({len(unexpected) - 50} more)")
-        center_missing = {"center_head.0.weight", "center_head.0.bias"}
-        center_from_scratch = bool(center_missing.issubset(set(missing)))
+        center_missing_prefix = "center_head."
+        center_missing = [k for k in missing if str(k).startswith(center_missing_prefix)]
+        center_from_scratch = bool(len(center_missing) > 0)
 
     init_bias = (cfg.get("model") or {}).get("center_head_init_bias", None)
     applied_bias = None
     applied_sigmoid = None
     if init_bias is not None and bool(center_from_scratch):
         b = float(init_bias)
-        layer0 = None
-        try:
-            layer0 = model.center_head[0]
-        except Exception:
-            layer0 = None
+        layer0 = model.center_head_output_layer()
         if layer0 is None or not hasattr(layer0, "bias") or layer0.bias is None:
-            raise RuntimeError("center_head[0].bias not found for center_head_init_bias")
+            raise RuntimeError("center head output bias not found for center_head_init_bias")
         with torch.no_grad():
             layer0.bias.fill_(b)
         applied_bias = float(b)

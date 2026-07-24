@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,11 +16,10 @@ from torch.utils.data import DataLoader
 from augmentations import get_val_augmentations
 from dataset import read_split_file
 from dataset_centerhead import SegmentationWithCenterDataset
-from losses import CenterNetFocalHeatmapLoss, CombinedCrossEntropyDiceLoss
+from losses import CenterNetFocalHeatmapLoss
 from models_centerhead import UnetPlusPlusSemanticCenterHead, load_semantic_checkpoint_non_strict
 from validate_centerhead import (
     _best_perm_sum,
-    _case_type,
     _connected_components,
     _extract_metadata_centers,
     _fallback_marker,
@@ -61,12 +61,9 @@ def _make_device(device: str) -> torch.device:
 
 
 def _center_bias_init(model: UnetPlusPlusSemanticCenterHead, bias: float) -> None:
-    try:
-        layer0 = model.center_head[0]
-    except Exception:
-        layer0 = None
+    layer0 = model.center_head_output_layer()
     if layer0 is None or not hasattr(layer0, "bias") or layer0.bias is None:
-        raise RuntimeError("center_head[0].bias not found for bias init")
+        raise RuntimeError("center head output bias not found for bias init")
     with torch.no_grad():
         layer0.bias.fill_(float(bias))
 
@@ -139,37 +136,30 @@ class Microset:
     distribution: dict[int, int]
 
 
-def _select_microset(dataset_root: Path, train_txt: Path, out_dir: Path) -> Microset:
-    items = read_split_file(dataset_root, train_txt)
-    by_k: dict[int, list[str]] = {1: [], 2: [], 3: []}
+def _load_existing_microset(dataset_root: Path, microset_txt: Path, out_dir: Path) -> Microset:
+    src = microset_txt.resolve()
+    if not src.exists():
+        raise SystemExit(f"Microset file not found: {src}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dst = (out_dir / "microset.txt").resolve()
+    shutil.copyfile(str(src), str(dst))
+
+    items = read_split_file(dataset_root, dst)
+    samples = []
+    dist: dict[int, int] = {1: 0, 2: 0, 3: 0}
     for it in items:
         sid = Path(it.image_path).stem
+        samples.append(sid)
         meta = (dataset_root / "metadata" / f"{sid}.json").resolve()
         if not meta.exists():
-            continue
+            raise SystemExit(f"Metadata not found for microset sample: {sid}")
         obj = json.loads(meta.read_text(encoding="utf-8"))
         k = int(obj.get("instance_count", 0) or 0)
-        if k in by_k:
-            by_k[k].append(sid)
-    for k in by_k:
-        by_k[k] = sorted(set(by_k[k]))
-    sel = []
-    for k in [1, 2, 3]:
-        if len(by_k[k]) < 2:
-            raise SystemExit(f"Not enough train samples for instance_count={k}: {len(by_k[k])}")
-        sel.extend(by_k[k][:2])
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_txt = (out_dir / "microset.txt").resolve()
-    lines = []
-    for sid in sel:
-        img_rel = f"images/{sid}.png"
-        mask_rel = f"semantic_masks/{sid}.png"
-        lines.append(f"{img_rel}\t{mask_rel}")
-    out_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    dist = {1: 2, 2: 2, 3: 2}
-    return Microset(split_txt=out_txt, samples=sel, distribution=dist)
+        if k in dist:
+            dist[k] += 1
+    if len(samples) != 6:
+        raise SystemExit(f"Expected exactly 6 microset samples, got {len(samples)}")
+    return Microset(split_txt=dst, samples=samples, distribution=dist)
 
 
 def _safe_sigmoid(x: float) -> float:
@@ -190,6 +180,71 @@ def _params_finite(params: list[torch.Tensor]) -> bool:
         if not bool(torch.isfinite(p.detach()).all().item()):
             return False
     return True
+
+
+def _count_center_head_batchnorms(model: UnetPlusPlusSemanticCenterHead) -> int:
+    n = 0
+    for m in model.center_head.modules():
+        if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
+            n += 1
+    return int(n)
+
+
+def _copy_bn_stats(model: torch.nn.Module) -> list[tuple[str, torch.Tensor, torch.Tensor]]:
+    out = []
+    for name, m in model.named_modules():
+        rm = getattr(m, "running_mean", None)
+        rv = getattr(m, "running_var", None)
+        if rm is None or rv is None:
+            continue
+        if not torch.is_tensor(rm) or not torch.is_tensor(rv):
+            continue
+        out.append((name, rm.detach().clone(), rv.detach().clone()))
+    return out
+
+
+def _max_bn_delta(model: torch.nn.Module, ref: list[tuple[str, torch.Tensor, torch.Tensor]]) -> float:
+    max_d = 0.0
+    mods = dict(model.named_modules())
+    for name, rm0, rv0 in ref:
+        m = mods.get(name, None)
+        if m is None:
+            continue
+        rm = getattr(m, "running_mean", None)
+        rv = getattr(m, "running_var", None)
+        if rm is None or rv is None:
+            continue
+        d1 = float((rm.detach() - rm0).abs().max().item()) if rm.numel() else 0.0
+        d2 = float((rv.detach() - rv0).abs().max().item()) if rv.numel() else 0.0
+        max_d = max(max_d, d1, d2)
+    return float(max_d)
+
+
+def _center_head_output_bias(model: UnetPlusPlusSemanticCenterHead) -> float | None:
+    layer = model.center_head_output_layer()
+    if layer is None or not hasattr(layer, "bias") or layer.bias is None:
+        return None
+    return float(layer.bias.detach().mean().item())
+
+
+def _center_head_weight_norm(model: UnetPlusPlusSemanticCenterHead) -> float | None:
+    layer = model.center_head_output_layer()
+    if layer is None or not hasattr(layer, "weight") or layer.weight is None:
+        return None
+    return float(layer.weight.detach().float().norm().item())
+
+
+def _save_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer, step: int, extra: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "step": int(step),
+            "extra": extra,
+        },
+        str(path),
+    )
 
 
 def _threshold_sweep_on_microset(
@@ -422,6 +477,8 @@ def _export_visuals(
                 cv2.imwrite(str(sd / "gt_center.png"), gt_u16)
                 cv2.imwrite(str(sd / "pred_center_prob.png"), pr_u16)
                 cv2.imwrite(str(sd / "diff_map.png"), diff_u16)
+                bin_best = (pr_center[i, 0] >= float(best_threshold)).astype(np.uint8) * 255
+                cv2.imwrite(str(sd / "binary_best_thr.png"), bin_best)
 
                 leaf_union = pred_sem[i] == 1
                 pred_pts_scored = _markers_from_center_map(pr_center[i, 0], leaf_union, float(best_threshold), max_markers=3)
@@ -479,6 +536,18 @@ def _export_visuals(
                     pred_inst, pred_k = _keep_top3_by_area(pred_inst)
                     cv2.imwrite(str(sd / "reconstructed_instances.png"), pred_inst)
 
+                    compare = np.concatenate(
+                        [
+                            cv2.cvtColor(img_u8, cv2.COLOR_RGB2BGR),
+                            cv2.applyColorMap((gt_u16 / 256).astype(np.uint8), cv2.COLORMAP_JET),
+                            cv2.applyColorMap((pr_u16 / 256).astype(np.uint8), cv2.COLORMAP_JET),
+                            cv2.applyColorMap((diff_u16 / 256).astype(np.uint8), cv2.COLORMAP_MAGMA),
+                            markers_vis,
+                        ],
+                        axis=1,
+                    )
+                    cv2.imwrite(str(sd / "compare.png"), compare)
+
                 (sd / "metrics.json").write_text(
                     json.dumps(
                         {
@@ -494,14 +563,84 @@ def _export_visuals(
                 )
 
 
+def _run_smoke_test(
+    *,
+    model: UnetPlusPlusSemanticCenterHead,
+    loader,
+    device: torch.device,
+    center_loss_fn: CenterNetFocalHeatmapLoss,
+    optimizer: torch.optim.Optimizer,
+    clip_norm: float,
+) -> dict:
+    batch = next(iter(loader))
+    images = batch["image"].to(device)
+    centers = batch["center"].to(device)
+    model.base.eval()
+    model.center_head.train()
+    bn_ref = _copy_bn_stats(model.base)
+    with torch.no_grad():
+        sem_before = model(images)["semantic"].detach().clone()
+    optimizer.zero_grad(set_to_none=True)
+    out = model(images)
+    sem_logits = out["semantic"]
+    center_logits = out["center"]
+    details = center_loss_fn(center_logits, centers, return_details=True)
+    loss = details["loss"]
+    if not bool(torch.isfinite(loss).all().item()):
+        raise SystemExit("Smoke test failed: non-finite loss")
+    loss.backward()
+
+    trainable_names = [n for (n, p) in model.named_parameters() if bool(p.requires_grad)]
+    assert all(str(n).startswith("center_head.") for n in trainable_names), f"Non-center_head trainable params found: {trainable_names[:10]}"
+    base_grad_any = any(bool(p.grad is not None and torch.isfinite(p.grad).all().item() and p.grad.detach().abs().max().item() > 0.0) for p in model.base.parameters())
+
+    params = list(model.center_head.parameters())
+    grad_norm_before = _grad_l2_norm(params)
+    grad_nonzero = any(bool(p.grad is not None and torch.isfinite(p.grad).all().item() and p.grad.detach().abs().max().item() > 0.0) for p in params)
+    if not grad_nonzero:
+        raise SystemExit("Smoke test failed: center gradients are zero")
+    torch.nn.utils.clip_grad_norm_(params, max_norm=float(clip_norm))
+    grad_norm_after = _grad_l2_norm(params)
+    optimizer.step()
+
+    with torch.no_grad():
+        sem_after = model(images)["semantic"].detach().clone()
+        sem_delta = float((sem_before - sem_after).abs().max().item())
+        bn_delta = _max_bn_delta(model.base, bn_ref)
+        params_finite = _params_finite(params)
+        logits_finite = bool(torch.isfinite(center_logits.detach()).all().item())
+
+    peak_vram = None
+    if device.type == "cuda":
+        peak_vram = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+
+    return {
+        "passed": True,
+        "output_shape": tuple(center_logits.shape),
+        "loss": float(loss.item()),
+        "gradients": "finite_nonzero" if grad_nonzero else "zero",
+        "base_gradients": bool(base_grad_any),
+        "semantic_delta": float(sem_delta),
+        "peak_vram_mb": peak_vram,
+        "batchnorm_in_center_head": int(_count_center_head_batchnorms(model)),
+        "groupnorm_present": bool(any(isinstance(m, torch.nn.GroupNorm) for m in model.center_head.modules())),
+        "parameters_finite_after_step": bool(params_finite),
+        "logits_finite_after_step": bool(logits_finite),
+        "final_bias": _center_head_output_bias(model),
+        "grad_norm_before": float(grad_norm_before),
+        "grad_norm_after": float(grad_norm_after),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, required=True)
-    ap.add_argument("--out-dir", type=Path, default=Path("training/analysis/centerhead_micro_overfit"))
+    ap.add_argument("--out-dir", type=Path, default=Path("training/analysis/centerhead_spatial_micro_overfit"))
+    ap.add_argument("--microset-txt", type=Path, default=Path("training/analysis/centerhead_micro_overfit/microset.txt"))
     ap.add_argument("--device", type=str, default="")
     ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--eval-every", type=int, default=25)
-    ap.add_argument("--vis-iters", type=str, default="0,50,100,250,500,1000")
+    ap.add_argument("--vis-iters", type=str, default="0,25,50,100,250,500,750,1000")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--grad-clip-norm", type=float, default=5.0)
     ap.add_argument("--batch-size", type=int, default=6)
@@ -516,10 +655,9 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_root = Path(cfg["dataset"]["root"]).resolve()
-    train_txt = Path(cfg["dataset"]["train_txt"]).resolve()
     instance_root = Path((cfg.get("dataset") or {}).get("instance_root", "datasets/converted_leaflet_instances")).resolve()
 
-    micro = _select_microset(dataset_root, train_txt, out_dir)
+    micro = _load_existing_microset(dataset_root, args.microset_txt, out_dir)
     (out_dir / "microset_manifest.json").write_text(
         json.dumps({"samples": micro.samples, "distribution": micro.distribution}, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -535,18 +673,19 @@ def main() -> None:
     )
 
     encoder = cfg["model"].get("encoder") or cfg["model"].get("encoder_name")
+    center_head_type = str((cfg.get("model") or {}).get("center_head_type", "linear_1x1")).strip().lower() or "linear_1x1"
     model = UnetPlusPlusSemanticCenterHead(
         encoder_name=str(encoder),
         encoder_weights=cfg["model"].get("encoder_weights", None),
         in_channels=int(cfg["model"]["in_channels"]),
         classes=int(cfg["model"]["classes"]),
+        center_head_type=center_head_type,
     )
     init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
     if not init_path:
         raise SystemExit("Config: train.init_checkpoint is required")
     missing, unexpected = load_semantic_checkpoint_non_strict(model, str(init_path))
-    center_missing = {"center_head.0.weight", "center_head.0.bias"}
-    center_from_scratch = bool(center_missing.issubset(set(missing)))
+    center_from_scratch = bool(any(str(k).startswith("center_head.") for k in missing))
     if not center_from_scratch:
         raise SystemExit("Expected center_head to be from scratch in micro-overfit setup")
 
@@ -560,19 +699,52 @@ def main() -> None:
     beta = float((focal_cfg.get("beta", 4.0) if isinstance(focal_cfg, dict) else 4.0))
     center_loss_fn = CenterNetFocalHeatmapLoss(alpha=alpha, beta=beta).to(device)
 
-    num_classes = int(cfg["model"]["classes"])
-    class_weights_cfg = (cfg.get("loss") or {}).get("ce_class_weights", None)
-    class_weights = torch.tensor([float(x) for x in class_weights_cfg], dtype=torch.float32, device=device) if class_weights_cfg else None
-    semantic_loss_fn = CombinedCrossEntropyDiceLoss(
-        num_classes=num_classes,
-        ce_coef=float((cfg.get("loss") or {}).get("ce_coef", 1.0)),
-        dice_coef=float((cfg.get("loss") or {}).get("dice_coef", 1.0)),
-        class_weights=class_weights,
-    ).to(device)
-
     opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(args.lr), weight_decay=0.0)
     clip_norm = float(args.grad_clip_norm)
-    thresholds = [0.01, 0.02, 0.03, 0.05, 0.10, 0.20, 0.30, 0.50]
+    thresholds = [0.01, 0.02, 0.03, 0.05, 0.10, 0.20, 0.30, 0.50, 0.70]
+
+    layer_out = model.center_head_output_layer()
+    trainable_names = [n for (n, p) in model.named_parameters() if bool(p.requires_grad)]
+    architecture = {
+        "head_type": center_head_type,
+        "layers": "3x3 stem -> 4 residual dilated blocks -> 3x3 refine -> 1x1 out" if center_head_type == "spatial_dilated" else "single segmentation head",
+        "dilation_sequence": [1, 2, 4, 8] if center_head_type == "spatial_dilated" else [],
+        "trainable_parameters": int(sum(int(p.numel()) for p in model.parameters() if bool(p.requires_grad))),
+        "center_head_parameters": int(sum(int(p.numel()) for p in model.center_head.parameters())),
+        "total_parameters": int(sum(int(p.numel()) for p in model.parameters())),
+        "receptive_field": "approx 35x35 from center head alone" if center_head_type == "spatial_dilated" else "pointwise/near-local",
+        "final_bias": _center_head_output_bias(model),
+        "output_layer": layer_out.__class__.__name__,
+        "trainable_names": trainable_names,
+    }
+    (out_dir / "architecture.json").write_text(json.dumps(architecture, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    smoke = _run_smoke_test(
+        model=model,
+        loader=loader,
+        device=device,
+        center_loss_fn=center_loss_fn,
+        optimizer=opt,
+        clip_norm=clip_norm,
+    )
+    (out_dir / "smoke_test.json").write_text(json.dumps(smoke, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Rebuild a fresh model after smoke test so iter=0 truly starts before any optimizer step.
+    model = UnetPlusPlusSemanticCenterHead(
+        encoder_name=str(encoder),
+        encoder_weights=cfg["model"].get("encoder_weights", None),
+        in_channels=int(cfg["model"]["in_channels"]),
+        classes=int(cfg["model"]["classes"]),
+        center_head_type=center_head_type,
+    )
+    missing, unexpected = load_semantic_checkpoint_non_strict(model, str(init_path))
+    center_from_scratch = bool(any(str(k).startswith("center_head.") for k in missing))
+    if not center_from_scratch:
+        raise SystemExit("Expected center_head to be from scratch after smoke rebuild")
+    _center_bias_init(model, bias=bias)
+    _freeze_base(model)
+    model = model.to(device)
+    opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(args.lr), weight_decay=0.0)
 
     vis_iters = sorted({int(x.strip()) for x in str(args.vis_iters).split(",") if str(x).strip()})
     metrics_csv = (out_dir / "micro_overfit_metrics.csv").resolve()
@@ -605,12 +777,15 @@ def main() -> None:
                     "logits_min",
                     "logits_max",
                     "params_finite",
+                    "nan_or_inf",
                 ]
             )
 
     clipped_n = 0
     eval_every = int(args.eval_every)
     iters = int(args.iters)
+    best_f1 = None
+    best_step = 0
 
     def _eval_and_log(step: int) -> None:
         sweep = _threshold_sweep_on_microset(model=model, loader=loader, device=device, instance_root=instance_root, thresholds=thresholds)
@@ -629,6 +804,8 @@ def main() -> None:
             )
 
     _eval_and_log(0)
+    best_ckpt = (out_dir / "best_micro_overfit.pth").resolve()
+    last_ckpt = (out_dir / "last.pth").resolve()
 
     for step in range(1, iters + 1):
         model.base.eval()
@@ -660,11 +837,12 @@ def main() -> None:
         opt.step()
 
         with torch.no_grad():
-            b = float(model.center_head[0].bias.detach().mean().item()) if hasattr(model.center_head[0], "bias") and model.center_head[0].bias is not None else None
-            w_norm = float(model.center_head[0].weight.detach().float().norm().item()) if hasattr(model.center_head[0], "weight") else None
+            b = _center_head_output_bias(model)
+            w_norm = _center_head_weight_norm(model)
             logits_min = float(logits.detach().min().item())
             logits_max = float(logits.detach().max().item())
             params_finite = _params_finite(params)
+            nan_or_inf = bool((not params_finite) or (not bool(torch.isfinite(logits.detach()).all().item())))
 
         if not params_finite:
             raise SystemExit(f"Non-finite parameters at iter {step}")
@@ -683,6 +861,16 @@ def main() -> None:
                     instance_root=instance_root,
                     tag=f"iter_{step:04d}",
                     best_threshold=float(best.get("threshold") or 0.1),
+                )
+            if best_f1 is None or float(best.get("center_f1") or 0.0) > float(best_f1):
+                best_f1 = float(best.get("center_f1") or 0.0)
+                best_step = int(step)
+                _save_checkpoint(
+                    best_ckpt,
+                    model,
+                    opt,
+                    step,
+                    {"best_threshold": float(best.get("threshold") or 0.0), "best_center_f1": float(best_f1)},
                 )
 
             with metrics_csv.open("a", encoding="utf-8", newline="") as f:
@@ -713,6 +901,7 @@ def main() -> None:
                         float(logits_min),
                         float(logits_max),
                         int(params_finite),
+                        int(nan_or_inf),
                     ]
                 )
 
@@ -722,10 +911,32 @@ def main() -> None:
                 f"best_thr={float(best.get('threshold') or 0.0):.3f} best_f1={float(best.get('center_f1') or 0.0):.4f} "
                 f"clipped_pct={pct:.1f}%"
             )
+            _save_checkpoint(
+                last_ckpt,
+                model,
+                opt,
+                step,
+                {"best_step": int(best_step), "best_center_f1": float(best_f1 or 0.0), "best_threshold": float(best.get("threshold") or 0.0)},
+            )
+
+    if iters not in vis_iters and best_step > 0:
+        sweep_best = json.loads((out_dir / "threshold_sweeps" / f"iter_{best_step:04d}.json").read_text(encoding="utf-8"))
+        best_row = sweep_best.get("best") or {}
+        _export_visuals(
+            out_dir=out_dir,
+            model=model,
+            loader=loader,
+            device=device,
+            instance_root=instance_root,
+            tag="best",
+            best_threshold=float(best_row.get("threshold") or 0.1),
+        )
 
     (out_dir / "summary.json").write_text(
         json.dumps(
             {
+                "architecture": architecture,
+                "smoke_test": smoke,
                 "samples": micro.samples,
                 "distribution": micro.distribution,
                 "iters": iters,
@@ -736,7 +947,11 @@ def main() -> None:
                 "init_sigmoid": _safe_sigmoid(bias),
                 "grad_clip_norm": clip_norm,
                 "percent_iterations_clipped": float(100.0 * float(clipped_n) / float(max(iters, 1))),
+                "best_step": int(best_step),
+                "best_center_f1": float(best_f1 or 0.0),
                 "metrics_csv": str(metrics_csv),
+                "best_checkpoint": str(best_ckpt),
+                "last_checkpoint": str(last_ckpt),
             },
             ensure_ascii=False,
             indent=2,
@@ -747,4 +962,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
