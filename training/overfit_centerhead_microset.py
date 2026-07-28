@@ -175,6 +175,30 @@ def _grad_l2_norm(params: list[torch.Tensor]) -> float:
     return float(math.sqrt(max(s, 0.0)))
 
 
+def _flatten_center_head_grads(params: list[torch.Tensor]) -> torch.Tensor:
+    flat = []
+    dev = None
+    for p in params:
+        if p.grad is None:
+            continue
+        g = p.grad.detach().float().reshape(-1)
+        flat.append(g)
+        dev = g.device
+    if flat:
+        return torch.cat(flat, dim=0)
+    return torch.zeros((0,), dtype=torch.float32, device=(dev if dev is not None else torch.device("cpu")))
+
+
+def _grad_cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float | None:
+    if int(a.numel()) == 0 or int(b.numel()) == 0 or int(a.numel()) != int(b.numel()):
+        return None
+    an = float(torch.norm(a).item())
+    bn = float(torch.norm(b).item())
+    if an <= 0.0 or bn <= 0.0:
+        return None
+    return float(torch.dot(a, b).item() / max(an * bn, 1e-12))
+
+
 def _params_finite(params: list[torch.Tensor]) -> bool:
     for p in params:
         if not bool(torch.isfinite(p.detach()).all().item()):
@@ -384,15 +408,74 @@ def _run_same_batch_comparison(
     clip_norm: float,
 ) -> dict:
     batch = next(iter(loader))
-    legacy = _run_single_mode_one_batch(cfg=cfg, batch=batch, device=device, lr=lr, clip_norm=clip_norm, normalization_mode="legacy_num_pos")
-    balanced = _run_single_mode_one_batch(cfg=cfg, batch=batch, device=device, lr=lr, clip_norm=clip_norm, normalization_mode="balanced_resolution")
-    loss_reduction = float(legacy["total_loss"] / max(balanced["total_loss"], 1e-12))
-    grad_reduction = float(legacy["grad_norm_before"] / max(balanced["grad_norm_before"], 1e-12))
+    model, _bias = _make_model_from_cfg(cfg, device)
+    amp_enabled = bool((cfg.get("train") or {}).get("amp", False)) and device.type == "cuda"
+    images = batch["image"].to(device)
+    centers = batch["center"].to(device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+    with torch.autocast(device_type="cuda", enabled=amp_enabled):
+        out = model(images)
+        center_logits = out["center"]
+
+    params = list(model.center_head.parameters())
+    results = {}
+    flat_grads: dict[str, torch.Tensor] = {}
+    modes = ["legacy_num_pos", "balanced_resolution", "legacy_sqrt_hw"]
+    for idx, mode in enumerate(modes):
+        model.zero_grad(set_to_none=True)
+        loss_fn = _make_center_loss_from_cfg(cfg, device, normalization_mode=mode)
+        details = loss_fn(center_logits, centers, return_details=True)
+        loss = details["loss"]
+        if not bool(torch.isfinite(loss).all().item()):
+            raise SystemExit(f"Same-batch comparison failed: non-finite loss for mode={mode}")
+        loss.backward(retain_graph=(idx < len(modes) - 1))
+        grad_norm_before = _grad_l2_norm(params)
+        grad_finite = all(bool(torch.isfinite(p.grad).all().item()) for p in params if p.grad is not None)
+        grad_flat = _flatten_center_head_grads(params)
+        flat_grads[mode] = grad_flat.detach().clone()
+        clipped_required = bool(math.isfinite(grad_norm_before) and float(grad_norm_before) > float(clip_norm))
+        if float(clip_norm) > 0.0 and math.isfinite(grad_norm_before):
+            torch.nn.utils.clip_grad_norm_(params, max_norm=float(clip_norm))
+        grad_norm_after = _grad_l2_norm(params)
+        peak_vram = None
+        if device.type == "cuda":
+            peak_vram = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+        results[mode] = {
+            "normalization_mode": mode,
+            "total_loss": float(loss.item()),
+            "positive_loss_sum": float(details["pos_loss"].item()),
+            "negative_loss_sum": float(details["neg_loss"].item()),
+            "num_positive_pixels": float(details["num_pos"].item()),
+            "legacy_unscaled_loss": float(details["legacy_unscaled_loss"].item()),
+            "resolution_height": float(details["resolution_height"]),
+            "resolution_width": float(details["resolution_width"]),
+            "resolution_scale": float(details["resolution_scale"]),
+            "scaled_total_loss": float(details["scaled_total_loss"].item()),
+            "negative_to_positive_sum_ratio": float(details["negative_to_positive_sum_ratio"].item()),
+            "normalized_positive_loss": float(details["normalized_pos_loss"].item()),
+            "normalized_negative_loss": float(details["normalized_neg_loss"].item()),
+            "grad_norm_before": float(grad_norm_before),
+            "grad_norm_after": float(grad_norm_after),
+            "gradients_finite": bool(grad_finite),
+            "clipping_required": bool(clipped_required),
+            "peak_vram_mb": peak_vram,
+        }
+
+    legacy = results["legacy_num_pos"]
+    balanced = results["balanced_resolution"]
+    scaled = results["legacy_sqrt_hw"]
     return {
         "legacy_num_pos": legacy,
         "balanced_resolution": balanced,
-        "loss_reduction_factor": loss_reduction,
-        "grad_reduction_factor": grad_reduction,
+        "legacy_sqrt_hw": scaled,
+        "loss_reduction_balanced_factor": float(legacy["total_loss"] / max(balanced["total_loss"], 1e-12)),
+        "grad_reduction_balanced_factor": float(legacy["grad_norm_before"] / max(balanced["grad_norm_before"], 1e-12)),
+        "loss_reduction_legacy_sqrt_hw_factor": float(legacy["total_loss"] / max(scaled["total_loss"], 1e-12)),
+        "grad_reduction_legacy_sqrt_hw_factor": float(legacy["grad_norm_before"] / max(scaled["grad_norm_before"], 1e-12)),
+        "gradient_cosine_legacy_vs_legacy_sqrt_hw": _grad_cosine_similarity(flat_grads["legacy_num_pos"], flat_grads["legacy_sqrt_hw"]),
+        "gradient_cosine_legacy_vs_balanced_resolution": _grad_cosine_similarity(flat_grads["legacy_num_pos"], flat_grads["balanced_resolution"]),
     }
 
 
@@ -797,12 +880,12 @@ def _run_smoke_test(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, required=True)
-    ap.add_argument("--out-dir", type=Path, default=Path("training/analysis/centerhead_spatial_balancednorm_micro_overfit"))
+    ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--microset-txt", type=Path, default=Path("training/analysis/centerhead_micro_overfit/microset.txt"))
     ap.add_argument("--device", type=str, default="")
-    ap.add_argument("--iters", type=int, default=500)
+    ap.add_argument("--iters", type=int, default=1000)
     ap.add_argument("--eval-every", type=int, default=25)
-    ap.add_argument("--vis-iters", type=str, default="0,25,50,100,250,500")
+    ap.add_argument("--vis-iters", type=str, default="0,25,50,100,250,500,750,1000")
     ap.add_argument("--lr", type=float, default=-1.0)
     ap.add_argument("--grad-clip-norm", type=float, default=-1.0)
     ap.add_argument("--batch-size", type=int, default=-1)
@@ -813,7 +896,16 @@ def main() -> None:
     _seed_all(int(cfg.get("seed", 1337)))
     device = _make_device(args.device)
 
-    out_dir = args.out_dir.resolve()
+    focal_cfg = cfg.get("center_loss") or {}
+    normalization_mode = str((focal_cfg.get("normalization_mode", "legacy_num_pos") if isinstance(focal_cfg, dict) else "legacy_num_pos")).strip().lower() or "legacy_num_pos"
+    if args.out_dir is not None:
+        out_dir = args.out_dir.resolve()
+    elif normalization_mode == "legacy_sqrt_hw":
+        out_dir = Path("training/analysis/centerhead_spatial_legacy_sqrt_hw_micro_overfit").resolve()
+    elif normalization_mode == "balanced_resolution":
+        out_dir = Path("training/analysis/centerhead_spatial_balancednorm_micro_overfit").resolve()
+    else:
+        out_dir = Path("training/analysis/centerhead_spatial_micro_overfit").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_root = Path(cfg["dataset"]["root"]).resolve()
@@ -837,16 +929,14 @@ def main() -> None:
     center_head_type = str((cfg.get("model") or {}).get("center_head_type", "linear_1x1")).strip().lower() or "linear_1x1"
     model, bias = _make_model_from_cfg(cfg, device)
 
-    focal_cfg = cfg.get("center_loss") or {}
     alpha = float((focal_cfg.get("alpha", 2.0) if isinstance(focal_cfg, dict) else 2.0))
     beta = float((focal_cfg.get("beta", 4.0) if isinstance(focal_cfg, dict) else 4.0))
-    normalization_mode = str((focal_cfg.get("normalization_mode", "legacy_num_pos") if isinstance(focal_cfg, dict) else "legacy_num_pos")).strip().lower() or "legacy_num_pos"
     center_loss_fn = _make_center_loss_from_cfg(cfg, device, normalization_mode=normalization_mode)
 
     lr = float(args.lr if float(args.lr) > 0 else float((cfg.get("train") or {}).get("lr_center_head", 1e-4)))
     clip_norm = float(args.grad_clip_norm if float(args.grad_clip_norm) > 0 else float((cfg.get("train") or {}).get("center_grad_clip_norm", 5.0)))
     opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
-    thresholds = [0.01, 0.02, 0.03, 0.05, 0.10, 0.20, 0.30, 0.50, 0.70]
+    thresholds = [0.005, 0.01, 0.02, 0.03, 0.05, 0.10, 0.20, 0.30, 0.50, 0.70, 0.80, 0.90]
 
     layer_out = model.center_head_output_layer()
     trainable_names = [n for (n, p) in model.named_parameters() if bool(p.requires_grad)]
@@ -899,19 +989,20 @@ def main() -> None:
                 [
                     "iter",
                     "loss",
+                    "legacy_unscaled_loss",
+                    "resolution_scale",
                     "pos_loss_sum",
                     "neg_loss_sum",
                     "num_pos",
-                    "pos_normalizer",
-                    "neg_normalizer",
-                    "normalized_pos_loss",
-                    "normalized_neg_loss",
+                    "negative_to_positive_sum_ratio",
                     "neg_pos_ratio",
                     "center_prob_mean_pos",
                     "center_prob_mean_near",
                     "center_prob_mean_far",
                     "center_prob_mean_max",
                     "best_thr",
+                    "best_precision",
+                    "best_recall",
                     "best_f1",
                     "best_count_acc",
                     "best_loc_err_px",
@@ -922,8 +1013,8 @@ def main() -> None:
                     "grad_norm_after",
                     "clipped",
                     "clipped_pct",
-                    "nonfinite_gradients",
-                    "skipped_steps",
+                    "nonfinite_grad_count",
+                    "skipped_step_count",
                     "center_weight_norm",
                     "center_bias",
                     "logits_min",
@@ -934,6 +1025,8 @@ def main() -> None:
             )
 
     clipped_n = 0
+    nonfinite_grad_n = 0
+    skipped_steps_n = 0
     eval_every = int(args.eval_every)
     iters = int(args.iters)
     best_f1 = None
@@ -984,6 +1077,8 @@ def main() -> None:
         params = list(model.center_head.parameters())
         grad_norm_before = _grad_l2_norm(params)
         grad_nonfinite = not math.isfinite(grad_norm_before)
+        if grad_nonfinite:
+            nonfinite_grad_n += 1
         clipped = False
         if float(clip_norm) > 0.0 and math.isfinite(grad_norm_before):
             clipped = bool(grad_norm_before > float(clip_norm))
@@ -998,6 +1093,7 @@ def main() -> None:
             scaler.update()
             new_scale = float(scaler.get_scale())
             skipped_steps = int(new_scale < prev_scale)
+            skipped_steps_n += int(skipped_steps)
         else:
             opt.step()
 
@@ -1044,19 +1140,20 @@ def main() -> None:
                     [
                         step,
                         float(loss.item()),
+                        float(details["legacy_unscaled_loss"].item()),
+                        float(details["resolution_scale"]),
                         float(details["pos_loss"].item()),
                         float(details["neg_loss"].item()),
                         float(details["num_pos"].item()),
-                        float(details["pos_normalizer"].item()),
-                        float(details["neg_normalizer"].item()),
-                        float(details["normalized_pos_loss"].item()),
-                        float(details["normalized_neg_loss"].item()),
+                        float(details["negative_to_positive_sum_ratio"].item()),
                         float(details["normalized_neg_loss"].item() / max(float(details["normalized_pos_loss"].item()), 1e-12)) if float(details["normalized_pos_loss"].item()) > 0 else "",
                         float(best.get("center_prob_mean_pos") or 0.0),
                         float(best.get("center_prob_mean_near") or 0.0),
                         float(best.get("center_prob_mean_far") or 0.0),
                         float(best.get("center_prob_mean_max") or 0.0),
                         float(best.get("threshold") or 0.0),
+                        float(best.get("center_precision") or 0.0),
+                        float(best.get("center_recall") or 0.0),
                         float(best.get("center_f1") or 0.0),
                         float(best.get("center_count_acc") or 0.0),
                         float(best.get("center_loc_err_px") or 0.0),
@@ -1067,8 +1164,8 @@ def main() -> None:
                         float(grad_norm_after),
                         int(clipped),
                         float(100.0 * float(clipped_n) / float(max(step, 1))),
-                        int(grad_nonfinite),
-                        int(skipped_steps),
+                        int(nonfinite_grad_n),
+                        int(skipped_steps_n),
                         float(w_norm) if w_norm is not None else "",
                         float(b) if b is not None else "",
                         float(logits_min),

@@ -69,7 +69,7 @@ class CenterNetFocalHeatmapLoss(nn.Module):
         self.beta = float(beta)
         self.eps = float(eps)
         self.normalization_mode = str(normalization_mode).strip().lower() or "legacy_num_pos"
-        if self.normalization_mode not in {"legacy_num_pos", "balanced_resolution"}:
+        if self.normalization_mode not in {"legacy_num_pos", "balanced_resolution", "legacy_sqrt_hw"}:
             raise ValueError(f"Unsupported normalization_mode: {self.normalization_mode}")
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor, *, return_details: bool = False):
@@ -89,15 +89,24 @@ class CenterNetFocalHeatmapLoss(nn.Module):
         pos_norm = torch.clamp(pos.float().sum(), min=1.0)
         neg_norm = torch.clamp((neg.float() * neg_weight).sum(), min=1.0)
 
-        if self.normalization_mode == "legacy_num_pos":
+        h = int(logits.shape[-2])
+        w = int(logits.shape[-1])
+        resolution_scale = float((max(h, 1) * max(w, 1)) ** 0.5)
+        legacy_unscaled_loss = None
+
+        if self.normalization_mode in {"legacy_num_pos", "legacy_sqrt_hw"}:
             if int(pos.float().sum().item()) > 0:
-                loss = (pos_loss_sum + neg_loss_sum) / pos_norm
+                legacy_unscaled_loss = (pos_loss_sum + neg_loss_sum) / pos_norm
                 norm_pos_loss = pos_loss_sum / pos_norm
                 norm_neg_loss = neg_loss_sum / pos_norm
             else:
-                loss = neg_loss_sum
-                norm_pos_loss = torch.zeros_like(loss)
+                legacy_unscaled_loss = neg_loss_sum
+                norm_pos_loss = torch.zeros_like(neg_loss_sum)
                 norm_neg_loss = neg_loss_sum
+            if self.normalization_mode == "legacy_sqrt_hw":
+                loss = legacy_unscaled_loss / max(resolution_scale, 1.0)
+            else:
+                loss = legacy_unscaled_loss
         else:
             if int(pos.float().sum().item()) > 0:
                 norm_pos_loss = pos_loss_sum / pos_norm
@@ -105,6 +114,7 @@ class CenterNetFocalHeatmapLoss(nn.Module):
                 norm_pos_loss = torch.zeros_like(pos_loss_sum)
             norm_neg_loss = neg_loss_sum / neg_norm
             loss = norm_pos_loss + norm_neg_loss
+            legacy_unscaled_loss = (pos_loss_sum + neg_loss_sum) / pos_norm if int(pos.float().sum().item()) > 0 else neg_loss_sum
 
         if not torch.isfinite(loss).all().item():
             raise RuntimeError("CenterNetFocalHeatmapLoss produced non-finite loss")
@@ -120,6 +130,12 @@ class CenterNetFocalHeatmapLoss(nn.Module):
             "neg_normalizer": neg_norm.detach(),
             "normalized_pos_loss": norm_pos_loss.detach(),
             "normalized_neg_loss": norm_neg_loss.detach(),
+            "legacy_unscaled_loss": legacy_unscaled_loss.detach(),
+            "resolution_height": float(h),
+            "resolution_width": float(w),
+            "resolution_scale": float(resolution_scale),
+            "scaled_total_loss": loss.detach(),
+            "negative_to_positive_sum_ratio": (neg_loss_sum / torch.clamp(pos_loss_sum, min=1e-12)).detach(),
             "normalization_mode": self.normalization_mode,
             "mean_pred": pred.mean().detach(),
         }
