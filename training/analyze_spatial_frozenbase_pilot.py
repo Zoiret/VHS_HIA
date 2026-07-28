@@ -345,30 +345,37 @@ def _find_log_files(run_dir: Path) -> list[Path]:
 
 
 def _optimization_audit(metrics_rows: list[dict], run_dir: Path) -> dict:
-    grad_mean_vals = [_to_float(r.get("train_grad_norm_mean_before_clip")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    grad_max_vals = [_to_float(r.get("train_grad_norm_max_before_clip")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    grad_mean_vals = [_to_float(r.get("train_finite_grad_norm_mean_before_clip", r.get("train_grad_norm_mean_before_clip"))) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    grad_max_vals = [_to_float(r.get("train_finite_grad_norm_max_before_clip", r.get("train_grad_norm_max_before_clip"))) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
     clipped_vals = [_to_float(r.get("train_batches_clipped_pct")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    clipped_batch_vals = [_to_float(r.get("train_clipped_batch_count")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    nonfinite_grad_vals = [_to_float(r.get("train_nonfinite_grad_batch_count")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    skipped_step_vals = [_to_float(r.get("train_skipped_optimizer_step_count")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    amp_scale_min_vals = [_to_float(r.get("amp_scale_min")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    amp_scale_max_vals = [_to_float(r.get("amp_scale_max")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    amp_scale_last_vals = [_to_float(r.get("amp_scale_last")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
     train_loss_vals = [_to_float(r.get("train_loss")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    train_loss_finite_flags = [str(r.get("train_loss_is_finite", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    params_finite_flags = [str(r.get("parameters_finite", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
     val_center_loss_vals = [_to_float(r.get("val_center_loss")) for r in metrics_rows if _to_int(r.get("epoch")) is not None]
     val_sem_loss_vals = [_to_float(r.get("val_semantic_loss")) for r in metrics_rows if _to_int(r.get("epoch")) is not None]
 
-    parameters_finite = True
     missing_fields = []
-    nonfinite_grad_batch_count = None
-    skipped_optimizer_step_count = None
-    amp_scale_behavior = "not recoverable from saved run"
     log_hits = []
     for p in _find_log_files(run_dir):
         text = p.read_text(encoding="utf-8", errors="ignore")
         if "grad_mean=nan" in text or "grad_max=inf" in text:
             log_hits.append(str(p))
-        if "GradScaler" in text or "scale" in text:
-            amp_scale_behavior = f"log file present: {p.name}"
-
-    if not any("train_grad_norm_mean_before_clip" in r for r in metrics_rows):
-        missing_fields.append("train_grad_norm_mean_before_clip")
+    if not any("train_finite_grad_norm_mean_before_clip" in r for r in metrics_rows):
+        missing_fields.append("train_finite_grad_norm_mean_before_clip")
     if not any("train_batches_clipped_pct" in r for r in metrics_rows):
         missing_fields.append("train_batches_clipped_pct")
+    if not any("train_nonfinite_grad_batch_count" in r for r in metrics_rows):
+        missing_fields.append("train_nonfinite_grad_batch_count")
+    if not any("train_skipped_optimizer_step_count" in r for r in metrics_rows):
+        missing_fields.append("train_skipped_optimizer_step_count")
+    if not any("amp_scale_min" in r for r in metrics_rows):
+        missing_fields.append("amp_scale_min")
 
     if grad_mean_vals:
         finite_grad_norm_mean = _safe_mean([v for v in grad_mean_vals if v is not None and math.isfinite(float(v))])
@@ -377,22 +384,24 @@ def _optimization_audit(metrics_rows: list[dict], run_dir: Path) -> dict:
 
     return {
         "finite_grad_norm_mean": finite_grad_norm_mean,
-        "nonfinite_grad_batch_count": nonfinite_grad_batch_count,
-        "skipped_optimizer_step_count": skipped_optimizer_step_count,
+        "finite_grad_norm_max": max([float(v) for v in grad_max_vals if v is not None and math.isfinite(float(v))], default=None),
+        "nonfinite_grad_batch_count": int(sum(float(v) for v in nonfinite_grad_vals if v is not None)) if nonfinite_grad_vals else None,
+        "skipped_optimizer_step_count": int(sum(float(v) for v in skipped_step_vals if v is not None)) if skipped_step_vals else None,
+        "clipped_batch_count_mean": _safe_mean(clipped_batch_vals),
         "clipped_batches_pct_mean": _safe_mean(clipped_vals),
         "clipped_batches_pct_max": max([float(v) for v in clipped_vals if v is not None], default=None),
-        "grad_norm_max_before_clip_max": max([float(v) for v in grad_max_vals if v is not None], default=None),
-        "parameters_finite": parameters_finite,
-        "train_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in train_loss_vals),
+        "grad_norm_max_before_clip_max": max([float(v) for v in grad_max_vals if v is not None and math.isfinite(float(v))], default=None),
+        "parameters_finite": all(v in {"true", "1"} for v in params_finite_flags) if params_finite_flags else None,
+        "train_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in train_loss_vals) and all(v in {"true", "1"} for v in train_loss_finite_flags if v != ""),
         "val_center_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in val_center_loss_vals),
         "val_semantic_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in val_sem_loss_vals),
-        "amp_behavior": amp_scale_behavior,
+        "amp_behavior": {
+            "amp_scale_min": min([float(v) for v in amp_scale_min_vals if v is not None], default=None),
+            "amp_scale_max": max([float(v) for v in amp_scale_max_vals if v is not None], default=None),
+            "amp_scale_last": amp_scale_last_vals[-1] if amp_scale_last_vals else None,
+        },
         "stdout_nonfinite_grad_hits": log_hits,
-        "unrecoverable_from_saved_run": [
-            "per-batch nonfinite grad counts",
-            "GradScaler skipped step counts",
-            "AMP scale history",
-        ],
+        "unrecoverable_from_saved_run": [],
         "missing_logged_fields": missing_fields,
     }
 

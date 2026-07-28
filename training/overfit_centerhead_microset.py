@@ -234,6 +234,168 @@ def _center_head_weight_norm(model: UnetPlusPlusSemanticCenterHead) -> float | N
     return float(layer.weight.detach().float().norm().item())
 
 
+def _make_model_from_cfg(cfg: dict, device: torch.device) -> tuple[UnetPlusPlusSemanticCenterHead, float]:
+    encoder = cfg["model"].get("encoder") or cfg["model"].get("encoder_name")
+    center_head_type = str((cfg.get("model") or {}).get("center_head_type", "linear_1x1")).strip().lower() or "linear_1x1"
+    model = UnetPlusPlusSemanticCenterHead(
+        encoder_name=str(encoder),
+        encoder_weights=cfg["model"].get("encoder_weights", None),
+        in_channels=int(cfg["model"]["in_channels"]),
+        classes=int(cfg["model"]["classes"]),
+        center_head_type=center_head_type,
+    )
+    init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
+    if not init_path:
+        raise SystemExit("Config: train.init_checkpoint is required")
+    missing, _unexpected = load_semantic_checkpoint_non_strict(model, str(init_path))
+    center_from_scratch = bool(any(str(k).startswith("center_head.") for k in missing))
+    if not center_from_scratch:
+        raise SystemExit("Expected center_head to be from scratch in micro-overfit setup")
+    bias = float((cfg.get("model") or {}).get("center_head_init_bias", -2.19))
+    _center_bias_init(model, bias=bias)
+    _freeze_base(model)
+    model = model.to(device)
+    return model, bias
+
+
+def _make_center_loss_from_cfg(cfg: dict, device: torch.device, *, normalization_mode: str | None = None) -> CenterNetFocalHeatmapLoss:
+    focal_cfg = cfg.get("center_loss") or {}
+    alpha = float((focal_cfg.get("alpha", 2.0) if isinstance(focal_cfg, dict) else 2.0))
+    beta = float((focal_cfg.get("beta", 4.0) if isinstance(focal_cfg, dict) else 4.0))
+    norm_mode = normalization_mode
+    if norm_mode is None:
+        norm_mode = str((focal_cfg.get("normalization_mode", "legacy_num_pos") if isinstance(focal_cfg, dict) else "legacy_num_pos")).strip().lower() or "legacy_num_pos"
+    return CenterNetFocalHeatmapLoss(alpha=alpha, beta=beta, normalization_mode=norm_mode).to(device)
+
+
+def _run_single_mode_one_batch(
+    *,
+    cfg: dict,
+    batch: dict,
+    device: torch.device,
+    lr: float,
+    clip_norm: float,
+    normalization_mode: str,
+) -> dict:
+    model, _bias = _make_model_from_cfg(cfg, device)
+    center_loss_fn = _make_center_loss_from_cfg(cfg, device, normalization_mode=normalization_mode)
+    optimizer = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
+    amp_enabled = bool((cfg.get("train") or {}).get("amp", False)) and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+
+    images = batch["image"].to(device)
+    centers = batch["center"].to(device)
+    bn_ref = _copy_bn_stats(model.base)
+    with torch.no_grad():
+        sem_before = model(images)["semantic"].detach().clone()
+    optimizer.zero_grad(set_to_none=True)
+    with torch.autocast(device_type="cuda", enabled=amp_enabled):
+        out = model(images)
+        center_logits = out["center"]
+        details = center_loss_fn(center_logits, centers, return_details=True)
+        loss = details["loss"]
+    if not bool(torch.isfinite(loss).all().item()):
+        raise SystemExit(f"Same-batch comparison failed: non-finite loss for mode={normalization_mode}")
+
+    if amp_enabled:
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+    else:
+        loss.backward()
+
+    params = list(model.center_head.parameters())
+    grad_norm_before = _grad_l2_norm(params)
+    grad_finite = all(bool(torch.isfinite(p.grad).all().item()) for p in params if p.grad is not None)
+    grad_max_abs = max([float(p.grad.detach().abs().max().item()) for p in params if p.grad is not None], default=0.0)
+    if float(clip_norm) > 0.0 and math.isfinite(grad_norm_before):
+        torch.nn.utils.clip_grad_norm_(params, max_norm=float(clip_norm))
+    grad_norm_after = _grad_l2_norm(params)
+
+    prev_scale = float(scaler.get_scale()) if amp_enabled else None
+    if amp_enabled:
+        scaler.step(optimizer)
+        scaler.update()
+        new_scale = float(scaler.get_scale())
+        skipped = bool(new_scale < prev_scale)
+        amp_scale = new_scale
+    else:
+        optimizer.step()
+        skipped = False
+        amp_scale = None
+
+    with torch.no_grad():
+        sem_after = model(images)["semantic"].detach().clone()
+        sem_delta = float((sem_before - sem_after).abs().max().item())
+        bn_delta = _max_bn_delta(model.base, bn_ref)
+        params_finite = _params_finite(params)
+        logits_finite = bool(torch.isfinite(center_logits.detach()).all().item())
+
+    peak_vram = None
+    if device.type == "cuda":
+        peak_vram = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+
+    pos_exact = centers >= 0.9999
+    near = centers >= 0.1
+    far = centers < 0.1
+    prob = torch.sigmoid(center_logits.detach())
+    prob_pos = float(prob[pos_exact].mean().item()) if bool(pos_exact.any().item()) else None
+    prob_near = float(prob[near].mean().item()) if bool(near.any().item()) else None
+    prob_far = float(prob[far].mean().item()) if bool(far.any().item()) else None
+
+    norm_pos = float(details["normalized_pos_loss"].item())
+    norm_neg = float(details["normalized_neg_loss"].item())
+    ratio = float(norm_neg / max(norm_pos, 1e-12)) if norm_pos > 0.0 else None
+    return {
+        "normalization_mode": normalization_mode,
+        "total_loss": float(loss.item()),
+        "positive_loss_sum": float(details["pos_loss"].item()),
+        "negative_loss_sum": float(details["neg_loss"].item()),
+        "positive_normalizer": float(details["pos_normalizer"].item()),
+        "negative_normalizer": float(details["neg_normalizer"].item()),
+        "normalized_positive_loss": norm_pos,
+        "normalized_negative_loss": norm_neg,
+        "negative_positive_ratio": ratio,
+        "num_positive_pixels": float(details["num_pos"].item()),
+        "effective_negative_weight_sum": float(details["neg_normalizer"].item()),
+        "mean_pred_probability": float(details["mean_pred"].item()),
+        "prob_mean_pos": prob_pos,
+        "prob_mean_near": prob_near,
+        "prob_mean_far": prob_far,
+        "grad_norm_before": float(grad_norm_before),
+        "grad_norm_after": float(grad_norm_after),
+        "grad_max_abs": float(grad_max_abs),
+        "grad_finite": bool(grad_finite),
+        "parameters_finite_after_step": bool(params_finite),
+        "logits_finite_after_step": bool(logits_finite),
+        "skipped_amp_step": bool(skipped),
+        "amp_scale_last": amp_scale,
+        "peak_vram_mb": peak_vram,
+        "semantic_delta": float(sem_delta),
+        "bn_delta": float(bn_delta),
+    }
+
+
+def _run_same_batch_comparison(
+    *,
+    cfg: dict,
+    loader,
+    device: torch.device,
+    lr: float,
+    clip_norm: float,
+) -> dict:
+    batch = next(iter(loader))
+    legacy = _run_single_mode_one_batch(cfg=cfg, batch=batch, device=device, lr=lr, clip_norm=clip_norm, normalization_mode="legacy_num_pos")
+    balanced = _run_single_mode_one_batch(cfg=cfg, batch=batch, device=device, lr=lr, clip_norm=clip_norm, normalization_mode="balanced_resolution")
+    loss_reduction = float(legacy["total_loss"] / max(balanced["total_loss"], 1e-12))
+    grad_reduction = float(legacy["grad_norm_before"] / max(balanced["grad_norm_before"], 1e-12))
+    return {
+        "legacy_num_pos": legacy,
+        "balanced_resolution": balanced,
+        "loss_reduction_factor": loss_reduction,
+        "grad_reduction_factor": grad_reduction,
+    }
+
+
 def _save_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer, step: int, extra: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -635,15 +797,15 @@ def _run_smoke_test(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, required=True)
-    ap.add_argument("--out-dir", type=Path, default=Path("training/analysis/centerhead_spatial_micro_overfit"))
+    ap.add_argument("--out-dir", type=Path, default=Path("training/analysis/centerhead_spatial_balancednorm_micro_overfit"))
     ap.add_argument("--microset-txt", type=Path, default=Path("training/analysis/centerhead_micro_overfit/microset.txt"))
     ap.add_argument("--device", type=str, default="")
-    ap.add_argument("--iters", type=int, default=1000)
+    ap.add_argument("--iters", type=int, default=500)
     ap.add_argument("--eval-every", type=int, default=25)
-    ap.add_argument("--vis-iters", type=str, default="0,25,50,100,250,500,750,1000")
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--grad-clip-norm", type=float, default=5.0)
-    ap.add_argument("--batch-size", type=int, default=6)
+    ap.add_argument("--vis-iters", type=str, default="0,25,50,100,250,500")
+    ap.add_argument("--lr", type=float, default=-1.0)
+    ap.add_argument("--grad-clip-norm", type=float, default=-1.0)
+    ap.add_argument("--batch-size", type=int, default=-1)
     ap.add_argument("--num-workers", type=int, default=0)
     args = ap.parse_args()
 
@@ -668,39 +830,22 @@ def main() -> None:
         dataset_root=dataset_root,
         split_txt=micro.split_txt,
         device=device,
-        batch_size=int(args.batch_size),
+        batch_size=int(args.batch_size if int(args.batch_size) > 0 else int((cfg.get("train") or {}).get("batch_size", 4))),
         num_workers=int(args.num_workers),
     )
 
-    encoder = cfg["model"].get("encoder") or cfg["model"].get("encoder_name")
     center_head_type = str((cfg.get("model") or {}).get("center_head_type", "linear_1x1")).strip().lower() or "linear_1x1"
-    model = UnetPlusPlusSemanticCenterHead(
-        encoder_name=str(encoder),
-        encoder_weights=cfg["model"].get("encoder_weights", None),
-        in_channels=int(cfg["model"]["in_channels"]),
-        classes=int(cfg["model"]["classes"]),
-        center_head_type=center_head_type,
-    )
-    init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
-    if not init_path:
-        raise SystemExit("Config: train.init_checkpoint is required")
-    missing, unexpected = load_semantic_checkpoint_non_strict(model, str(init_path))
-    center_from_scratch = bool(any(str(k).startswith("center_head.") for k in missing))
-    if not center_from_scratch:
-        raise SystemExit("Expected center_head to be from scratch in micro-overfit setup")
-
-    bias = float((cfg.get("model") or {}).get("center_head_init_bias", -2.19))
-    _center_bias_init(model, bias=bias)
-    _freeze_base(model)
-    model = model.to(device)
+    model, bias = _make_model_from_cfg(cfg, device)
 
     focal_cfg = cfg.get("center_loss") or {}
     alpha = float((focal_cfg.get("alpha", 2.0) if isinstance(focal_cfg, dict) else 2.0))
     beta = float((focal_cfg.get("beta", 4.0) if isinstance(focal_cfg, dict) else 4.0))
-    center_loss_fn = CenterNetFocalHeatmapLoss(alpha=alpha, beta=beta).to(device)
+    normalization_mode = str((focal_cfg.get("normalization_mode", "legacy_num_pos") if isinstance(focal_cfg, dict) else "legacy_num_pos")).strip().lower() or "legacy_num_pos"
+    center_loss_fn = _make_center_loss_from_cfg(cfg, device, normalization_mode=normalization_mode)
 
-    opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(args.lr), weight_decay=0.0)
-    clip_norm = float(args.grad_clip_norm)
+    lr = float(args.lr if float(args.lr) > 0 else float((cfg.get("train") or {}).get("lr_center_head", 1e-4)))
+    clip_norm = float(args.grad_clip_norm if float(args.grad_clip_norm) > 0 else float((cfg.get("train") or {}).get("center_grad_clip_norm", 5.0)))
+    opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
     thresholds = [0.01, 0.02, 0.03, 0.05, 0.10, 0.20, 0.30, 0.50, 0.70]
 
     layer_out = model.center_head_output_layer()
@@ -715,9 +860,19 @@ def main() -> None:
         "receptive_field": "approx 35x35 from center head alone" if center_head_type == "spatial_dilated" else "pointwise/near-local",
         "final_bias": _center_head_output_bias(model),
         "output_layer": layer_out.__class__.__name__,
+        "normalization_mode": normalization_mode,
         "trainable_names": trainable_names,
     }
     (out_dir / "architecture.json").write_text(json.dumps(architecture, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    same_batch = _run_same_batch_comparison(
+        cfg=cfg,
+        loader=loader,
+        device=device,
+        lr=float(lr),
+        clip_norm=clip_norm,
+    )
+    (out_dir / "same_batch_comparison.json").write_text(json.dumps(same_batch, ensure_ascii=False, indent=2), encoding="utf-8")
 
     smoke = _run_smoke_test(
         model=model,
@@ -730,21 +885,10 @@ def main() -> None:
     (out_dir / "smoke_test.json").write_text(json.dumps(smoke, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Rebuild a fresh model after smoke test so iter=0 truly starts before any optimizer step.
-    model = UnetPlusPlusSemanticCenterHead(
-        encoder_name=str(encoder),
-        encoder_weights=cfg["model"].get("encoder_weights", None),
-        in_channels=int(cfg["model"]["in_channels"]),
-        classes=int(cfg["model"]["classes"]),
-        center_head_type=center_head_type,
-    )
-    missing, unexpected = load_semantic_checkpoint_non_strict(model, str(init_path))
-    center_from_scratch = bool(any(str(k).startswith("center_head.") for k in missing))
-    if not center_from_scratch:
-        raise SystemExit("Expected center_head to be from scratch after smoke rebuild")
-    _center_bias_init(model, bias=bias)
-    _freeze_base(model)
-    model = model.to(device)
-    opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(args.lr), weight_decay=0.0)
+    model, _bias2 = _make_model_from_cfg(cfg, device)
+    opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
+    amp_enabled = bool((cfg.get("train") or {}).get("amp", False)) and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
     vis_iters = sorted({int(x.strip()) for x in str(args.vis_iters).split(",") if str(x).strip()})
     metrics_csv = (out_dir / "micro_overfit_metrics.csv").resolve()
@@ -758,6 +902,11 @@ def main() -> None:
                     "pos_loss_sum",
                     "neg_loss_sum",
                     "num_pos",
+                    "pos_normalizer",
+                    "neg_normalizer",
+                    "normalized_pos_loss",
+                    "normalized_neg_loss",
+                    "neg_pos_ratio",
                     "center_prob_mean_pos",
                     "center_prob_mean_near",
                     "center_prob_mean_far",
@@ -772,6 +921,9 @@ def main() -> None:
                     "grad_norm_before",
                     "grad_norm_after",
                     "clipped",
+                    "clipped_pct",
+                    "nonfinite_gradients",
+                    "skipped_steps",
                     "center_weight_norm",
                     "center_bias",
                     "logits_min",
@@ -816,25 +968,38 @@ def main() -> None:
         centers = batch["center"].to(device)
 
         opt.zero_grad(set_to_none=True)
-        out = model(images)
-        logits = out["center"]
-        details = center_loss_fn(logits, centers, return_details=True)
-        loss = details["loss"]
+        with torch.autocast(device_type="cuda", enabled=amp_enabled):
+            out = model(images)
+            logits = out["center"]
+            details = center_loss_fn(logits, centers, return_details=True)
+            loss = details["loss"]
         if not bool(torch.isfinite(loss).all().item()):
             raise SystemExit(f"Non-finite loss at iter {step}")
-        loss.backward()
+        if amp_enabled:
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
+        else:
+            loss.backward()
 
         params = list(model.center_head.parameters())
         grad_norm_before = _grad_l2_norm(params)
+        grad_nonfinite = not math.isfinite(grad_norm_before)
         clipped = False
-        if float(clip_norm) > 0.0:
+        if float(clip_norm) > 0.0 and math.isfinite(grad_norm_before):
             clipped = bool(grad_norm_before > float(clip_norm))
             if clipped:
                 clipped_n += 1
             torch.nn.utils.clip_grad_norm_(params, max_norm=float(clip_norm))
         grad_norm_after = _grad_l2_norm(params)
-
-        opt.step()
+        skipped_steps = 0
+        if amp_enabled:
+            prev_scale = float(scaler.get_scale())
+            scaler.step(opt)
+            scaler.update()
+            new_scale = float(scaler.get_scale())
+            skipped_steps = int(new_scale < prev_scale)
+        else:
+            opt.step()
 
         with torch.no_grad():
             b = _center_head_output_bias(model)
@@ -882,6 +1047,11 @@ def main() -> None:
                         float(details["pos_loss"].item()),
                         float(details["neg_loss"].item()),
                         float(details["num_pos"].item()),
+                        float(details["pos_normalizer"].item()),
+                        float(details["neg_normalizer"].item()),
+                        float(details["normalized_pos_loss"].item()),
+                        float(details["normalized_neg_loss"].item()),
+                        float(details["normalized_neg_loss"].item() / max(float(details["normalized_pos_loss"].item()), 1e-12)) if float(details["normalized_pos_loss"].item()) > 0 else "",
                         float(best.get("center_prob_mean_pos") or 0.0),
                         float(best.get("center_prob_mean_near") or 0.0),
                         float(best.get("center_prob_mean_far") or 0.0),
@@ -896,6 +1066,9 @@ def main() -> None:
                         float(grad_norm_before),
                         float(grad_norm_after),
                         int(clipped),
+                        float(100.0 * float(clipped_n) / float(max(step, 1))),
+                        int(grad_nonfinite),
+                        int(skipped_steps),
                         float(w_norm) if w_norm is not None else "",
                         float(b) if b is not None else "",
                         float(logits_min),
@@ -943,9 +1116,11 @@ def main() -> None:
                 "eval_every": eval_every,
                 "alpha": alpha,
                 "beta": beta,
+                "normalization_mode": normalization_mode,
                 "init_bias": bias,
                 "init_sigmoid": _safe_sigmoid(bias),
                 "grad_clip_norm": clip_norm,
+                "same_batch_comparison": same_batch,
                 "percent_iterations_clipped": float(100.0 * float(clipped_n) / float(max(iters, 1))),
                 "best_step": int(best_step),
                 "best_center_f1": float(best_f1 or 0.0),

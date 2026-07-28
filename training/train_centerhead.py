@@ -234,8 +234,9 @@ def _build_center_loss(cfg: dict, device: torch.device, *, dataset_root: Path, t
     if loss_type == "centernet_focal":
         alpha = float(loss_cfg.get("alpha", 2.0))
         beta = float(loss_cfg.get("beta", 4.0))
-        loss_fn = CenterNetFocalHeatmapLoss(alpha=alpha, beta=beta).to(device)
-        return loss_fn, {"type": "centernet_focal", "alpha": alpha, "beta": beta}
+        normalization_mode = str(loss_cfg.get("normalization_mode", "legacy_num_pos")).strip().lower() or "legacy_num_pos"
+        loss_fn = CenterNetFocalHeatmapLoss(alpha=alpha, beta=beta, normalization_mode=normalization_mode).to(device)
+        return loss_fn, {"type": "centernet_focal", "alpha": alpha, "beta": beta, "normalization_mode": normalization_mode}
 
     pw = float((cfg.get("center") or {}).get("pos_weight", 0.0) or 0.0)
     if pw <= 0.0:
