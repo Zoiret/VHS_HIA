@@ -292,6 +292,13 @@ def _grad_l2_norm(params: list[torch.nn.Parameter]) -> float:
     return float(np.sqrt(max(s, 0.0)))
 
 
+def _all_parameters_finite(params: list[torch.nn.Parameter]) -> bool:
+    for p in params:
+        if not bool(torch.isfinite(p.detach()).all().item()):
+            return False
+    return True
+
+
 def _max_bn_delta(model: torch.nn.Module, ref: list[tuple[str, torch.Tensor, torch.Tensor]]) -> float:
     max_d = 0.0
     for name, rm0, rv0 in ref:
@@ -1142,8 +1149,18 @@ def train(cfg: dict, device: torch.device) -> None:
                     "sweep_best_instance_mean_matched_iou",
                     "train_grad_norm_mean_before_clip",
                     "train_grad_norm_max_before_clip",
+                    "train_finite_grad_norm_mean_before_clip",
+                    "train_finite_grad_norm_max_before_clip",
+                    "train_nonfinite_grad_batch_count",
+                    "train_skipped_optimizer_step_count",
+                    "train_clipped_batch_count",
                     "train_batches_clipped_pct",
                     "train_grad_norm_mean_after_clip",
+                    "amp_scale_min",
+                    "amp_scale_max",
+                    "amp_scale_last",
+                    "train_loss_is_finite",
+                    "parameters_finite",
                     "center_head_weight_norm",
                     "center_head_output_bias",
                     "lr_backbone",
@@ -1240,6 +1257,16 @@ def train(cfg: dict, device: torch.device) -> None:
                 "",
                 "",
                 "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                float(scaler.get_scale()) if amp_enabled else "",
+                float(scaler.get_scale()) if amp_enabled else "",
+                float(scaler.get_scale()) if amp_enabled else "",
+                True,
+                bool(_all_parameters_finite(list(model.parameters()))),
                 float(_center_head_weight_norm(model)) if _center_head_weight_norm(model) is not None else "",
                 float(_center_head_output_bias(model)) if _center_head_output_bias(model) is not None else "",
                 "" if freeze_base else float(optimizer.param_groups[0]["lr"]),
@@ -1267,7 +1294,15 @@ def train(cfg: dict, device: torch.device) -> None:
         grad_norm_before_sum = 0.0
         grad_norm_before_max = 0.0
         grad_norm_after_sum = 0.0
+        finite_grad_norm_before_sum = 0.0
+        finite_grad_norm_before_max = 0.0
+        nonfinite_grad_batches = 0
+        skipped_optimizer_steps = 0
         clipped_batches = 0
+        amp_scale_min = None
+        amp_scale_max = None
+        amp_scale_last = None
+        train_loss_is_finite = True
         t0 = time.perf_counter()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", unit="batch")
         center_params = list(model.center_head.parameters())
@@ -1285,27 +1320,50 @@ def train(cfg: dict, device: torch.device) -> None:
                 loss_sem = semantic_loss_fn(sem_logits, masks)
                 loss_center = center_loss_fn(center_logits, centers)
                 loss = loss_center if freeze_base else (loss_sem + float(lambda_center) * loss_center)
+            if not bool(torch.isfinite(loss.detach()).all().item()):
+                train_loss_is_finite = False
 
             if amp_enabled:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 grad_before = _grad_l2_norm(center_params)
                 grad_norm_before_sum += float(grad_before)
-                grad_norm_before_max = max(float(grad_norm_before_max), float(grad_before))
-                if float(clip_norm) > 0.0:
+                if np.isfinite(grad_before):
+                    finite_grad_norm_before_sum += float(grad_before)
+                    finite_grad_norm_before_max = max(float(finite_grad_norm_before_max), float(grad_before))
+                    grad_norm_before_max = max(float(grad_norm_before_max), float(grad_before))
+                else:
+                    nonfinite_grad_batches += 1
+                    grad_norm_before_max = float("inf")
+                if float(clip_norm) > 0.0 and np.isfinite(grad_before):
                     if float(grad_before) > float(clip_norm):
                         clipped_batches += 1
                     torch.nn.utils.clip_grad_norm_(center_params, max_norm=float(clip_norm))
                 grad_after = _grad_l2_norm(center_params)
                 grad_norm_after_sum += float(grad_after)
+                prev_scale = float(scaler.get_scale())
+                amp_scale_min = prev_scale if amp_scale_min is None else min(float(amp_scale_min), prev_scale)
+                amp_scale_max = prev_scale if amp_scale_max is None else max(float(amp_scale_max), prev_scale)
                 scaler.step(optimizer)
                 scaler.update()
+                new_scale = float(scaler.get_scale())
+                amp_scale_min = new_scale if amp_scale_min is None else min(float(amp_scale_min), new_scale)
+                amp_scale_max = new_scale if amp_scale_max is None else max(float(amp_scale_max), new_scale)
+                amp_scale_last = new_scale
+                if float(new_scale) < float(prev_scale):
+                    skipped_optimizer_steps += 1
             else:
                 loss.backward()
                 grad_before = _grad_l2_norm(center_params)
                 grad_norm_before_sum += float(grad_before)
-                grad_norm_before_max = max(float(grad_norm_before_max), float(grad_before))
-                if float(clip_norm) > 0.0:
+                if np.isfinite(grad_before):
+                    finite_grad_norm_before_sum += float(grad_before)
+                    finite_grad_norm_before_max = max(float(finite_grad_norm_before_max), float(grad_before))
+                    grad_norm_before_max = max(float(grad_norm_before_max), float(grad_before))
+                else:
+                    nonfinite_grad_batches += 1
+                    grad_norm_before_max = float("inf")
+                if float(clip_norm) > 0.0 and np.isfinite(grad_before):
                     if float(grad_before) > float(clip_norm):
                         clipped_batches += 1
                     torch.nn.utils.clip_grad_norm_(center_params, max_norm=float(clip_norm))
@@ -1354,11 +1412,14 @@ def train(cfg: dict, device: torch.device) -> None:
 
         lr_backbone_now = 0.0 if freeze_base else float(optimizer.param_groups[0]["lr"])
         lr_center_now = float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"])
-        grad_norm_mean_before = float(grad_norm_before_sum / max(n_batches, 1))
+        finite_batch_count = int(max(n_batches - nonfinite_grad_batches, 0))
+        grad_norm_mean_before = float(finite_grad_norm_before_sum / max(finite_batch_count, 1)) if finite_batch_count > 0 else float("nan")
         grad_norm_mean_after = float(grad_norm_after_sum / max(n_batches, 1))
+        finite_grad_norm_mean_before = float(finite_grad_norm_before_sum / max(finite_batch_count, 1)) if finite_batch_count > 0 else None
         clipped_pct = float(100.0 * float(clipped_batches) / float(max(n_batches, 1)))
         center_w_norm = _center_head_weight_norm(model)
         center_bias = _center_head_output_bias(model)
+        params_finite = bool(_all_parameters_finite(list(model.parameters())))
 
         with metrics_csv.open("a", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
@@ -1402,8 +1463,18 @@ def train(cfg: dict, device: torch.device) -> None:
                     float(sweep_best_inst.get("instance_mean_matched_iou")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_mean_matched_iou") is not None else "",
                     grad_norm_mean_before,
                     grad_norm_before_max,
+                    float(finite_grad_norm_mean_before) if finite_grad_norm_mean_before is not None else "",
+                    float(finite_grad_norm_before_max) if finite_batch_count > 0 else "",
+                    int(nonfinite_grad_batches),
+                    int(skipped_optimizer_steps),
+                    int(clipped_batches),
                     clipped_pct,
                     grad_norm_mean_after,
+                    float(amp_scale_min) if amp_scale_min is not None else "",
+                    float(amp_scale_max) if amp_scale_max is not None else "",
+                    float(amp_scale_last) if amp_scale_last is not None else "",
+                    bool(train_loss_is_finite),
+                    bool(params_finite),
                     float(center_w_norm) if center_w_norm is not None else "",
                     float(center_bias) if center_bias is not None else "",
                     "" if freeze_base else lr_backbone_now,
@@ -1506,6 +1577,7 @@ def train(cfg: dict, device: torch.device) -> None:
                 f"epoch={epoch} time={dt:.1f}s train_center_loss={train_loss:.6f} "
                 f"mean_fg={mean_fg} center_f1={center_f1_for_ckpt} instance_score={inst_score_for_ckpt} "
                 f"grad_mean={grad_norm_mean_before:.4f} grad_max={grad_norm_before_max:.4f} clipped={clipped_pct:.1f}% "
+                f"nonfinite_grad_batches={nonfinite_grad_batches} skipped_steps={skipped_optimizer_steps} "
                 f"lr_center={lr_center_now:.2e}"
             )
         else:
