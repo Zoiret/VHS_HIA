@@ -4,14 +4,14 @@ import argparse
 import csv
 import json
 import math
-import shutil
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 
-from diagnose_centerhead_run import _build_model_from_semantic_init, _build_val_loader, _load_checkpoint_state, _read_yaml
+from diagnose_centerhead_run import _build_val_loader, _read_yaml
+from train_centerhead import _build_model as build_centerhead_model_from_config
 from validate_centerhead import (
     _best_perm_sum,
     _case_type,
@@ -24,6 +24,112 @@ from validate_centerhead import (
     _markers_from_center_map,
     _watershed,
 )
+
+
+def _detect_center_head_type_from_state(state: dict) -> str | None:
+    keys = list(state.keys())
+    if any(str(k).startswith("center_head.stem.") or str(k).startswith("center_head.blocks.") or str(k).startswith("center_head.refine.") or str(k).startswith("center_head.out_conv.") for k in keys):
+        return "spatial_dilated"
+    if "center_head.0.weight" in state or "center_head.0.bias" in state:
+        return "linear_1x1"
+    return None
+
+
+def _load_checkpoint_payload(checkpoint_path: Path) -> tuple[dict, dict, int | None]:
+    ckpt = torch.load(str(checkpoint_path), map_location="cpu")
+    if isinstance(ckpt, dict):
+        if isinstance(ckpt.get("model_state_dict"), dict):
+            return ckpt, ckpt["model_state_dict"], _to_int(ckpt.get("epoch"))
+        if isinstance(ckpt.get("model"), dict):
+            return ckpt, ckpt["model"], _to_int(ckpt.get("epoch"))
+        if all(isinstance(k, str) for k in ckpt.keys()):
+            return ckpt, ckpt, _to_int(ckpt.get("epoch"))
+    raise SystemExit(f"Unsupported checkpoint format: {checkpoint_path}")
+
+
+def _strict_load_checkpoint(model: torch.nn.Module, checkpoint_path: Path, *, tag: str) -> dict:
+    payload, state, epoch = _load_checkpoint_payload(checkpoint_path)
+    try:
+        model.load_state_dict(state, strict=True)
+    except RuntimeError:
+        incompat = model.load_state_dict(state, strict=False)
+        missing = list(getattr(incompat, "missing_keys", [])) if incompat is not None else []
+        unexpected = list(getattr(incompat, "unexpected_keys", [])) if incompat is not None else []
+        raise RuntimeError(
+            f"{tag}: strict checkpoint load failed; missing={len(missing)} unexpected={len(unexpected)} "
+            f"missing_head={missing[:10]} unexpected_head={unexpected[:10]}"
+        )
+
+    return {"payload": payload, "state": state, "epoch": epoch}
+
+
+def _count_parameters(model: torch.nn.Module) -> dict:
+    total = sum(int(p.numel()) for p in model.parameters())
+    trainable = sum(int(p.numel()) for p in model.parameters() if p.requires_grad)
+    center_only = sum(int(p.numel()) for n, p in model.named_parameters() if n.startswith("center_head."))
+    return {"total_parameters": total, "trainable_parameters": trainable, "center_head_parameters": center_only}
+
+
+def _checkpoint_configured_head_type(cfg: dict) -> str:
+    return str((cfg.get("model") or {}).get("center_head_type", "linear_1x1")).strip().lower() or "linear_1x1"
+
+
+def _load_model_for_checkpoint(cfg: dict, checkpoint_path: Path, *, tag: str, device: torch.device) -> tuple[torch.nn.Module, dict]:
+    configured_type = _checkpoint_configured_head_type(cfg)
+    model = build_centerhead_model_from_config(cfg).to(device)
+    load_info = _strict_load_checkpoint(model, checkpoint_path, tag=tag)
+    payload = load_info["payload"]
+    state = load_info["state"]
+    detected_type = None
+    if isinstance(payload, dict):
+        detected_type = (
+            ((payload.get("config") or {}).get("model") or {}).get("center_head_type")
+            or ((payload.get("extra") or {}).get("config") or {}).get("model", {}).get("center_head_type")
+        )
+    detected_type = str(detected_type).strip().lower() if detected_type is not None else _detect_center_head_type_from_state(state)
+    if detected_type is None:
+        detected_type = "unknown"
+    if configured_type != detected_type:
+        raise RuntimeError(
+            f"{tag}: configured center_head_type={configured_type} but checkpoint center_head_type={detected_type}"
+        )
+    model.eval()
+    info = {
+        "config_path_center_head_type": configured_type,
+        "detected_checkpoint_center_head_type": detected_type,
+        "checkpoint_epoch": load_info["epoch"],
+        **_count_parameters(model),
+        "missing_keys": 0,
+        "unexpected_keys": 0,
+    }
+    return model, info
+
+
+def _precheck_all_checkpoints(cfg: dict, run_dir: Path) -> dict:
+    device = torch.device("cpu")
+    loader = _build_val_loader(cfg, device=device, batch_size=1, num_workers=0)
+    batch = next(iter(loader))
+    image = batch["image"].to(device)
+    results = {}
+    for tag in ["best_center_f1", "best_center_count_acc", "best_instance_score", "last"]:
+        ckpt_path = run_dir / f"{tag}.pth"
+        if not ckpt_path.exists():
+            results[tag] = {"exists": False}
+            continue
+        model, info = _load_model_for_checkpoint(cfg, ckpt_path, tag=tag, device=device)
+        with torch.no_grad():
+            out = model(image)
+        sem = out["semantic"]
+        ctr = out["center"]
+        finite = bool(torch.isfinite(sem).all().item() and torch.isfinite(ctr).all().item())
+        results[tag] = {
+            "exists": True,
+            **info,
+            "semantic_shape": list(sem.shape),
+            "center_shape": list(ctr.shape),
+            "finite": finite,
+        }
+    return results
 
 
 def _to_float(x):
@@ -190,26 +296,36 @@ def _safe_mean(values: list[float]) -> float | None:
     return float(sum(vals) / len(vals))
 
 
-def _checkpoint_audit(run_dir: Path) -> dict:
+def _checkpoint_audit(run_dir: Path, cfg: dict | None = None) -> dict:
     out = {}
     for name in ["best_center_f1", "best_center_count_acc", "best_instance_score", "last"]:
         p = run_dir / f"{name}.pth"
         if not p.exists():
             out[name] = {"exists": False}
             continue
-        ckpt = torch.load(str(p), map_location="cpu")
+        ckpt, state, epoch = _load_checkpoint_payload(p)
         extra = ckpt.get("extra") if isinstance(ckpt, dict) else {}
         best_thr = (extra or {}).get("best_threshold_metrics") or {}
         val = (extra or {}).get("val") or {}
+        detected_type = (
+            ((ckpt.get("config") or {}).get("model") or {}).get("center_head_type")
+            if isinstance(ckpt, dict)
+            else None
+        )
+        if detected_type is None:
+            detected_type = _detect_center_head_type_from_state(state)
+        configured_type = _checkpoint_configured_head_type(cfg) if cfg is not None else None
         out[name] = {
             "exists": True,
-            "epoch": ckpt.get("epoch") if isinstance(ckpt, dict) else None,
+            "epoch": epoch,
             "saved_threshold": _to_float(best_thr.get("threshold")),
             "center_f1": _to_float(best_thr.get("center_f1", val.get("center_f1"))),
             "center_count_acc": _to_float(best_thr.get("center_count_acc", val.get("center_count_acc"))),
             "instance_score": _to_float(best_thr.get("instance_score")),
             "instance_mean_matched_iou": _to_float(best_thr.get("instance_mean_matched_iou", val.get("instance_mean_matched_iou"))),
             "selection_uses_sweep_metrics": bool((extra or {}).get("threshold_sweep") is not None or (extra or {}).get("best_threshold_metrics") is not None),
+            "configured_center_head_type": configured_type,
+            "detected_checkpoint_center_head_type": detected_type,
         }
     return out
 
@@ -363,14 +479,8 @@ def _export_visual_review(cfg: dict, run_dir: Path, out_dir: Path, selection: di
             summary[tag_name] = {"checkpoint_exists": False}
             continue
         threshold = float(meta["threshold"])
-        model = _build_model_from_semantic_init(cfg).to(device)
-        state, epoch = _load_checkpoint_state(ckpt_path)
-        incompat = model.load_state_dict(state, strict=False)
-        missing = list(getattr(incompat, "missing_keys", [])) if incompat is not None else []
-        unexpected = list(getattr(incompat, "unexpected_keys", [])) if incompat is not None else []
-        if missing or unexpected:
-            raise RuntimeError(f"{tag_name}: checkpoint mismatch missing={len(missing)} unexpected={len(unexpected)}")
-        model.eval()
+        model, load_info = _load_model_for_checkpoint(cfg, ckpt_path, tag=tag_name, device=device)
+        epoch = load_info["checkpoint_epoch"]
 
         buckets = {"correct": [], "zero_centers": [], "extra_centers": [], "merged": [], "fragmented": []}
         for batch in loader:
@@ -455,7 +565,15 @@ def _export_visual_review(cfg: dict, run_dir: Path, out_dir: Path, selection: di
                     ),
                     encoding="utf-8",
                 )
-        summary[tag_name] = {"checkpoint_exists": True, "checkpoint": ckpt_name, "threshold": threshold, "counts": counts}
+        summary[tag_name] = {
+            "checkpoint_exists": True,
+            "checkpoint": ckpt_name,
+            "threshold": threshold,
+            "counts": counts,
+            "configured_center_head_type": load_info["config_path_center_head_type"],
+            "detected_checkpoint_center_head_type": load_info["detected_checkpoint_center_head_type"],
+            "checkpoint_epoch": epoch,
+        }
     return summary
 
 
@@ -489,7 +607,8 @@ def analyze_run(config_path: Path, run_dir: Path, out_dir: Path) -> dict:
     metrics_rows = _read_metrics_csv(metrics_csv)
     metrics_by_epoch = _index_metrics_by_epoch(metrics_rows)
     sweep_rows = _flatten_threshold_sweeps(threshold_dir)
-    checkpoint_audit = _checkpoint_audit(run_dir)
+    checkpoint_audit = _checkpoint_audit(run_dir, cfg=cfg)
+    checkpoint_load_test = _precheck_all_checkpoints(cfg, run_dir)
 
     for r in sweep_rows:
         r["checkpoint_tag"] = _resolve_checkpoint_tag(checkpoint_audit, _to_int(r.get("epoch")), "center_f1")
@@ -540,22 +659,13 @@ def analyze_run(config_path: Path, run_dir: Path, out_dir: Path) -> dict:
         "probability_separation": prob_rows,
         "optimization_audit": optimization,
         "checkpoint_audit": checkpoint_audit,
+        "checkpoint_load_test": checkpoint_load_test,
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
     _write_csv(out_dir / "all_epoch_threshold_metrics.csv", sweep_rows)
     _write_csv(out_dir / "best_by_epoch.csv", best_by_epoch_rows)
     (out_dir / "global_best_metrics.json").write_text(json.dumps(global_best_metrics, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    visual_summary = _export_visual_review(
-        cfg,
-        run_dir,
-        out_dir / "visual_review",
-        {
-            "global_best_center": best_center,
-            "global_best_instance": best_instance,
-        },
-    )
 
     analysis_summary = {
         "run_dir": str(run_dir),
@@ -568,8 +678,25 @@ def analyze_run(config_path: Path, run_dir: Path, out_dir: Path) -> dict:
         "probability_separation": prob_rows,
         "optimization_audit": optimization,
         "checkpoint_audit": checkpoint_audit,
-        "visual_review": visual_summary,
+        "checkpoint_load_test": checkpoint_load_test,
+        "visual_review": None,
+        "visual_review_error": None,
     }
+    (out_dir / "analysis_summary.json").write_text(json.dumps(analysis_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    try:
+        visual_summary = _export_visual_review(
+            cfg,
+            run_dir,
+            out_dir / "visual_review",
+            {
+                "global_best_center": best_center,
+                "global_best_instance": best_instance,
+            },
+        )
+        analysis_summary["visual_review"] = visual_summary
+    except Exception as e:
+        analysis_summary["visual_review_error"] = str(e)
     (out_dir / "analysis_summary.json").write_text(json.dumps(analysis_summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return analysis_summary
 
