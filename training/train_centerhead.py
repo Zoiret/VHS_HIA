@@ -1072,6 +1072,7 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
         last = {
             "semantic_shape": tuple(sem_logits.shape),
             "center_shape": tuple(center_logits.shape),
+            "optimizer_center_lr": float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"]),
             "loss_semantic": float(loss_sem.item()),
             "loss_center": float(loss_center.item()),
             "loss_total": float(loss.item()),
@@ -1284,6 +1285,11 @@ def train(cfg: dict, device: torch.device) -> None:
                     "amp_scale_last",
                     "train_loss_is_finite",
                     "parameters_finite",
+                    "train_logits_finite",
+                    "train_decoder_features_dtype",
+                    "train_center_logits_dtype",
+                    "train_center_loss_dtype",
+                    "train_center_grad_scaler_enabled",
                     "center_head_weight_norm",
                     "center_head_output_bias",
                     "lr_backbone",
@@ -1390,6 +1396,11 @@ def train(cfg: dict, device: torch.device) -> None:
                 float(scaler.get_scale()) if amp_enabled else "",
                 True,
                 bool(_all_parameters_finite(list(model.parameters()))),
+                True,
+                "",
+                "",
+                "",
+                bool(amp_enabled and (not center_fp32)),
                 float(_center_head_weight_norm(model)) if _center_head_weight_norm(model) is not None else "",
                 float(_center_head_output_bias(model)) if _center_head_output_bias(model) is not None else "",
                 "" if freeze_base else float(optimizer.param_groups[0]["lr"]),
@@ -1426,6 +1437,8 @@ def train(cfg: dict, device: torch.device) -> None:
         amp_scale_max = None
         amp_scale_last = None
         train_loss_is_finite = True
+        train_logits_finite = True
+        last_precision_info = None
         t0 = time.perf_counter()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", unit="batch")
         center_params = list(model.center_head.parameters())
@@ -1474,8 +1487,11 @@ def train(cfg: dict, device: torch.device) -> None:
                     "center_logits_dtype": _dtype_name(center_logits),
                     "center_loss_dtype": _dtype_name(loss_center),
                 }
+            last_precision_info = precision_info
             if not bool(torch.isfinite(loss.detach()).all().item()):
                 train_loss_is_finite = False
+            if not bool(torch.isfinite(center_logits.detach()).all().item()):
+                train_logits_finite = False
 
             if bool(scaler.is_enabled()):
                 scaler.scale(loss).backward()
@@ -1629,6 +1645,11 @@ def train(cfg: dict, device: torch.device) -> None:
                     float(amp_scale_last) if amp_scale_last is not None else "",
                     bool(train_loss_is_finite),
                     bool(params_finite),
+                    bool(train_logits_finite),
+                    (last_precision_info or {}).get("decoder_features_dtype", ""),
+                    (last_precision_info or {}).get("center_logits_dtype", ""),
+                    (last_precision_info or {}).get("center_loss_dtype", ""),
+                    (last_precision_info or {}).get("center_grad_scaler_enabled", ""),
                     float(center_w_norm) if center_w_norm is not None else "",
                     float(center_bias) if center_bias is not None else "",
                     "" if freeze_base else lr_backbone_now,
