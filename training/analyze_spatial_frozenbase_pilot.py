@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from diagnose_centerhead_run import _build_val_loader, _read_yaml
-from train_centerhead import _build_model as build_centerhead_model_from_config
+from train_centerhead import _apply_training_policy, _build_model as build_centerhead_model_from_config
 from validate_centerhead import (
     _best_perm_sum,
     _case_type,
@@ -63,11 +63,24 @@ def _strict_load_checkpoint(model: torch.nn.Module, checkpoint_path: Path, *, ta
     return {"payload": payload, "state": state, "epoch": epoch}
 
 
-def _count_parameters(model: torch.nn.Module) -> dict:
+def _count_parameters(model: torch.nn.Module, cfg: dict | None = None) -> dict:
+    freeze_info = _apply_training_policy(model, cfg) if cfg is not None and bool((cfg.get("train") or {}).get("freeze_base", False)) else None
     total = sum(int(p.numel()) for p in model.parameters())
     trainable = sum(int(p.numel()) for p in model.parameters() if p.requires_grad)
-    center_only = sum(int(p.numel()) for n, p in model.named_parameters() if n.startswith("center_head."))
-    return {"total_parameters": total, "trainable_parameters": trainable, "center_head_parameters": center_only}
+    center_only = sum(int(p.numel()) for n, p in model.named_parameters() if n.startswith("center_head.") and p.requires_grad)
+    decoder_only = 0
+    trainable_modules = []
+    if freeze_info is not None:
+        decoder_only = int(freeze_info.get("decoder_trainable_params", 0))
+        trainable_modules = list(freeze_info.get("trainable_base_modules", []))
+    return {
+        "total_parameters": total,
+        "configured_trainable_parameters": trainable,
+        "trainable_parameters": trainable,
+        "center_head_parameters": center_only,
+        "unfrozen_decoder_parameters": int(decoder_only),
+        "trainable_base_modules": trainable_modules,
+    }
 
 
 def _checkpoint_configured_head_type(cfg: dict) -> str:
@@ -98,7 +111,7 @@ def _load_model_for_checkpoint(cfg: dict, checkpoint_path: Path, *, tag: str, de
         "config_path_center_head_type": configured_type,
         "detected_checkpoint_center_head_type": detected_type,
         "checkpoint_epoch": load_info["epoch"],
-        **_count_parameters(model),
+        **_count_parameters(model, cfg),
         "missing_keys": 0,
         "unexpected_keys": 0,
     }
@@ -235,6 +248,40 @@ def _argmax_row_filtered(rows: list[dict], key: str, *, min_epoch: int | None = 
     if min_epoch is not None:
         use_rows = [r for r in rows if _epoch_at_least(r, min_epoch=min_epoch)]
     return _argmax_row(use_rows, key)
+
+
+def _normalize_dtype_name(value) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s in {"", "none", "null", "n/a"}:
+        return None
+    if s in {"torch.float32", "float32", "torch.float"}:
+        return "float32"
+    if s in {"torch.float16", "float16", "torch.half"}:
+        return "float16"
+    if s in {"torch.bfloat16", "bfloat16"}:
+        return "bfloat16"
+    return s
+
+
+def _collect_tied_rows(rows: list[dict], key: str, *, min_epoch: int | None = None, tol: float = 1e-12) -> list[dict]:
+    use_rows = rows
+    if min_epoch is not None:
+        use_rows = [r for r in rows if _epoch_at_least(r, min_epoch=min_epoch)]
+    vals = [_to_float(r.get(key)) for r in use_rows]
+    vals = [float(v) for v in vals if v is not None]
+    if not vals:
+        return []
+    best = max(vals)
+    out = []
+    for r in use_rows:
+        v = _to_float(r.get(key))
+        if v is None:
+            continue
+        if abs(float(v) - float(best)) <= float(tol):
+            out.append(dict(r))
+    return out
 
 
 def _threshold_robustness(rows: list[dict], selected_epoch: int | None, selected_threshold: float | None, selected_f1: float | None) -> dict:
@@ -398,25 +445,44 @@ def _find_log_files(run_dir: Path) -> list[Path]:
 
 
 def _optimization_audit(metrics_rows: list[dict], run_dir: Path) -> dict:
-    grad_mean_vals = [_to_float(r.get("train_finite_grad_norm_mean_before_clip", r.get("train_grad_norm_mean_before_clip"))) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    grad_max_vals = [_to_float(r.get("train_finite_grad_norm_max_before_clip", r.get("train_grad_norm_max_before_clip"))) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    clipped_vals = [_to_float(r.get("train_batches_clipped_pct")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    clipped_batch_vals = [_to_float(r.get("train_clipped_batch_count")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    nonfinite_grad_vals = [_to_float(r.get("train_nonfinite_grad_batch_count")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    skipped_step_vals = [_to_float(r.get("train_skipped_optimizer_step_count")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    amp_scale_min_vals = [_to_float(r.get("amp_scale_min")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    amp_scale_max_vals = [_to_float(r.get("amp_scale_max")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    amp_scale_last_vals = [_to_float(r.get("amp_scale_last")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    train_loss_vals = [_to_float(r.get("train_loss")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    train_loss_finite_flags = [str(r.get("train_loss_is_finite", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    params_finite_flags = [str(r.get("parameters_finite", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    logits_finite_flags = [str(r.get("train_logits_finite", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
-    decoder_dtype_vals = sorted({str(r.get("train_decoder_features_dtype", "")).strip() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0] and str(r.get("train_decoder_features_dtype", "")).strip() != ""})
-    center_logits_dtype_vals = sorted({str(r.get("train_center_logits_dtype", "")).strip() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0] and str(r.get("train_center_logits_dtype", "")).strip() != ""})
-    center_loss_dtype_vals = sorted({str(r.get("train_center_loss_dtype", "")).strip() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0] and str(r.get("train_center_loss_dtype", "")).strip() != ""})
-    center_grad_scaler_flags = [str(r.get("train_center_grad_scaler_enabled", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0] and str(r.get("train_center_grad_scaler_enabled", "")).strip() != ""]
+    train_epoch_rows = [r for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    grad_mean_vals = [_to_float(r.get("train_finite_grad_norm_mean_before_clip", r.get("train_grad_norm_mean_before_clip"))) for r in train_epoch_rows]
+    grad_max_vals = [_to_float(r.get("train_finite_grad_norm_max_before_clip", r.get("train_grad_norm_max_before_clip"))) for r in train_epoch_rows]
+    clipped_vals = [_to_float(r.get("train_batches_clipped_pct")) for r in train_epoch_rows]
+    clipped_batch_vals = [_to_float(r.get("train_clipped_batch_count")) for r in train_epoch_rows]
+    nonfinite_grad_vals = [_to_float(r.get("train_nonfinite_grad_batch_count")) for r in train_epoch_rows]
+    skipped_step_vals = [_to_float(r.get("train_skipped_optimizer_step_count")) for r in train_epoch_rows]
+    amp_scale_min_vals = [_to_float(r.get("amp_scale_min")) for r in train_epoch_rows]
+    amp_scale_max_vals = [_to_float(r.get("amp_scale_max")) for r in train_epoch_rows]
+    amp_scale_last_vals = [_to_float(r.get("amp_scale_last")) for r in train_epoch_rows]
+    params_finite_flags = [str(r.get("parameters_finite", "")).strip().lower() for r in train_epoch_rows]
+    logits_finite_flags = [str(r.get("train_logits_finite", "")).strip().lower() for r in train_epoch_rows]
+    decoder_dtype_vals = sorted({v for v in (_normalize_dtype_name(r.get("train_decoder_features_dtype")) for r in train_epoch_rows) if v is not None})
+    center_logits_dtype_vals = sorted({v for v in (_normalize_dtype_name(r.get("train_center_logits_dtype")) for r in train_epoch_rows) if v is not None})
+    center_loss_dtype_vals = sorted({v for v in (_normalize_dtype_name(r.get("train_center_loss_dtype")) for r in train_epoch_rows) if v is not None})
+    center_grad_scaler_flags = [str(r.get("train_center_grad_scaler_enabled", "")).strip().lower() for r in train_epoch_rows if str(r.get("train_center_grad_scaler_enabled", "")).strip() != ""]
     val_center_loss_vals = [_to_float(r.get("val_center_loss")) for r in metrics_rows if _to_int(r.get("epoch")) is not None]
     val_sem_loss_vals = [_to_float(r.get("val_semantic_loss")) for r in metrics_rows if _to_int(r.get("epoch")) is not None]
+    train_loss_nonfinite_rows = []
+    for r in train_epoch_rows:
+        raw = r.get("train_loss")
+        flag = str(r.get("train_loss_is_finite", "")).strip().lower()
+        if raw in [None, ""]:
+            continue
+        val = _to_float(raw)
+        value_is_bad = (val is None) or (not math.isfinite(float(val)))
+        flag_is_bad = flag in {"false", "0"}
+        if value_is_bad or flag_is_bad:
+            train_loss_nonfinite_rows.append(
+                {
+                    "epoch": _to_int(r.get("epoch")),
+                    "raw_value": str(raw),
+                    "train_loss_is_finite": flag if flag != "" else None,
+                }
+            )
+    decoder_dtype_complete = all(_normalize_dtype_name(r.get("train_decoder_features_dtype")) is not None for r in train_epoch_rows) if train_epoch_rows else None
+    center_logits_dtype_complete = all(_normalize_dtype_name(r.get("train_center_logits_dtype")) is not None for r in train_epoch_rows) if train_epoch_rows else None
+    center_loss_dtype_complete = all(_normalize_dtype_name(r.get("train_center_loss_dtype")) is not None for r in train_epoch_rows) if train_epoch_rows else None
 
     missing_fields = []
     log_hits = []
@@ -461,13 +527,18 @@ def _optimization_audit(metrics_rows: list[dict], run_dir: Path) -> dict:
         "grad_norm_max_before_clip_max": max([float(v) for v in grad_max_vals if v is not None and math.isfinite(float(v))], default=None),
         "parameters_finite": all(v in {"true", "1"} for v in params_finite_flags) if params_finite_flags else None,
         "train_logits_finite": all(v in {"true", "1"} for v in logits_finite_flags) if logits_finite_flags else None,
-        "train_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in train_loss_vals) and all(v in {"true", "1"} for v in train_loss_finite_flags if v != ""),
+        "train_loss_all_finite": bool(len(train_loss_nonfinite_rows) == 0),
+        "train_loss_nonfinite_rows": train_loss_nonfinite_rows,
         "val_center_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in val_center_loss_vals),
         "val_semantic_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in val_sem_loss_vals),
         "decoder_features_dtype_values": decoder_dtype_vals,
         "center_logits_dtype_values": center_logits_dtype_vals,
         "center_loss_dtype_values": center_loss_dtype_vals,
-        "center_dtype_all_epochs_float32": bool(decoder_dtype_vals == ["float32"] and center_logits_dtype_vals == ["float32"] and center_loss_dtype_vals == ["float32"]) if (decoder_dtype_vals or center_logits_dtype_vals or center_loss_dtype_vals) else None,
+        "decoder_features_all_float32": bool(decoder_dtype_vals == ["float32"]) if decoder_dtype_complete is not None else None,
+        "center_logits_all_float32": bool(center_logits_dtype_vals == ["float32"]) if center_logits_dtype_complete is not None else None,
+        "center_loss_all_float32": bool(center_loss_dtype_vals == ["float32"]) if center_loss_dtype_complete is not None else None,
+        "center_dtype_logging_complete": bool(decoder_dtype_complete and center_logits_dtype_complete and center_loss_dtype_complete) if train_epoch_rows else None,
+        "center_dtype_all_epochs_float32": bool(decoder_dtype_vals == ["float32"] and center_logits_dtype_vals == ["float32"] and center_loss_dtype_vals == ["float32"] and decoder_dtype_complete and center_logits_dtype_complete and center_loss_dtype_complete) if train_epoch_rows else None,
         "center_grad_scaler_enabled_values": center_grad_scaler_flags,
         "center_grad_scaler_disabled_all_epochs": all(v in {"false", "0"} for v in center_grad_scaler_flags) if center_grad_scaler_flags else None,
         "amp_behavior": {
@@ -700,10 +771,22 @@ def analyze_run(config_path: Path, run_dir: Path, out_dir: Path) -> dict:
 
     best_center = _argmax_row(sweep_rows, "center_f1") or {}
     best_count = _argmax_row(sweep_rows, "center_count_acc") or {}
+    best_count_ties = _collect_tied_rows(sweep_rows, "center_count_acc")
     best_instance = _argmax_row_filtered(sweep_rows, "instance_score", min_epoch=1) or {}
     best_miou = _argmax_row_filtered(sweep_rows, "instance_mean_matched_iou", min_epoch=1) or {}
     best_center["checkpoint_tag"] = _resolve_checkpoint_tag(checkpoint_audit, _to_int(best_center.get("epoch")), "center_f1")
+    best_count["checkpoint_tag"] = _resolve_checkpoint_tag(checkpoint_audit, _to_int(best_count.get("epoch")), "center_count_acc")
     best_instance["checkpoint_tag"] = _resolve_checkpoint_tag(checkpoint_audit, _to_int(best_instance.get("epoch")), "instance_score")
+    best_count_ties_summary = [
+        {
+            "epoch": _to_int(r.get("epoch")),
+            "threshold": _to_float(r.get("threshold")),
+            "center_count_acc": _to_float(r.get("center_count_acc")),
+            "center_f1": _to_float(r.get("center_f1")),
+            "checkpoint_tag": _resolve_checkpoint_tag(checkpoint_audit, _to_int(r.get("epoch")), "center_count_acc"),
+        }
+        for r in best_count_ties
+    ]
     threshold_robustness = _threshold_robustness(
         sweep_rows,
         _to_int(best_center.get("epoch")),
@@ -745,6 +828,8 @@ def analyze_run(config_path: Path, run_dir: Path, out_dir: Path) -> dict:
     global_best_metrics = {
         "best_center_f1": best_center,
         "best_center_count_acc": best_count,
+        "best_center_count_acc_ties": best_count_ties_summary,
+        "best_center_count_acc_checkpoint_selection_rule": "Training saves best_center_count_acc only on strict improvement (>): later ties do not replace the earlier checkpoint.",
         "best_instance_score": best_instance,
         "best_instance_mean_matched_iou": best_miou,
         "epoch0_baseline": epoch0_baseline,
@@ -766,6 +851,7 @@ def analyze_run(config_path: Path, run_dir: Path, out_dir: Path) -> dict:
         "threshold_dir": str(threshold_dir),
         "global_best_center": best_center,
         "global_best_center_count_acc": best_count,
+        "global_best_center_count_acc_ties": best_count_ties_summary,
         "global_best_instance": best_instance,
         "global_best_instance_mean_matched_iou": best_miou,
         "epoch0_baseline": epoch0_baseline,

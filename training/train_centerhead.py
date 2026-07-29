@@ -250,25 +250,104 @@ def _freeze_base_enabled(cfg: dict) -> bool:
     return bool((cfg.get("train") or {}).get("freeze_base", False))
 
 
-def _apply_freeze_base(model: UnetPlusPlusSemanticCenterHead) -> dict:
-    for p in model.base.parameters():
+def _trainable_base_module_paths(cfg: dict) -> list[str]:
+    vals = (cfg.get("train") or {}).get("trainable_base_modules", [])
+    if vals in [None, ""]:
+        return []
+    if not isinstance(vals, list):
+        raise SystemExit("Config: train.trainable_base_modules must be a list of module paths")
+    out = []
+    for x in vals:
+        sx = str(x).strip()
+        if sx:
+            out.append(sx)
+    return out
+
+
+def _resolve_named_module(model: torch.nn.Module, module_path: str) -> torch.nn.Module:
+    mods = dict(model.named_modules())
+    mod = mods.get(str(module_path), None)
+    if mod is None:
+        raise SystemExit(f"Unknown module path in trainable_base_modules: {module_path}")
+    return mod
+
+
+def _param_names_for_module_path(model: torch.nn.Module, module_path: str) -> list[str]:
+    prefix = str(module_path).strip() + "."
+    return [n for (n, _p) in model.named_parameters() if n.startswith(prefix)]
+
+
+def _parameter_count_by_names(model: torch.nn.Module, names: list[str]) -> int:
+    want = set(str(n) for n in names)
+    return int(sum(int(p.numel()) for n, p in model.named_parameters() if n in want))
+
+
+def _partial_unfreeze_enabled(cfg: dict) -> bool:
+    return _freeze_base_enabled(cfg) and len(_trainable_base_module_paths(cfg)) > 0
+
+
+def _apply_training_policy(model: UnetPlusPlusSemanticCenterHead, cfg: dict) -> dict:
+    freeze_base = _freeze_base_enabled(cfg)
+    trainable_base_modules = _trainable_base_module_paths(cfg) if freeze_base else []
+
+    for p in model.parameters():
         p.requires_grad = False
     for p in model.center_head.parameters():
         p.requires_grad = True
-    model.freeze_base = True
+
+    selected_param_names: list[str] = []
+    for module_path in trainable_base_modules:
+        _resolve_named_module(model, module_path)
+        names = _param_names_for_module_path(model, module_path)
+        if not names:
+            raise SystemExit(f"Selected trainable module has no parameters: {module_path}")
+        for n, p in model.named_parameters():
+            if n in names:
+                p.requires_grad = True
+        selected_param_names.extend(names)
+
+    model.freeze_base = bool(freeze_base)
+    model.trainable_base_module_paths = list(trainable_base_modules)
+    model.partial_unfreeze = bool(len(trainable_base_modules) > 0)
+
     total_params = int(sum(int(p.numel()) for p in model.parameters()))
     trainable_params = int(sum(int(p.numel()) for p in model.parameters() if bool(p.requires_grad)))
     trainable_names = [n for (n, p) in model.named_parameters() if bool(p.requires_grad)]
-    assert all(n.startswith("center_head.") for n in trainable_names), f"Non-center_head trainable params found: {trainable_names[:10]}"
-    return {"total_params": total_params, "trainable_params": trainable_params, "trainable_names": trainable_names}
+    allowed_prefixes = ["center_head."] + [f"{p}." for p in trainable_base_modules]
+    assert all(any(n.startswith(pref) for pref in allowed_prefixes) for n in trainable_names), f"Unexpected trainable params found: {trainable_names[:10]}"
+
+    center_param_names = [n for n, _p in model.named_parameters() if n.startswith("center_head.")]
+    decoder_param_names = sorted(set(selected_param_names))
+    return {
+        "freeze_base": bool(freeze_base),
+        "partial_unfreeze": bool(len(trainable_base_modules) > 0),
+        "trainable_base_modules": list(trainable_base_modules),
+        "total_params": total_params,
+        "trainable_params": trainable_params,
+        "trainable_names": trainable_names,
+        "center_param_names": center_param_names,
+        "decoder_param_names": decoder_param_names,
+        "center_trainable_params": _parameter_count_by_names(model, center_param_names),
+        "decoder_trainable_params": _parameter_count_by_names(model, decoder_param_names),
+    }
 
 
 def _set_train_modes(model: UnetPlusPlusSemanticCenterHead, *, freeze_base: bool) -> None:
     if freeze_base:
-        model.center_head.train()
+        model.train()
         model.base.eval()
+        model.encoder.eval()
+        model.segmentation_head.eval()
+        model.base.decoder.eval()
+        model.center_head.train()
+        for module_path in list(getattr(model, "trainable_base_module_paths", []) or []):
+            _resolve_named_module(model, module_path).train()
     else:
         model.train()
+
+
+def _apply_freeze_base(model: UnetPlusPlusSemanticCenterHead) -> dict:
+    return _apply_training_policy(model, {"train": {"freeze_base": True}})
 
 
 def _collect_batchnorm_stats(model: torch.nn.Module) -> list[tuple[str, torch.Tensor, torch.Tensor]]:
@@ -293,6 +372,25 @@ def _grad_l2_norm(params: list[torch.nn.Parameter]) -> float:
     return float(np.sqrt(max(s, 0.0)))
 
 
+def _named_grad_l2_norm(named_params: list[tuple[str, torch.nn.Parameter]]) -> float:
+    s = 0.0
+    for _n, p in named_params:
+        if p.grad is None:
+            continue
+        s += float(torch.sum(p.grad.detach().float() ** 2).item())
+    return float(np.sqrt(max(s, 0.0)))
+
+
+def _nonfinite_grad_tensor_count(named_params: list[tuple[str, torch.nn.Parameter]]) -> int:
+    out = 0
+    for _n, p in named_params:
+        if p.grad is None:
+            continue
+        if not bool(torch.isfinite(p.grad.detach()).all().item()):
+            out += 1
+    return int(out)
+
+
 def _all_parameters_finite(params: list[torch.nn.Parameter]) -> bool:
     for p in params:
         if not bool(torch.isfinite(p.detach()).all().item()):
@@ -314,6 +412,98 @@ def _max_bn_delta(model: torch.nn.Module, ref: list[tuple[str, torch.Tensor, tor
         d2 = float((rv.detach() - rv0).abs().max().item()) if rv.numel() else 0.0
         max_d = max(max_d, d1, d2)
     return float(max_d)
+
+
+def _name_matches_prefixes(name: str, prefixes: list[str]) -> bool:
+    return any(str(name).startswith(str(p)) for p in prefixes)
+
+
+def _max_bn_delta_filtered(model: torch.nn.Module, ref: list[tuple[str, torch.Tensor, torch.Tensor]], *, include_prefixes: list[str] | None = None, exclude_prefixes: list[str] | None = None) -> float | None:
+    max_d = None
+    for name, rm0, rv0 in ref:
+        if include_prefixes is not None and not _name_matches_prefixes(name, include_prefixes):
+            continue
+        if exclude_prefixes is not None and _name_matches_prefixes(name, exclude_prefixes):
+            continue
+        m = dict(model.named_modules()).get(name, None)
+        if m is None:
+            continue
+        rm = getattr(m, "running_mean", None)
+        rv = getattr(m, "running_var", None)
+        if rm is None or rv is None:
+            continue
+        d1 = float((rm.detach() - rm0).abs().max().item()) if rm.numel() else 0.0
+        d2 = float((rv.detach() - rv0).abs().max().item()) if rv.numel() else 0.0
+        cur = max(d1, d2)
+        max_d = cur if max_d is None else max(float(max_d), float(cur))
+    return float(max_d) if max_d is not None else None
+
+
+def _snapshot_named_parameters(named_params: list[tuple[str, torch.nn.Parameter]]) -> dict[str, torch.Tensor]:
+    return {str(n): p.detach().clone() for n, p in named_params}
+
+
+def _max_parameter_delta_from_snapshot(named_params: list[tuple[str, torch.nn.Parameter]], snap: dict[str, torch.Tensor]) -> float:
+    max_d = 0.0
+    for n, p in named_params:
+        ref = snap.get(str(n), None)
+        if ref is None:
+            continue
+        d = float((p.detach() - ref).abs().max().item()) if p.numel() else 0.0
+        max_d = max(max_d, d)
+    return float(max_d)
+
+
+def _count_present_grads(named_params: list[tuple[str, torch.nn.Parameter]]) -> int:
+    return int(sum(1 for _n, p in named_params if p.grad is not None))
+
+
+def _build_optimizer_groups(model: UnetPlusPlusSemanticCenterHead, cfg: dict, freeze_info: dict | None, *, freeze_base: bool) -> tuple[torch.optim.Optimizer, list[dict]]:
+    base_lr = float((cfg.get("train") or {}).get("lr_backbone", cfg["train"]["lr"]))
+    head_lr = float((cfg.get("train") or {}).get("lr_center_head", base_lr * 10.0))
+    decoder_lr = float((cfg.get("train") or {}).get("lr_unfrozen_decoder", base_lr))
+    wd = float(cfg["train"]["weight_decay"])
+
+    group_specs: list[dict] = []
+    if freeze_base:
+        center_named = [(n, p) for n, p in model.named_parameters() if n.startswith("center_head.") and p.requires_grad]
+        decoder_named = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not n.startswith("center_head."))]
+        group_specs.append({"name": "center_head", "named_params": center_named, "lr": head_lr})
+        if decoder_named:
+            group_specs.append({"name": "unfrozen_decoder", "named_params": decoder_named, "lr": decoder_lr})
+    else:
+        params_base = [(n, p) for n, p in model.named_parameters() if p.requires_grad and not (n.startswith("center_head.") or ".center_head." in n)]
+        params_head = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (n.startswith("center_head.") or ".center_head." in n)]
+        group_specs = [
+            {"name": "base", "named_params": params_base, "lr": base_lr},
+            {"name": "center_head", "named_params": params_head, "lr": head_lr},
+        ]
+
+    seen = set()
+    for g in group_specs:
+        for n, _p in g["named_params"]:
+            if n in seen:
+                raise SystemExit(f"Optimizer group overlap detected for parameter: {n}")
+            seen.add(n)
+    frozen_in_optimizer = [n for g in group_specs for n, p in g["named_params"] if not p.requires_grad]
+    if frozen_in_optimizer:
+        raise SystemExit(f"Frozen parameters included in optimizer: {frozen_in_optimizer[:10]}")
+
+    optimizer = torch.optim.AdamW(
+        [{"params": [p for _n, p in g["named_params"]], "lr": float(g["lr"])} for g in group_specs if g["named_params"]],
+        weight_decay=wd,
+    )
+    meta = []
+    for g in group_specs:
+        meta.append(
+            {
+                "name": g["name"],
+                "lr": float(g["lr"]),
+                "param_count": int(sum(int(p.numel()) for _n, p in g["named_params"])),
+                "parameter_names": [n for n, _p in g["named_params"]],
+            }
+        )
+    return optimizer, meta
 
 
 def _save_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer, epoch: int, cfg: dict, extra: dict) -> None:
@@ -371,17 +561,20 @@ def _dtype_name(x: torch.Tensor | None) -> str | None:
     return str(x.dtype).replace("torch.", "")
 
 
-def _forward_frozen_base(
+def _forward_base_for_center_training(
     *,
     model: UnetPlusPlusSemanticCenterHead,
     images: torch.Tensor,
     device: torch.device,
     amp_enabled_global: bool,
+    detach_output: bool,
+    no_grad: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    with torch.no_grad():
+    ctx = torch.no_grad() if bool(no_grad) else torch.enable_grad()
+    with ctx:
         with _autocast_ctx(device, enabled=amp_enabled_global):
             semantic_logits, decoder_output = model.forward_base(images)
-    return semantic_logits, decoder_output.detach()
+    return semantic_logits, decoder_output.detach() if bool(detach_output) else decoder_output
 
 
 def _forward_center_with_precision(
@@ -393,9 +586,10 @@ def _forward_center_with_precision(
     device: torch.device,
     amp_enabled_global: bool,
     center_fp32: bool,
+    detach_decoder_output: bool = True,
     return_details: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | dict, dict]:
-    decoder_features = decoder_output.detach()
+    decoder_features = decoder_output.detach() if bool(detach_decoder_output) else decoder_output
     if center_fp32:
         decoder_features = decoder_features.float()
     center_autocast_enabled = bool(amp_enabled_global and (not center_fp32))
@@ -418,6 +612,23 @@ def _forward_center_with_precision(
         "center_loss_dtype": _dtype_name(center_loss),
     }
     return decoder_features, center_logits, payload, precision_info
+
+
+def _forward_frozen_base(
+    *,
+    model: UnetPlusPlusSemanticCenterHead,
+    images: torch.Tensor,
+    device: torch.device,
+    amp_enabled_global: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _forward_base_for_center_training(
+        model=model,
+        images=images,
+        device=device,
+        amp_enabled_global=amp_enabled_global,
+        detach_output=True,
+        no_grad=True,
+    )
 
 
 def _export_val_visuals(out_dir: Path, model: torch.nn.Module, loader, device: torch.device, *, max_samples: int = 20) -> None:
@@ -856,13 +1067,19 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
     print(f"batch_size: {int((cfg.get('train') or {}).get('batch_size', 1))}")
 
     freeze_base = _freeze_base_enabled(cfg)
+    partial_unfreeze = _partial_unfreeze_enabled(cfg)
     train_loader, val_loader = _build_loaders(cfg, device=device)
     model = _build_model(cfg).to(device)
     if freeze_base:
-        freeze_info = _apply_freeze_base(model)
+        freeze_info = _apply_training_policy(model, cfg)
         print("=== FREEZE BASE ===")
         print(f"total_params: {freeze_info['total_params']}")
         print(f"trainable_params: {freeze_info['trainable_params']}")
+        print(f"center_trainable_params: {freeze_info['center_trainable_params']}")
+        print(f"decoder_trainable_params: {freeze_info['decoder_trainable_params']}")
+        print(f"partial_unfreeze: {freeze_info['partial_unfreeze']}")
+        for mp in freeze_info["trainable_base_modules"]:
+            print(f"trainable_base_module: {mp}")
         for n in freeze_info["trainable_names"]:
             print(f"trainable: {n}")
     _set_train_modes(model, freeze_base=freeze_base)
@@ -885,28 +1102,8 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
     center_loss_fn, center_loss_info = _build_center_loss(cfg, device=device, dataset_root=ds_root, train_txt=train_txt)
     lambda_center = float((cfg.get("center") or {}).get("lambda", 1.0))
 
-    base_lr = float((cfg.get("train") or {}).get("lr_backbone", cfg["train"]["lr"]))
-    head_lr = float((cfg.get("train") or {}).get("lr_center_head", base_lr * 10.0))
     clip_norm = float((cfg.get("train") or {}).get("center_grad_clip_norm", 0.0) or 0.0)
-    if freeze_base:
-        optimizer = torch.optim.AdamW(
-            [{"params": list(model.center_head.parameters()), "lr": head_lr}],
-            weight_decay=float(cfg["train"]["weight_decay"]),
-        )
-    else:
-        params_base = []
-        params_head = []
-        for n, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            if n.startswith("center_head.") or ".center_head." in n:
-                params_head.append(p)
-            else:
-                params_base.append(p)
-        optimizer = torch.optim.AdamW(
-            [{"params": params_base, "lr": base_lr}, {"params": params_head, "lr": head_lr}],
-            weight_decay=float(cfg["train"]["weight_decay"]),
-        )
+    optimizer, optimizer_meta = _build_optimizer_groups(model, cfg, freeze_info if freeze_base else None, freeze_base=freeze_base)
 
     steps = int((cfg.get("train") or {}).get("smoke_steps", 2))
     train_it = iter(train_loader)
@@ -914,6 +1111,12 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     bn_ref = _collect_batchnorm_stats(model.base) if freeze_base else []
+    center_named_params = [(n, p) for n, p in model.named_parameters() if n.startswith("center_head.") and p.requires_grad]
+    decoder_named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not n.startswith("center_head."))]
+    frozen_named_params = [(n, p) for n, p in model.named_parameters() if not p.requires_grad]
+    encoder_frozen_named = [(n, p) for n, p in model.named_parameters() if n.startswith("base.encoder.") and not p.requires_grad]
+    decoder_frozen_named = [(n, p) for n, p in model.named_parameters() if n.startswith("base.decoder.") and not p.requires_grad]
+    semantic_head_frozen_named = [(n, p) for n, p in model.named_parameters() if n.startswith("base.segmentation_head.") and not p.requires_grad]
     for _ in range(int(steps)):
         batch = next(train_it)
         images = batch["image"].to(device)
@@ -923,20 +1126,27 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
         _set_train_modes(model, freeze_base=freeze_base)
         with torch.no_grad():
             if freeze_base:
-                sem_before, _decoder_before = _forward_frozen_base(
+                sem_before, _decoder_before = _forward_base_for_center_training(
                     model=model,
                     images=images,
                     device=device,
                     amp_enabled_global=amp_enabled,
+                    detach_output=False,
+                    no_grad=True,
                 )
             else:
                 sem_before = None
+        center_snapshot = _snapshot_named_parameters(center_named_params)
+        decoder_snapshot = _snapshot_named_parameters(decoder_named_params)
+        frozen_snapshot = _snapshot_named_parameters(frozen_named_params)
         if freeze_base:
-            sem_logits, decoder_output = _forward_frozen_base(
+            sem_logits, decoder_output = _forward_base_for_center_training(
                 model=model,
                 images=images,
                 device=device,
                 amp_enabled_global=amp_enabled,
+                detach_output=not partial_unfreeze,
+                no_grad=not partial_unfreeze,
             )
             _decoder_features, center_logits, center_payload, precision_info = _forward_center_with_precision(
                 model=model,
@@ -946,6 +1156,7 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
                 device=device,
                 amp_enabled_global=amp_enabled,
                 center_fp32=center_fp32,
+                detach_decoder_output=not partial_unfreeze,
                 return_details=isinstance(center_loss_fn, CenterNetFocalHeatmapLoss),
             )
             if isinstance(center_loss_fn, CenterNetFocalHeatmapLoss):
@@ -1017,80 +1228,89 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             raise SystemExit("Smoke test failed: loss is not finite")
 
         loss.backward()
+        center_grad_norm_before = _named_grad_l2_norm(center_named_params)
+        decoder_grad_norm_before = _named_grad_l2_norm(decoder_named_params)
+        combined_grad_norm_before = _grad_l2_norm([p for _n, p in center_named_params + decoder_named_params])
+        nonfinite_grad_tensors = _nonfinite_grad_tensor_count(center_named_params + decoder_named_params)
+        if nonfinite_grad_tensors > 0:
+            raise SystemExit("Smoke test failed: non-finite trainable gradients")
+        if (center_grad_norm_before <= 0.0) or (partial_unfreeze and decoder_grad_norm_before <= 0.0):
+            raise SystemExit("Smoke test failed: missing trainable gradients")
 
-        grad_mean_abs = float(next(iter(model.center_head.parameters())).grad.detach().abs().mean().item())
-        grad_max_abs = float(next(iter(model.center_head.parameters())).grad.detach().abs().max().item())
-        if not np.isfinite(grad_mean_abs) or not np.isfinite(grad_max_abs):
-            raise SystemExit("Smoke test failed: center grad is not finite")
-
-        grad_norm_before = None
-        grad_norm_after = None
         if float(clip_norm) > 0.0:
-            params = list(model.center_head.parameters())
-            with torch.no_grad():
-                s = 0.0
-                for p in params:
-                    if p.grad is None:
-                        continue
-                    s += float(torch.sum(p.grad.detach().float() ** 2).item())
-                grad_norm_before = float(np.sqrt(s))
-            torch.nn.utils.clip_grad_norm_(params, max_norm=float(clip_norm))
-            with torch.no_grad():
-                s = 0.0
-                for p in params:
-                    if p.grad is None:
-                        continue
-                    s += float(torch.sum(p.grad.detach().float() ** 2).item())
-                grad_norm_after = float(np.sqrt(s))
+            torch.nn.utils.clip_grad_norm_([p for _n, p in center_named_params + decoder_named_params], max_norm=float(clip_norm))
+        center_grad_norm_after = _named_grad_l2_norm(center_named_params)
+        decoder_grad_norm_after = _named_grad_l2_norm(decoder_named_params)
+        combined_grad_norm_after = _grad_l2_norm([p for _n, p in center_named_params + decoder_named_params])
 
         optimizer.step()
         with torch.no_grad():
             if freeze_base:
-                sem_after, _decoder_after = _forward_frozen_base(
+                sem_after, _decoder_after = _forward_base_for_center_training(
                     model=model,
                     images=images,
                     device=device,
                     amp_enabled_global=amp_enabled,
+                    detach_output=False,
+                    no_grad=True,
                 )
             else:
                 sem_after = None
         sem_delta = None
         if freeze_base and sem_before is not None and sem_after is not None:
             sem_delta = float((sem_before - sem_after).abs().max().item())
-        params_finite = True
-        for p in model.center_head.parameters():
-            if not bool(torch.isfinite(p.detach()).all().item()):
-                params_finite = False
-                break
+        params_finite = bool(_all_parameters_finite([p for _n, p in center_named_params + decoder_named_params]))
         logits_finite = bool(torch.isfinite(center_logits.detach()).all().item())
-        grad = next(iter(model.center_head.parameters())).grad
-        grad_norm = float(grad.detach().abs().mean().item()) if grad is not None else 0.0
-        base_grad_any = False
-        for p in model.base.parameters():
-            if p.grad is not None:
-                base_grad_any = True
-                break
-        bn_delta = _max_bn_delta(model.base, bn_ref) if freeze_base else None
+        base_grad_any = bool(any(p.grad is not None for p in model.base.parameters()))
+        frozen_bn_delta = _max_bn_delta_filtered(model.base, bn_ref, exclude_prefixes=[p.replace("base.", "", 1) for p in freeze_info["trainable_base_modules"]]) if freeze_base else None
+        selected_bn_delta = _max_bn_delta_filtered(model.base, bn_ref, include_prefixes=[p.replace("base.", "", 1) for p in freeze_info["trainable_base_modules"]]) if freeze_base and partial_unfreeze else None
+        selected_decoder_delta = _max_parameter_delta_from_snapshot(decoder_named_params, decoder_snapshot)
+        center_head_delta = _max_parameter_delta_from_snapshot(center_named_params, center_snapshot)
+        frozen_param_max_delta = _max_parameter_delta_from_snapshot(frozen_named_params, frozen_snapshot)
         last = {
             "semantic_shape": tuple(sem_logits.shape),
             "center_shape": tuple(center_logits.shape),
             "optimizer_center_lr": float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"]),
+            "optimizer_decoder_lr": float(next((g["lr"] for g in optimizer_meta if g["name"] == "unfrozen_decoder"), 0.0)) if freeze_base else float(optimizer.param_groups[0]["lr"]),
             "loss_semantic": float(loss_sem.item()),
             "loss_center": float(loss_center.item()),
             "loss_total": float(loss.item()),
-            "center_grad_mean_abs": grad_norm,
-            "center_grad_max_abs": float(grad_max_abs),
-            "grad_norm_before_clip": grad_norm_before,
-            "grad_norm_after_clip": grad_norm_after,
-            "center_grad_all_finite": bool(np.isfinite(grad_mean_abs) and np.isfinite(grad_max_abs)),
+            "center_grad_norm_before_clip": float(center_grad_norm_before),
+            "decoder_grad_norm_before_clip": float(decoder_grad_norm_before),
+            "combined_grad_norm_before_clip": float(combined_grad_norm_before),
+            "center_grad_norm_after_clip": float(center_grad_norm_after),
+            "decoder_grad_norm_after_clip": float(decoder_grad_norm_after),
+            "combined_grad_norm_after_clip": float(combined_grad_norm_after),
+            "center_grad_all_finite": True,
             "base_grad_any": bool(base_grad_any),
             "base_eval_mode": bool(not model.base.training),
+            "encoder_eval_mode": bool(not model.encoder.training),
+            "decoder_eval_mode": bool(not model.base.decoder.training),
+            "segmentation_head_eval_mode": bool(not model.segmentation_head.training),
             "center_train_mode": bool(model.center_head.training),
+            "selected_decoder_train_mode": bool(all(_resolve_named_module(model, mp).training for mp in freeze_info["trainable_base_modules"])) if freeze_base and partial_unfreeze else None,
             "semantic_logits_max_abs_delta_after_step": sem_delta,
-            "bn_running_stats_max_abs_delta_after_step": bn_delta,
+            "frozen_bn_running_stats_max_abs_delta_after_step": frozen_bn_delta,
+            "selected_block_bn_running_stats_max_abs_delta_after_step": selected_bn_delta,
             "center_loss": center_loss_info,
             "lambda_center": float(lambda_center),
             "freeze_base": bool(freeze_base),
+            "partial_unfreeze": bool(partial_unfreeze),
+            "trainable_parameter_names": list(freeze_info["trainable_names"]) if freeze_base and freeze_info is not None else [n for n, _p in center_named_params + decoder_named_params],
+            "total_trainable_parameter_count": int(freeze_info["trainable_params"]) if freeze_base and freeze_info is not None else int(sum(int(p.numel()) for _n, p in center_named_params + decoder_named_params)),
+            "center_head_trainable_parameter_count": int(freeze_info["center_trainable_params"]) if freeze_base and freeze_info is not None else int(sum(int(p.numel()) for _n, p in center_named_params)),
+            "decoder_block_trainable_parameter_count": int(freeze_info["decoder_trainable_params"]) if freeze_base and freeze_info is not None else int(sum(int(p.numel()) for _n, p in decoder_named_params)),
+            "trainable_base_modules": list(freeze_info["trainable_base_modules"]) if freeze_base and freeze_info is not None else [],
+            "trainable_parameter_groups": optimizer_meta,
+            "optimizer_group_overlap": False,
+            "optimizer_frozen_parameter_count": 0,
+            "nonfinite_gradient_tensors": int(nonfinite_grad_tensors),
+            "frozen_encoder_grad_count": int(_count_present_grads(encoder_frozen_named)),
+            "frozen_decoder_grad_count": int(_count_present_grads(decoder_frozen_named)),
+            "semantic_head_grad_count": int(_count_present_grads(semantic_head_frozen_named)),
+            "selected_decoder_parameter_delta": float(selected_decoder_delta),
+            "center_head_parameter_delta": float(center_head_delta),
+            "frozen_parameter_max_delta": float(frozen_param_max_delta),
             "focal_pos_loss": center_pos_loss,
             "focal_neg_loss": center_neg_loss,
             "focal_num_pos": center_num_pos,
@@ -1113,18 +1333,32 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
         }
 
     if freeze_base:
-        if bool(last.get("base_grad_any", False)):
+        if (not partial_unfreeze) and bool(last.get("base_grad_any", False)):
             raise SystemExit("Freeze smoke test failed: base_grad_any=true")
         if not bool(last.get("base_eval_mode", False)):
             raise SystemExit("Freeze smoke test failed: base is not in eval mode")
+        if not bool(last.get("encoder_eval_mode", False)):
+            raise SystemExit("Freeze smoke test failed: encoder is not in eval mode")
+        if not bool(last.get("decoder_eval_mode", False)):
+            raise SystemExit("Freeze smoke test failed: decoder is not in eval mode")
+        if not bool(last.get("segmentation_head_eval_mode", False)):
+            raise SystemExit("Freeze smoke test failed: segmentation head is not in eval mode")
         if not bool(last.get("center_train_mode", False)):
             raise SystemExit("Freeze smoke test failed: center_head is not in train mode")
-        if (last.get("semantic_logits_max_abs_delta_after_step") is None) or float(last["semantic_logits_max_abs_delta_after_step"]) != 0.0:
+        if partial_unfreeze and not bool(last.get("selected_decoder_train_mode", False)):
+            raise SystemExit("Partial unfreeze smoke failed: selected decoder block is not in train mode")
+        if (not partial_unfreeze) and ((last.get("semantic_logits_max_abs_delta_after_step") is None) or float(last["semantic_logits_max_abs_delta_after_step"]) != 0.0):
             raise SystemExit(f"Freeze smoke test failed: semantic logits changed (delta={last.get('semantic_logits_max_abs_delta_after_step')})")
-        if (last.get("bn_running_stats_max_abs_delta_after_step") is None) or float(last["bn_running_stats_max_abs_delta_after_step"]) != 0.0:
-            raise SystemExit(f"Freeze smoke test failed: BatchNorm stats changed (delta={last.get('bn_running_stats_max_abs_delta_after_step')})")
-        if float(last.get("center_grad_mean_abs", 0.0)) <= 0.0:
+        if (last.get("frozen_bn_running_stats_max_abs_delta_after_step") is None) or float(last["frozen_bn_running_stats_max_abs_delta_after_step"]) != 0.0:
+            raise SystemExit(f"Freeze smoke test failed: frozen BatchNorm stats changed (delta={last.get('frozen_bn_running_stats_max_abs_delta_after_step')})")
+        if float(last.get("center_grad_norm_before_clip", 0.0)) <= 0.0:
             raise SystemExit("Freeze smoke test failed: center grad is zero")
+        if partial_unfreeze and float(last.get("selected_decoder_parameter_delta", 0.0)) <= 0.0:
+            raise SystemExit("Partial unfreeze smoke failed: selected decoder did not update")
+        if partial_unfreeze and float(last.get("center_head_parameter_delta", 0.0)) <= 0.0:
+            raise SystemExit("Partial unfreeze smoke failed: center head did not update")
+        if float(last.get("frozen_parameter_max_delta", 0.0)) != 0.0:
+            raise SystemExit(f"Partial unfreeze smoke failed: frozen parameter changed (delta={last.get('frozen_parameter_max_delta')})")
 
     model.eval()
     val_it = iter(val_loader)
@@ -1166,14 +1400,18 @@ def train(cfg: dict, device: torch.device) -> None:
     (out_dir / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
     freeze_base = _freeze_base_enabled(cfg)
+    partial_unfreeze = _partial_unfreeze_enabled(cfg)
     train_loader, val_loader = _build_loaders(cfg, device=device)
     model = _build_model(cfg).to(device)
     freeze_info = None
     if freeze_base:
-        freeze_info = _apply_freeze_base(model)
+        freeze_info = _apply_training_policy(model, cfg)
         print("=== FREEZE BASE ===")
         print(f"total_params: {freeze_info['total_params']}")
         print(f"trainable_params: {freeze_info['trainable_params']}")
+        print(f"center_trainable_params: {freeze_info['center_trainable_params']}")
+        print(f"decoder_trainable_params: {freeze_info['decoder_trainable_params']}")
+        print(f"partial_unfreeze: {freeze_info['partial_unfreeze']}")
         print("trainable parameter groups:")
         for n in freeze_info["trainable_names"]:
             print(f"- {n}")
@@ -1195,27 +1433,9 @@ def train(cfg: dict, device: torch.device) -> None:
     center_loss_fn, center_loss_info = _build_center_loss(cfg, device=device, dataset_root=ds_root, train_txt=train_txt)
     lambda_center = float((cfg.get("center") or {}).get("lambda", 1.0))
 
-    base_lr = float((cfg.get("train") or {}).get("lr_backbone", cfg["train"]["lr"]))
-    head_lr = float((cfg.get("train") or {}).get("lr_center_head", base_lr * 10.0))
-    if freeze_base:
-        optimizer = torch.optim.AdamW(
-            [{"params": list(model.center_head.parameters()), "lr": head_lr}],
-            weight_decay=float(cfg["train"]["weight_decay"]),
-        )
-    else:
-        params_base = []
-        params_head = []
-        for n, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            if n.startswith("center_head.") or ".center_head." in n:
-                params_head.append(p)
-            else:
-                params_base.append(p)
-        optimizer = torch.optim.AdamW(
-            [{"params": params_base, "lr": base_lr}, {"params": params_head, "lr": head_lr}],
-            weight_decay=float(cfg["train"]["weight_decay"]),
-        )
+    optimizer, optimizer_meta = _build_optimizer_groups(model, cfg, freeze_info if freeze_base else None, freeze_base=freeze_base)
+    for g in optimizer_meta:
+        print(f"optimizer_group: {g['name']} lr={g['lr']} param_count={g['param_count']}")
 
     scheduler_cfg = cfg.get("scheduler") or {}
     scheduler = None
@@ -1287,6 +1507,9 @@ def train(cfg: dict, device: torch.device) -> None:
                     "sweep_best_instance_mean_matched_iou",
                     "train_grad_norm_mean_before_clip",
                     "train_grad_norm_max_before_clip",
+                    "train_center_grad_norm_mean_before_clip",
+                    "train_decoder_grad_norm_mean_before_clip",
+                    "train_combined_grad_norm_mean_before_clip",
                     "train_finite_grad_norm_mean_before_clip",
                     "train_finite_grad_norm_max_before_clip",
                     "train_nonfinite_grad_batch_count",
@@ -1294,6 +1517,9 @@ def train(cfg: dict, device: torch.device) -> None:
                     "train_clipped_batch_count",
                     "train_batches_clipped_pct",
                     "train_grad_norm_mean_after_clip",
+                    "train_center_grad_norm_mean_after_clip",
+                    "train_decoder_grad_norm_mean_after_clip",
+                    "train_combined_grad_norm_mean_after_clip",
                     "amp_scale_min",
                     "amp_scale_max",
                     "amp_scale_last",
@@ -1306,6 +1532,7 @@ def train(cfg: dict, device: torch.device) -> None:
                     "train_center_grad_scaler_enabled",
                     "center_head_weight_norm",
                     "center_head_output_bias",
+                    "lr_unfrozen_decoder",
                     "lr_backbone",
                     "lr_center_head",
                 ]
@@ -1325,6 +1552,7 @@ def train(cfg: dict, device: torch.device) -> None:
 
     center_thr = float((cfg.get("center") or {}).get("marker_thr", 0.3))
     semantic_mean_fg0 = None
+    semantic_degradation_streak = 0
 
     _set_train_modes(model, freeze_base=freeze_base)
     val_metrics0 = validate_centerhead(
@@ -1405,6 +1633,9 @@ def train(cfg: dict, device: torch.device) -> None:
                 "",
                 "",
                 "",
+                "",
+                "",
+                "",
                 float(scaler.get_scale()) if amp_enabled else "",
                 float(scaler.get_scale()) if amp_enabled else "",
                 float(scaler.get_scale()) if amp_enabled else "",
@@ -1417,6 +1648,7 @@ def train(cfg: dict, device: torch.device) -> None:
                 bool(amp_enabled and (not center_fp32)),
                 float(_center_head_weight_norm(model)) if _center_head_weight_norm(model) is not None else "",
                 float(_center_head_output_bias(model)) if _center_head_output_bias(model) is not None else "",
+                float(next((g["lr"] for g in optimizer_meta if g["name"] == "unfrozen_decoder"), 0.0)) if partial_unfreeze else "",
                 "" if freeze_base else float(optimizer.param_groups[0]["lr"]),
                 float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"]),
             ]
@@ -1455,7 +1687,15 @@ def train(cfg: dict, device: torch.device) -> None:
         last_precision_info = None
         t0 = time.perf_counter()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", unit="batch")
-        center_params = list(model.center_head.parameters())
+        center_named_params = [(n, p) for n, p in model.named_parameters() if n.startswith("center_head.") and p.requires_grad]
+        decoder_named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not n.startswith("center_head."))]
+        trainable_named_params = center_named_params + decoder_named_params
+        center_grad_before_sum = 0.0
+        decoder_grad_before_sum = 0.0
+        combined_grad_before_sum = 0.0
+        center_grad_after_sum = 0.0
+        decoder_grad_after_sum = 0.0
+        combined_grad_after_sum = 0.0
         clip_norm = float((cfg.get("train") or {}).get("center_grad_clip_norm", 0.0) or 0.0)
         for bi, batch in enumerate(pbar, start=1):
             images = batch["image"].to(device, non_blocking=True)
@@ -1464,11 +1704,13 @@ def train(cfg: dict, device: torch.device) -> None:
 
             optimizer.zero_grad(set_to_none=True)
             if freeze_base:
-                sem_logits, decoder_output = _forward_frozen_base(
+                sem_logits, decoder_output = _forward_base_for_center_training(
                     model=model,
                     images=images,
                     device=device,
                     amp_enabled_global=amp_enabled,
+                    detach_output=not partial_unfreeze,
+                    no_grad=not partial_unfreeze,
                 )
                 _decoder_features, center_logits, center_payload, precision_info = _forward_center_with_precision(
                     model=model,
@@ -1478,18 +1720,19 @@ def train(cfg: dict, device: torch.device) -> None:
                     device=device,
                     amp_enabled_global=amp_enabled,
                     center_fp32=center_fp32,
+                    detach_decoder_output=not partial_unfreeze,
                     return_details=False,
                 )
                 assert torch.is_tensor(center_payload)
                 loss_center = center_payload
-                loss_sem = semantic_loss_fn(sem_logits.float(), masks)
+                loss_sem = semantic_loss_fn(sem_logits.float(), masks.long())
                 loss = loss_center
             else:
                 with _autocast_ctx(device, enabled=amp_enabled):
                     out = model(images)
                     sem_logits = out["semantic"]
                     center_logits = out["center"]
-                    loss_sem = semantic_loss_fn(sem_logits, masks)
+                    loss_sem = semantic_loss_fn(sem_logits.float(), masks.long())
                     loss_center = center_loss_fn(center_logits, centers)
                     loss = loss_sem + float(lambda_center) * loss_center
                 precision_info = {
@@ -1510,8 +1753,13 @@ def train(cfg: dict, device: torch.device) -> None:
             if bool(scaler.is_enabled()):
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                grad_before = _grad_l2_norm(center_params)
+                center_before = _named_grad_l2_norm(center_named_params)
+                decoder_before = _named_grad_l2_norm(decoder_named_params)
+                grad_before = _grad_l2_norm([p for _n, p in trainable_named_params])
                 grad_norm_before_sum += float(grad_before)
+                center_grad_before_sum += float(center_before)
+                decoder_grad_before_sum += float(decoder_before)
+                combined_grad_before_sum += float(grad_before)
                 if np.isfinite(grad_before):
                     finite_grad_norm_before_sum += float(grad_before)
                     finite_grad_norm_before_max = max(float(finite_grad_norm_before_max), float(grad_before))
@@ -1522,9 +1770,14 @@ def train(cfg: dict, device: torch.device) -> None:
                 if float(clip_norm) > 0.0 and np.isfinite(grad_before):
                     if float(grad_before) > float(clip_norm):
                         clipped_batches += 1
-                    torch.nn.utils.clip_grad_norm_(center_params, max_norm=float(clip_norm))
-                grad_after = _grad_l2_norm(center_params)
+                    torch.nn.utils.clip_grad_norm_([p for _n, p in trainable_named_params], max_norm=float(clip_norm))
+                grad_after = _grad_l2_norm([p for _n, p in trainable_named_params])
+                center_after = _named_grad_l2_norm(center_named_params)
+                decoder_after = _named_grad_l2_norm(decoder_named_params)
                 grad_norm_after_sum += float(grad_after)
+                center_grad_after_sum += float(center_after)
+                decoder_grad_after_sum += float(decoder_after)
+                combined_grad_after_sum += float(grad_after)
                 prev_scale = float(scaler.get_scale())
                 amp_scale_min = prev_scale if amp_scale_min is None else min(float(amp_scale_min), prev_scale)
                 amp_scale_max = prev_scale if amp_scale_max is None else max(float(amp_scale_max), prev_scale)
@@ -1538,8 +1791,13 @@ def train(cfg: dict, device: torch.device) -> None:
                     skipped_optimizer_steps += 1
             else:
                 loss.backward()
-                grad_before = _grad_l2_norm(center_params)
+                center_before = _named_grad_l2_norm(center_named_params)
+                decoder_before = _named_grad_l2_norm(decoder_named_params)
+                grad_before = _grad_l2_norm([p for _n, p in trainable_named_params])
                 grad_norm_before_sum += float(grad_before)
+                center_grad_before_sum += float(center_before)
+                decoder_grad_before_sum += float(decoder_before)
+                combined_grad_before_sum += float(grad_before)
                 if np.isfinite(grad_before):
                     finite_grad_norm_before_sum += float(grad_before)
                     finite_grad_norm_before_max = max(float(finite_grad_norm_before_max), float(grad_before))
@@ -1550,9 +1808,14 @@ def train(cfg: dict, device: torch.device) -> None:
                 if float(clip_norm) > 0.0 and np.isfinite(grad_before):
                     if float(grad_before) > float(clip_norm):
                         clipped_batches += 1
-                    torch.nn.utils.clip_grad_norm_(center_params, max_norm=float(clip_norm))
-                grad_after = _grad_l2_norm(center_params)
+                    torch.nn.utils.clip_grad_norm_([p for _n, p in trainable_named_params], max_norm=float(clip_norm))
+                grad_after = _grad_l2_norm([p for _n, p in trainable_named_params])
+                center_after = _named_grad_l2_norm(center_named_params)
+                decoder_after = _named_grad_l2_norm(decoder_named_params)
                 grad_norm_after_sum += float(grad_after)
+                center_grad_after_sum += float(center_after)
+                decoder_grad_after_sum += float(decoder_after)
+                combined_grad_after_sum += float(grad_after)
                 optimizer.step()
 
             running += float(loss.item())
@@ -1594,8 +1857,9 @@ def train(cfg: dict, device: torch.device) -> None:
         center_count_acc_for_ckpt = float(sweep_best_count.get("center_count_acc")) if isinstance(sweep_best_count, dict) and sweep_best_count.get("center_count_acc") is not None else (float(val_metrics.get("center_count_acc")) if val_metrics.get("center_count_acc") is not None else None)
         inst_score_for_ckpt = float(sweep_best_inst.get("instance_score")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_score") is not None else (float(inst_score) if inst_score is not None else None)
 
+        lr_unfrozen_decoder_now = float(next((g["lr"] for g in optimizer_meta if g["name"] == "unfrozen_decoder"), 0.0)) if partial_unfreeze else 0.0
         lr_backbone_now = 0.0 if freeze_base else float(optimizer.param_groups[0]["lr"])
-        lr_center_now = float(optimizer.param_groups[0]["lr"]) if freeze_base else float(optimizer.param_groups[1]["lr"])
+        lr_center_now = float(next((g["lr"] for g in optimizer_meta if g["name"] == "center_head"), 0.0)) if freeze_base else float(optimizer.param_groups[1]["lr"])
         finite_batch_count = int(max(n_batches - nonfinite_grad_batches, 0))
         grad_norm_mean_before = float(finite_grad_norm_before_sum / max(finite_batch_count, 1)) if finite_batch_count > 0 else float("nan")
         grad_norm_mean_after = float(grad_norm_after_sum / max(n_batches, 1))
@@ -1604,6 +1868,12 @@ def train(cfg: dict, device: torch.device) -> None:
         center_w_norm = _center_head_weight_norm(model)
         center_bias = _center_head_output_bias(model)
         params_finite = bool(_all_parameters_finite(list(model.parameters())))
+        center_grad_mean_before = float(center_grad_before_sum / max(n_batches, 1))
+        decoder_grad_mean_before = float(decoder_grad_before_sum / max(n_batches, 1))
+        combined_grad_mean_before = float(combined_grad_before_sum / max(n_batches, 1))
+        center_grad_mean_after = float(center_grad_after_sum / max(n_batches, 1))
+        decoder_grad_mean_after = float(decoder_grad_after_sum / max(n_batches, 1))
+        combined_grad_mean_after = float(combined_grad_after_sum / max(n_batches, 1))
 
         with metrics_csv.open("a", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
@@ -1647,6 +1917,9 @@ def train(cfg: dict, device: torch.device) -> None:
                     float(sweep_best_inst.get("instance_mean_matched_iou")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_mean_matched_iou") is not None else "",
                     grad_norm_mean_before,
                     grad_norm_before_max,
+                    center_grad_mean_before,
+                    decoder_grad_mean_before,
+                    combined_grad_mean_before,
                     float(finite_grad_norm_mean_before) if finite_grad_norm_mean_before is not None else "",
                     float(finite_grad_norm_before_max) if finite_batch_count > 0 else "",
                     int(nonfinite_grad_batches),
@@ -1654,6 +1927,9 @@ def train(cfg: dict, device: torch.device) -> None:
                     int(clipped_batches),
                     clipped_pct,
                     grad_norm_mean_after,
+                    center_grad_mean_after,
+                    decoder_grad_mean_after,
+                    combined_grad_mean_after,
                     float(amp_scale_min) if amp_scale_min is not None else "",
                     float(amp_scale_max) if amp_scale_max is not None else "",
                     float(amp_scale_last) if amp_scale_last is not None else "",
@@ -1666,15 +1942,24 @@ def train(cfg: dict, device: torch.device) -> None:
                     (last_precision_info or {}).get("center_grad_scaler_enabled", ""),
                     float(center_w_norm) if center_w_norm is not None else "",
                     float(center_bias) if center_bias is not None else "",
+                    lr_unfrozen_decoder_now if partial_unfreeze else "",
                     "" if freeze_base else lr_backbone_now,
                     lr_center_now,
                 ]
             )
 
-        if freeze_base and semantic_mean_fg0 is not None and mean_fg is not None:
+        if freeze_base and (not partial_unfreeze) and semantic_mean_fg0 is not None and mean_fg is not None:
             dev = abs(float(mean_fg) - float(semantic_mean_fg0))
             if float(dev) > 0.002:
                 raise SystemExit(f"Freeze stability check failed: |mean_fg - mean_fg0|={dev:.6f} > 0.002")
+        if freeze_base and partial_unfreeze and semantic_mean_fg0 is not None and mean_fg is not None:
+            dev = float(semantic_mean_fg0) - float(mean_fg)
+            if dev > 0.02:
+                semantic_degradation_streak += 1
+            else:
+                semantic_degradation_streak = 0
+            if semantic_degradation_streak >= 2:
+                raise SystemExit(f"Semantic degradation stop: mean_fg dropped by {dev:.6f} for two consecutive epochs")
 
         _save_checkpoint(out_dir / "last.pth", model, optimizer, epoch, cfg, extra={"val": val_metrics, "threshold_sweep": sweep_res})
 
@@ -1767,7 +2052,7 @@ def train(cfg: dict, device: torch.device) -> None:
                 f"mean_fg={mean_fg} center_f1={center_f1_for_ckpt} instance_score={inst_score_for_ckpt} "
                 f"grad_mean={grad_norm_mean_before:.4f} grad_max={grad_norm_before_max:.4f} clipped={clipped_pct:.1f}% "
                 f"nonfinite_grad_batches={nonfinite_grad_batches} skipped_steps={skipped_optimizer_steps} "
-                f"lr_center={lr_center_now:.2e}"
+                f"lr_decoder={lr_unfrozen_decoder_now:.2e} lr_center={lr_center_now:.2e}"
             )
         else:
             print(
