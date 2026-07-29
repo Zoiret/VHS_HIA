@@ -225,6 +225,59 @@ def _argmax_row(rows: list[dict], key: str) -> dict | None:
     return dict(best) if best is not None else None
 
 
+def _epoch_at_least(row: dict, min_epoch: int = 1) -> bool:
+    ep = _to_int(row.get("epoch"))
+    return ep is not None and int(ep) >= int(min_epoch)
+
+
+def _argmax_row_filtered(rows: list[dict], key: str, *, min_epoch: int | None = None) -> dict | None:
+    use_rows = rows
+    if min_epoch is not None:
+        use_rows = [r for r in rows if _epoch_at_least(r, min_epoch=min_epoch)]
+    return _argmax_row(use_rows, key)
+
+
+def _threshold_robustness(rows: list[dict], selected_epoch: int | None, selected_threshold: float | None, selected_f1: float | None) -> dict:
+    if selected_epoch is None or selected_threshold is None or selected_f1 is None:
+        return {
+            "epoch": selected_epoch,
+            "best_threshold": selected_threshold,
+            "best_f1": selected_f1,
+            "neighboring_thresholds_within_90pct": [],
+            "count_within_90pct": 0,
+            "stable": None,
+            "all_thresholds": [],
+        }
+    epoch_rows = [r for r in rows if _to_int(r.get("epoch")) == int(selected_epoch)]
+    within = []
+    all_rows = []
+    threshold_order = [0.005, 0.01, 0.02, 0.03, 0.05, 0.10, 0.20, 0.30, 0.50, 0.70]
+    by_thr = {float(_to_float(r.get("threshold"))): r for r in epoch_rows if _to_float(r.get("threshold")) is not None}
+    for thr in threshold_order:
+        r = by_thr.get(float(thr))
+        if r is None:
+            continue
+        f1 = _to_float(r.get("center_f1"))
+        item = {
+            "threshold": float(thr),
+            "center_f1": f1,
+            "center_count_acc": _to_float(r.get("center_count_acc")),
+            "instance_score": _to_float(r.get("instance_score")),
+        }
+        all_rows.append(item)
+        if f1 is not None and float(f1) >= 0.9 * float(selected_f1):
+            within.append(item)
+    return {
+        "epoch": int(selected_epoch),
+        "best_threshold": float(selected_threshold),
+        "best_f1": float(selected_f1),
+        "neighboring_thresholds_within_90pct": within,
+        "count_within_90pct": len(within),
+        "stable": bool(len(within) >= 3),
+        "all_thresholds": all_rows,
+    }
+
+
 def _index_metrics_by_epoch(rows: list[dict]) -> dict[int, dict]:
     out = {}
     for r in rows:
@@ -357,6 +410,11 @@ def _optimization_audit(metrics_rows: list[dict], run_dir: Path) -> dict:
     train_loss_vals = [_to_float(r.get("train_loss")) for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
     train_loss_finite_flags = [str(r.get("train_loss_is_finite", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
     params_finite_flags = [str(r.get("parameters_finite", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    logits_finite_flags = [str(r.get("train_logits_finite", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0]]
+    decoder_dtype_vals = sorted({str(r.get("train_decoder_features_dtype", "")).strip() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0] and str(r.get("train_decoder_features_dtype", "")).strip() != ""})
+    center_logits_dtype_vals = sorted({str(r.get("train_center_logits_dtype", "")).strip() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0] and str(r.get("train_center_logits_dtype", "")).strip() != ""})
+    center_loss_dtype_vals = sorted({str(r.get("train_center_loss_dtype", "")).strip() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0] and str(r.get("train_center_loss_dtype", "")).strip() != ""})
+    center_grad_scaler_flags = [str(r.get("train_center_grad_scaler_enabled", "")).strip().lower() for r in metrics_rows if _to_int(r.get("epoch")) not in [None, 0] and str(r.get("train_center_grad_scaler_enabled", "")).strip() != ""]
     val_center_loss_vals = [_to_float(r.get("val_center_loss")) for r in metrics_rows if _to_int(r.get("epoch")) is not None]
     val_sem_loss_vals = [_to_float(r.get("val_semantic_loss")) for r in metrics_rows if _to_int(r.get("epoch")) is not None]
 
@@ -376,6 +434,16 @@ def _optimization_audit(metrics_rows: list[dict], run_dir: Path) -> dict:
         missing_fields.append("train_skipped_optimizer_step_count")
     if not any("amp_scale_min" in r for r in metrics_rows):
         missing_fields.append("amp_scale_min")
+    if not any("train_logits_finite" in r for r in metrics_rows):
+        missing_fields.append("train_logits_finite")
+    if not any("train_decoder_features_dtype" in r for r in metrics_rows):
+        missing_fields.append("train_decoder_features_dtype")
+    if not any("train_center_logits_dtype" in r for r in metrics_rows):
+        missing_fields.append("train_center_logits_dtype")
+    if not any("train_center_loss_dtype" in r for r in metrics_rows):
+        missing_fields.append("train_center_loss_dtype")
+    if not any("train_center_grad_scaler_enabled" in r for r in metrics_rows):
+        missing_fields.append("train_center_grad_scaler_enabled")
 
     if grad_mean_vals:
         finite_grad_norm_mean = _safe_mean([v for v in grad_mean_vals if v is not None and math.isfinite(float(v))])
@@ -392,9 +460,16 @@ def _optimization_audit(metrics_rows: list[dict], run_dir: Path) -> dict:
         "clipped_batches_pct_max": max([float(v) for v in clipped_vals if v is not None], default=None),
         "grad_norm_max_before_clip_max": max([float(v) for v in grad_max_vals if v is not None and math.isfinite(float(v))], default=None),
         "parameters_finite": all(v in {"true", "1"} for v in params_finite_flags) if params_finite_flags else None,
+        "train_logits_finite": all(v in {"true", "1"} for v in logits_finite_flags) if logits_finite_flags else None,
         "train_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in train_loss_vals) and all(v in {"true", "1"} for v in train_loss_finite_flags if v != ""),
         "val_center_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in val_center_loss_vals),
         "val_semantic_loss_all_finite": all(v is not None and math.isfinite(float(v)) for v in val_sem_loss_vals),
+        "decoder_features_dtype_values": decoder_dtype_vals,
+        "center_logits_dtype_values": center_logits_dtype_vals,
+        "center_loss_dtype_values": center_loss_dtype_vals,
+        "center_dtype_all_epochs_float32": bool(decoder_dtype_vals == ["float32"] and center_logits_dtype_vals == ["float32"] and center_loss_dtype_vals == ["float32"]) if (decoder_dtype_vals or center_logits_dtype_vals or center_loss_dtype_vals) else None,
+        "center_grad_scaler_enabled_values": center_grad_scaler_flags,
+        "center_grad_scaler_disabled_all_epochs": all(v in {"false", "0"} for v in center_grad_scaler_flags) if center_grad_scaler_flags else None,
         "amp_behavior": {
             "amp_scale_min": min([float(v) for v in amp_scale_min_vals if v is not None], default=None),
             "amp_scale_max": max([float(v) for v in amp_scale_max_vals if v is not None], default=None),
@@ -618,16 +693,23 @@ def analyze_run(config_path: Path, run_dir: Path, out_dir: Path) -> dict:
     sweep_rows = _flatten_threshold_sweeps(threshold_dir)
     checkpoint_audit = _checkpoint_audit(run_dir, cfg=cfg)
     checkpoint_load_test = _precheck_all_checkpoints(cfg, run_dir)
+    epoch0_baseline = metrics_by_epoch.get(0)
 
     for r in sweep_rows:
         r["checkpoint_tag"] = _resolve_checkpoint_tag(checkpoint_audit, _to_int(r.get("epoch")), "center_f1")
 
     best_center = _argmax_row(sweep_rows, "center_f1") or {}
     best_count = _argmax_row(sweep_rows, "center_count_acc") or {}
-    best_instance = _argmax_row(sweep_rows, "instance_score") or {}
-    best_miou = _argmax_row(sweep_rows, "instance_mean_matched_iou") or {}
+    best_instance = _argmax_row_filtered(sweep_rows, "instance_score", min_epoch=1) or {}
+    best_miou = _argmax_row_filtered(sweep_rows, "instance_mean_matched_iou", min_epoch=1) or {}
     best_center["checkpoint_tag"] = _resolve_checkpoint_tag(checkpoint_audit, _to_int(best_center.get("epoch")), "center_f1")
     best_instance["checkpoint_tag"] = _resolve_checkpoint_tag(checkpoint_audit, _to_int(best_instance.get("epoch")), "instance_score")
+    threshold_robustness = _threshold_robustness(
+        sweep_rows,
+        _to_int(best_center.get("epoch")),
+        _to_float(best_center.get("threshold")),
+        _to_float(best_center.get("center_f1")),
+    )
 
     best_by_epoch_rows = _best_by_epoch(sweep_rows, metrics_by_epoch)
 
@@ -665,7 +747,9 @@ def analyze_run(config_path: Path, run_dir: Path, out_dir: Path) -> dict:
         "best_center_count_acc": best_count,
         "best_instance_score": best_instance,
         "best_instance_mean_matched_iou": best_miou,
+        "epoch0_baseline": epoch0_baseline,
         "probability_separation": prob_rows,
+        "threshold_robustness": threshold_robustness,
         "optimization_audit": optimization,
         "checkpoint_audit": checkpoint_audit,
         "checkpoint_load_test": checkpoint_load_test,
@@ -684,7 +768,9 @@ def analyze_run(config_path: Path, run_dir: Path, out_dir: Path) -> dict:
         "global_best_center_count_acc": best_count,
         "global_best_instance": best_instance,
         "global_best_instance_mean_matched_iou": best_miou,
+        "epoch0_baseline": epoch0_baseline,
         "probability_separation": prob_rows,
+        "threshold_robustness": threshold_robustness,
         "optimization_audit": optimization,
         "checkpoint_audit": checkpoint_audit,
         "checkpoint_load_test": checkpoint_load_test,

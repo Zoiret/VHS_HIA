@@ -969,7 +969,9 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
                 "center_logits_dtype": _dtype_name(center_logits),
                 "center_loss_dtype": None,
             }
-        loss_sem = semantic_loss_fn(sem_logits, masks)
+        semantic_logits_for_loss = sem_logits.float()
+        semantic_targets_for_loss = masks.long()
+        loss_sem = semantic_loss_fn(semantic_logits_for_loss, semantic_targets_for_loss)
         if isinstance(center_loss_fn, CenterNetFocalHeatmapLoss):
             with torch.no_grad():
                 pr0 = torch.sigmoid(center_logits.detach()).detach()
@@ -1102,6 +1104,11 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             "center_pos_frac_thr_0p05": pos_frac_005,
             "parameters_finite_after_step": bool(params_finite),
             "logits_finite_after_step": bool(logits_finite),
+            "semantic_logits_original_dtype": _dtype_name(sem_logits),
+            "semantic_logits_loss_dtype": _dtype_name(semantic_logits_for_loss),
+            "semantic_target_dtype": _dtype_name(semantic_targets_for_loss),
+            "semantic_loss_dtype": _dtype_name(loss_sem),
+            "semantic_loss_finite": bool(torch.isfinite(loss_sem.detach()).all().item()),
             **precision_info,
         }
 
@@ -1128,7 +1135,9 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             out = model(vb["image"].to(device))
             v_sem = out["semantic"]
             v_ctr = out["center"]
-            v_loss_sem = semantic_loss_fn(v_sem, vb["mask"].to(device))
+            v_sem_loss_logits = v_sem.float()
+            v_sem_loss_target = vb["mask"].to(device).long()
+            v_loss_sem = semantic_loss_fn(v_sem_loss_logits, v_sem_loss_target)
             v_loss_center = center_loss_fn(v_ctr, vb["center"].to(device))
             v_loss = v_loss_sem + float(lambda_center) * v_loss_center
             val_losses.append(
@@ -1138,6 +1147,11 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
                     "val_loss_semantic": float(v_loss_sem.item()),
                     "val_loss_center": float(v_loss_center.item()),
                     "val_loss_total": float(v_loss.item()),
+                    "val_semantic_logits_original_dtype": _dtype_name(v_sem),
+                    "val_semantic_logits_loss_dtype": _dtype_name(v_sem_loss_logits),
+                    "val_semantic_target_dtype": _dtype_name(v_sem_loss_target),
+                    "val_semantic_loss_dtype": _dtype_name(v_loss_sem),
+                    "val_semantic_loss_finite": bool(torch.isfinite(v_loss_sem).all().item()),
                 }
             )
     last["val_batches"] = val_losses
