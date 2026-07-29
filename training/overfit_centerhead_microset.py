@@ -60,6 +60,26 @@ def _make_device(device: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _autocast_ctx(device: torch.device, enabled: bool):
+    if not enabled or device.type != "cuda":
+        return torch.autocast(device_type=device.type, enabled=False)
+    return torch.autocast(device_type="cuda", enabled=True)
+
+
+def _amp_enabled(cfg: dict, device: torch.device) -> bool:
+    return bool((cfg.get("train") or {}).get("amp", False)) and device.type == "cuda"
+
+
+def _center_fp32_enabled(cfg: dict) -> bool:
+    return bool((cfg.get("train") or {}).get("center_fp32", False))
+
+
+def _dtype_name(x: torch.Tensor | None) -> str | None:
+    if x is None:
+        return None
+    return str(x.dtype).replace("torch.", "")
+
+
 def _center_bias_init(model: UnetPlusPlusSemanticCenterHead, bias: float) -> None:
     layer0 = model.center_head_output_layer()
     if layer0 is None or not hasattr(layer0, "bias") or layer0.bias is None:
@@ -292,6 +312,64 @@ def _make_center_loss_from_cfg(cfg: dict, device: torch.device, *, normalization
     return CenterNetFocalHeatmapLoss(alpha=alpha, beta=beta, normalization_mode=norm_mode).to(device)
 
 
+def _forward_frozen_base(
+    *,
+    model: UnetPlusPlusSemanticCenterHead,
+    images: torch.Tensor,
+    device: torch.device,
+    amp_enabled_global: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    with torch.no_grad():
+        with _autocast_ctx(device, enabled=amp_enabled_global):
+            semantic_logits, decoder_output = model.forward_base(images)
+    return semantic_logits, decoder_output.detach()
+
+
+def _forward_center_with_precision(
+    *,
+    model: UnetPlusPlusSemanticCenterHead,
+    decoder_output: torch.Tensor,
+    centers: torch.Tensor,
+    center_loss_fn: CenterNetFocalHeatmapLoss,
+    device: torch.device,
+    amp_enabled_global: bool,
+    center_fp32: bool,
+    return_details: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | dict, dict]:
+    decoder_features = decoder_output.detach()
+    if center_fp32:
+        decoder_features = decoder_features.float()
+    center_autocast_enabled = bool(amp_enabled_global and (not center_fp32))
+    with _autocast_ctx(device, enabled=center_autocast_enabled):
+        center_logits = model.forward_center(decoder_features)
+        if return_details and isinstance(center_loss_fn, CenterNetFocalHeatmapLoss):
+            details = center_loss_fn(center_logits.float(), centers.float(), return_details=True)
+            center_loss = details["loss"]
+            payload: torch.Tensor | dict = details
+        else:
+            center_loss = center_loss_fn(center_logits.float(), centers.float())
+            payload = center_loss
+    precision_info = {
+        "amp_enabled_global": bool(amp_enabled_global),
+        "center_fp32": bool(center_fp32),
+        "center_autocast_enabled": bool(center_autocast_enabled),
+        "center_grad_scaler_enabled": bool(center_autocast_enabled),
+        "decoder_features_dtype": _dtype_name(decoder_features),
+        "center_logits_dtype": _dtype_name(center_logits),
+        "center_loss_dtype": _dtype_name(center_loss),
+    }
+    return decoder_features, center_logits, payload, precision_info
+
+
+def _read_legacy_sqrt_precheck() -> dict:
+    path = Path("training/analysis/centerhead_spatial_legacy_sqrt_hw_micro_overfit/same_batch_comparison.json").resolve()
+    if not path.exists():
+        return {"path": str(path), "exists": False, "gradient_cosine_legacy_vs_legacy_sqrt_hw": None}
+    obj = json.loads(path.read_text(encoding="utf-8"))
+    cosine = obj.get("gradient_cosine_legacy_vs_legacy_sqrt_hw")
+    return {"path": str(path), "exists": True, "gradient_cosine_legacy_vs_legacy_sqrt_hw": cosine}
+
+
 def _run_single_mode_one_batch(
     *,
     cfg: dict,
@@ -476,6 +554,85 @@ def _run_same_batch_comparison(
         "grad_reduction_legacy_sqrt_hw_factor": float(legacy["grad_norm_before"] / max(scaled["grad_norm_before"], 1e-12)),
         "gradient_cosine_legacy_vs_legacy_sqrt_hw": _grad_cosine_similarity(flat_grads["legacy_num_pos"], flat_grads["legacy_sqrt_hw"]),
         "gradient_cosine_legacy_vs_balanced_resolution": _grad_cosine_similarity(flat_grads["legacy_num_pos"], flat_grads["balanced_resolution"]),
+    }
+
+
+def _run_same_batch_amp_vs_fp32_comparison(
+    *,
+    cfg: dict,
+    loader,
+    device: torch.device,
+    lr: float,
+    clip_norm: float,
+) -> dict:
+    batch = next(iter(loader))
+    model, _bias = _make_model_from_cfg(cfg, device)
+    images = batch["image"].to(device)
+    centers = batch["center"].to(device)
+    amp_enabled_global = _amp_enabled(cfg, device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+    _semantic_logits, decoder_output = _forward_frozen_base(
+        model=model,
+        images=images,
+        device=device,
+        amp_enabled_global=amp_enabled_global,
+    )
+    params = list(model.center_head.parameters())
+    optimizer = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
+    loss_fn = _make_center_loss_from_cfg(cfg, device, normalization_mode="legacy_num_pos")
+
+    def _run_mode(center_fp32: bool) -> tuple[dict, torch.Tensor]:
+        model.zero_grad(set_to_none=True)
+        optimizer.zero_grad(set_to_none=True)
+        _decoder_features, center_logits, details, precision_info = _forward_center_with_precision(
+            model=model,
+            decoder_output=decoder_output,
+            centers=centers,
+            center_loss_fn=loss_fn,
+            device=device,
+            amp_enabled_global=amp_enabled_global,
+            center_fp32=center_fp32,
+            return_details=True,
+        )
+        assert isinstance(details, dict)
+        loss = details["loss"]
+        scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and amp_enabled_global and (not center_fp32)))
+        if bool(scaler.is_enabled()):
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+        else:
+            loss.backward()
+        grad_flat = _flatten_center_head_grads(params).detach().clone()
+        grad_norm = _grad_l2_norm(params)
+        grad_max_abs = max([float(p.grad.detach().abs().max().item()) for p in params if p.grad is not None], default=0.0)
+        nonfinite_grad_tensors = int(sum(0 if (p.grad is None or bool(torch.isfinite(p.grad).all().item())) else 1 for p in params))
+        clipped_required = bool(math.isfinite(grad_norm) and float(grad_norm) > float(clip_norm))
+        peak_vram = None
+        if device.type == "cuda":
+            peak_vram = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+        result = {
+            "loss": float(loss.item()),
+            "grad_norm_after_unscale": float(grad_norm),
+            "nonfinite_grad_tensors": int(nonfinite_grad_tensors),
+            "maximum_absolute_gradient": float(grad_max_abs),
+            "clipping_required": bool(clipped_required),
+            "peak_vram_mb": peak_vram,
+            **precision_info,
+        }
+        return result, grad_flat
+
+    amp_result, amp_grad = _run_mode(center_fp32=False)
+    fp32_result, fp32_grad = _run_mode(center_fp32=True)
+    amp_loss = float(amp_result["loss"])
+    fp32_loss = float(fp32_result["loss"])
+    rel_diff = abs(amp_loss - fp32_loss) / max(abs(fp32_loss), 1e-12)
+    return {
+        "legacy_num_pos_amp_center": amp_result,
+        "legacy_num_pos_fp32_center": fp32_result,
+        "relative_loss_difference": float(rel_diff),
+        "gradient_cosine_similarity": _grad_cosine_similarity(amp_grad, fp32_grad),
     }
 
 
@@ -816,6 +973,8 @@ def _run_smoke_test(
     center_loss_fn: CenterNetFocalHeatmapLoss,
     optimizer: torch.optim.Optimizer,
     clip_norm: float,
+    amp_enabled_global: bool,
+    center_fp32: bool,
 ) -> dict:
     batch = next(iter(loader))
     images = batch["image"].to(device)
@@ -824,12 +983,30 @@ def _run_smoke_test(
     model.center_head.train()
     bn_ref = _copy_bn_stats(model.base)
     with torch.no_grad():
-        sem_before = model(images)["semantic"].detach().clone()
+        sem_before, _decoder_before = _forward_frozen_base(
+            model=model,
+            images=images,
+            device=device,
+            amp_enabled_global=amp_enabled_global,
+        )
     optimizer.zero_grad(set_to_none=True)
-    out = model(images)
-    sem_logits = out["semantic"]
-    center_logits = out["center"]
-    details = center_loss_fn(center_logits, centers, return_details=True)
+    _sem_logits, decoder_output = _forward_frozen_base(
+        model=model,
+        images=images,
+        device=device,
+        amp_enabled_global=amp_enabled_global,
+    )
+    decoder_features, center_logits, details, precision_info = _forward_center_with_precision(
+        model=model,
+        decoder_output=decoder_output,
+        centers=centers,
+        center_loss_fn=center_loss_fn,
+        device=device,
+        amp_enabled_global=amp_enabled_global,
+        center_fp32=center_fp32,
+        return_details=True,
+    )
+    assert isinstance(details, dict)
     loss = details["loss"]
     if not bool(torch.isfinite(loss).all().item()):
         raise SystemExit("Smoke test failed: non-finite loss")
@@ -849,7 +1026,12 @@ def _run_smoke_test(
     optimizer.step()
 
     with torch.no_grad():
-        sem_after = model(images)["semantic"].detach().clone()
+        sem_after, _decoder_after = _forward_frozen_base(
+            model=model,
+            images=images,
+            device=device,
+            amp_enabled_global=amp_enabled_global,
+        )
         sem_delta = float((sem_before - sem_after).abs().max().item())
         bn_delta = _max_bn_delta(model.base, bn_ref)
         params_finite = _params_finite(params)
@@ -874,6 +1056,8 @@ def _run_smoke_test(
         "final_bias": _center_head_output_bias(model),
         "grad_norm_before": float(grad_norm_before),
         "grad_norm_after": float(grad_norm_after),
+        **precision_info,
+        "decoder_features_dtype_runtime": _dtype_name(decoder_features),
     }
 
 
@@ -895,11 +1079,15 @@ def main() -> None:
     cfg = _read_yaml(args.config.resolve())
     _seed_all(int(cfg.get("seed", 1337)))
     device = _make_device(args.device)
+    amp_enabled_global = _amp_enabled(cfg, device)
+    center_fp32 = _center_fp32_enabled(cfg)
 
     focal_cfg = cfg.get("center_loss") or {}
     normalization_mode = str((focal_cfg.get("normalization_mode", "legacy_num_pos") if isinstance(focal_cfg, dict) else "legacy_num_pos")).strip().lower() or "legacy_num_pos"
     if args.out_dir is not None:
         out_dir = args.out_dir.resolve()
+    elif normalization_mode == "legacy_num_pos" and center_fp32:
+        out_dir = Path("training/analysis/centerhead_spatial_legacy_fp32_micro_overfit").resolve()
     elif normalization_mode == "legacy_sqrt_hw":
         out_dir = Path("training/analysis/centerhead_spatial_legacy_sqrt_hw_micro_overfit").resolve()
     elif normalization_mode == "balanced_resolution":
@@ -951,9 +1139,21 @@ def main() -> None:
         "final_bias": _center_head_output_bias(model),
         "output_layer": layer_out.__class__.__name__,
         "normalization_mode": normalization_mode,
+        "amp_enabled_global": bool(amp_enabled_global),
+        "center_fp32": bool(center_fp32),
         "trainable_names": trainable_names,
     }
     (out_dir / "architecture.json").write_text(json.dumps(architecture, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    legacy_sqrt_precheck = _read_legacy_sqrt_precheck()
+    if not legacy_sqrt_precheck.get("exists"):
+        raise SystemExit(f"legacy_sqrt_hw precheck file not found: {legacy_sqrt_precheck.get('path')}")
+    cosine_precheck = legacy_sqrt_precheck.get("gradient_cosine_legacy_vs_legacy_sqrt_hw")
+    if cosine_precheck is None:
+        raise SystemExit("legacy_sqrt_hw precheck missing gradient_cosine_legacy_vs_legacy_sqrt_hw")
+    if legacy_sqrt_precheck.get("exists") and cosine_precheck is not None and float(cosine_precheck) < 0.99999:
+        raise SystemExit(f"legacy_sqrt_hw precheck failed: cosine={float(cosine_precheck):.8f} < 0.99999")
+    (out_dir / "legacy_sqrt_hw_precheck.json").write_text(json.dumps(legacy_sqrt_precheck, ensure_ascii=False, indent=2), encoding="utf-8")
 
     same_batch = _run_same_batch_comparison(
         cfg=cfg,
@@ -964,6 +1164,15 @@ def main() -> None:
     )
     (out_dir / "same_batch_comparison.json").write_text(json.dumps(same_batch, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    same_batch_amp_vs_fp32 = _run_same_batch_amp_vs_fp32_comparison(
+        cfg=cfg,
+        loader=loader,
+        device=device,
+        lr=float(lr),
+        clip_norm=clip_norm,
+    )
+    (out_dir / "same_batch_amp_vs_fp32.json").write_text(json.dumps(same_batch_amp_vs_fp32, ensure_ascii=False, indent=2), encoding="utf-8")
+
     smoke = _run_smoke_test(
         model=model,
         loader=loader,
@@ -971,14 +1180,15 @@ def main() -> None:
         center_loss_fn=center_loss_fn,
         optimizer=opt,
         clip_norm=clip_norm,
+        amp_enabled_global=amp_enabled_global,
+        center_fp32=center_fp32,
     )
     (out_dir / "smoke_test.json").write_text(json.dumps(smoke, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Rebuild a fresh model after smoke test so iter=0 truly starts before any optimizer step.
     model, _bias2 = _make_model_from_cfg(cfg, device)
     opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
-    amp_enabled = bool((cfg.get("train") or {}).get("amp", False)) and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = torch.cuda.amp.GradScaler(enabled=(amp_enabled_global and (not center_fp32)))
 
     vis_iters = sorted({int(x.strip()) for x in str(args.vis_iters).split(",") if str(x).strip()})
     metrics_csv = (out_dir / "micro_overfit_metrics.csv").resolve()
@@ -1061,14 +1271,27 @@ def main() -> None:
         centers = batch["center"].to(device)
 
         opt.zero_grad(set_to_none=True)
-        with torch.autocast(device_type="cuda", enabled=amp_enabled):
-            out = model(images)
-            logits = out["center"]
-            details = center_loss_fn(logits, centers, return_details=True)
-            loss = details["loss"]
+        _sem_logits, decoder_output = _forward_frozen_base(
+            model=model,
+            images=images,
+            device=device,
+            amp_enabled_global=amp_enabled_global,
+        )
+        decoder_features, logits, details, precision_info = _forward_center_with_precision(
+            model=model,
+            decoder_output=decoder_output,
+            centers=centers,
+            center_loss_fn=center_loss_fn,
+            device=device,
+            amp_enabled_global=amp_enabled_global,
+            center_fp32=center_fp32,
+            return_details=True,
+        )
+        assert isinstance(details, dict)
+        loss = details["loss"]
         if not bool(torch.isfinite(loss).all().item()):
             raise SystemExit(f"Non-finite loss at iter {step}")
-        if amp_enabled:
+        if bool(scaler.is_enabled()):
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
         else:
@@ -1087,7 +1310,7 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(params, max_norm=float(clip_norm))
         grad_norm_after = _grad_l2_norm(params)
         skipped_steps = 0
-        if amp_enabled:
+        if bool(scaler.is_enabled()):
             prev_scale = float(scaler.get_scale())
             scaler.step(opt)
             scaler.update()
@@ -1179,7 +1402,8 @@ def main() -> None:
             print(
                 f"iter={step} loss={loss.item():.6f} "
                 f"best_thr={float(best.get('threshold') or 0.0):.3f} best_f1={float(best.get('center_f1') or 0.0):.4f} "
-                f"clipped_pct={pct:.1f}%"
+                f"clipped_pct={pct:.1f}% "
+                f"center_dtype={precision_info.get('center_logits_dtype')}"
             )
             _save_checkpoint(
                 last_ckpt,
@@ -1206,6 +1430,7 @@ def main() -> None:
         json.dumps(
             {
                 "architecture": architecture,
+                "legacy_sqrt_hw_precheck": legacy_sqrt_precheck,
                 "smoke_test": smoke,
                 "samples": micro.samples,
                 "distribution": micro.distribution,
@@ -1214,10 +1439,13 @@ def main() -> None:
                 "alpha": alpha,
                 "beta": beta,
                 "normalization_mode": normalization_mode,
+                "amp_enabled_global": bool(amp_enabled_global),
+                "center_fp32": bool(center_fp32),
                 "init_bias": bias,
                 "init_sigmoid": _safe_sigmoid(bias),
                 "grad_clip_norm": clip_norm,
                 "same_batch_comparison": same_batch,
+                "same_batch_amp_vs_fp32": same_batch_amp_vs_fp32,
                 "percent_iterations_clipped": float(100.0 * float(clipped_n) / float(max(iters, 1))),
                 "best_step": int(best_step),
                 "best_center_f1": float(best_f1 or 0.0),

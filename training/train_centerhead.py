@@ -361,6 +361,65 @@ def _autocast_ctx(device: torch.device, enabled: bool):
     return torch.autocast(device_type=device.type, enabled=False)
 
 
+def _center_fp32_enabled(cfg: dict) -> bool:
+    return bool((cfg.get("train") or {}).get("center_fp32", False))
+
+
+def _dtype_name(x: torch.Tensor | None) -> str | None:
+    if x is None:
+        return None
+    return str(x.dtype).replace("torch.", "")
+
+
+def _forward_frozen_base(
+    *,
+    model: UnetPlusPlusSemanticCenterHead,
+    images: torch.Tensor,
+    device: torch.device,
+    amp_enabled_global: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    with torch.no_grad():
+        with _autocast_ctx(device, enabled=amp_enabled_global):
+            semantic_logits, decoder_output = model.forward_base(images)
+    return semantic_logits, decoder_output.detach()
+
+
+def _forward_center_with_precision(
+    *,
+    model: UnetPlusPlusSemanticCenterHead,
+    decoder_output: torch.Tensor,
+    centers: torch.Tensor,
+    center_loss_fn,
+    device: torch.device,
+    amp_enabled_global: bool,
+    center_fp32: bool,
+    return_details: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | dict, dict]:
+    decoder_features = decoder_output.detach()
+    if center_fp32:
+        decoder_features = decoder_features.float()
+    center_autocast_enabled = bool(amp_enabled_global and (not center_fp32))
+    with _autocast_ctx(device, enabled=center_autocast_enabled):
+        center_logits = model.forward_center(decoder_features)
+        if return_details and isinstance(center_loss_fn, CenterNetFocalHeatmapLoss):
+            details = center_loss_fn(center_logits.float(), centers.float(), return_details=True)
+            center_loss = details["loss"]
+            payload: torch.Tensor | dict = details
+        else:
+            center_loss = center_loss_fn(center_logits.float(), centers.float())
+            payload = center_loss
+    precision_info = {
+        "amp_enabled_global": bool(amp_enabled_global),
+        "center_fp32": bool(center_fp32),
+        "center_autocast_enabled": bool(center_autocast_enabled),
+        "center_grad_scaler_enabled": bool(center_autocast_enabled),
+        "decoder_features_dtype": _dtype_name(decoder_features),
+        "center_logits_dtype": _dtype_name(center_logits),
+        "center_loss_dtype": _dtype_name(center_loss),
+    }
+    return decoder_features, center_logits, payload, precision_info
+
+
 def _export_val_visuals(out_dir: Path, model: torch.nn.Module, loader, device: torch.device, *, max_samples: int = 20) -> None:
     out_vis = out_dir / "val_visuals"
     out_vis.mkdir(parents=True, exist_ok=True)
@@ -789,7 +848,11 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
         print(f"GPU: {props.name}")
         print(f"VRAM: {props.total_memory / (1024**3):.2f} GB")
     amp_enabled = bool((cfg.get("train") or {}).get("amp", False)) and device.type == "cuda"
+    center_fp32 = _center_fp32_enabled(cfg)
     print(f"AMP: {amp_enabled}")
+    print(f"center_fp32: {center_fp32}")
+    print(f"center_autocast_enabled: {bool(amp_enabled and (not center_fp32))}")
+    print(f"center_grad_scaler_enabled: {bool(amp_enabled and (not center_fp32))}")
     print(f"batch_size: {int((cfg.get('train') or {}).get('batch_size', 1))}")
 
     freeze_base = _freeze_base_enabled(cfg)
@@ -859,10 +922,53 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
         optimizer.zero_grad(set_to_none=True)
         _set_train_modes(model, freeze_base=freeze_base)
         with torch.no_grad():
-            sem_before = model(images)["semantic"].detach().clone() if freeze_base else None
-        out = model(images)
-        sem_logits = out["semantic"]
-        center_logits = out["center"]
+            if freeze_base:
+                sem_before, _decoder_before = _forward_frozen_base(
+                    model=model,
+                    images=images,
+                    device=device,
+                    amp_enabled_global=amp_enabled,
+                )
+            else:
+                sem_before = None
+        if freeze_base:
+            sem_logits, decoder_output = _forward_frozen_base(
+                model=model,
+                images=images,
+                device=device,
+                amp_enabled_global=amp_enabled,
+            )
+            _decoder_features, center_logits, center_payload, precision_info = _forward_center_with_precision(
+                model=model,
+                decoder_output=decoder_output,
+                centers=centers,
+                center_loss_fn=center_loss_fn,
+                device=device,
+                amp_enabled_global=amp_enabled,
+                center_fp32=center_fp32,
+                return_details=isinstance(center_loss_fn, CenterNetFocalHeatmapLoss),
+            )
+            if isinstance(center_loss_fn, CenterNetFocalHeatmapLoss):
+                assert isinstance(center_payload, dict)
+                details = center_payload
+                loss_center = details["loss"]
+            else:
+                details = None
+                assert torch.is_tensor(center_payload)
+                loss_center = center_payload
+        else:
+            out = model(images)
+            sem_logits = out["semantic"]
+            center_logits = out["center"]
+            precision_info = {
+                "amp_enabled_global": bool(amp_enabled),
+                "center_fp32": bool(center_fp32),
+                "center_autocast_enabled": bool(amp_enabled),
+                "center_grad_scaler_enabled": bool(amp_enabled),
+                "decoder_features_dtype": None,
+                "center_logits_dtype": _dtype_name(center_logits),
+                "center_loss_dtype": None,
+            }
         loss_sem = semantic_loss_fn(sem_logits, masks)
         if isinstance(center_loss_fn, CenterNetFocalHeatmapLoss):
             with torch.no_grad():
@@ -875,8 +981,9 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
                 prob_near_mean = float(pr0[near].mean().item()) if bool(near.any().item()) else None
                 prob_far_mean = float(pr0[far].mean().item()) if bool(far.any().item()) else None
 
-            details = center_loss_fn(center_logits, centers, return_details=True)
-            loss_center = details["loss"]
+            if not freeze_base:
+                details = center_loss_fn(center_logits, centers, return_details=True)
+                loss_center = details["loss"]
             center_pos_loss = float(details["pos_loss"].item())
             center_neg_loss = float(details["neg_loss"].item())
             center_num_pos = float(details["num_pos"].item())
@@ -890,7 +997,8 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
                 pos_frac_03 = float((pr >= 0.3).float().mean().item())
                 pos_frac_05 = float((pr >= 0.5).float().mean().item())
         else:
-            loss_center = center_loss_fn(center_logits, centers)
+            if not freeze_base:
+                loss_center = center_loss_fn(center_logits, centers)
             center_pos_loss = None
             center_neg_loss = None
             center_num_pos = None
@@ -935,7 +1043,15 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
 
         optimizer.step()
         with torch.no_grad():
-            sem_after = model(images)["semantic"].detach().clone() if freeze_base else None
+            if freeze_base:
+                sem_after, _decoder_after = _forward_frozen_base(
+                    model=model,
+                    images=images,
+                    device=device,
+                    amp_enabled_global=amp_enabled,
+                )
+            else:
+                sem_after = None
         sem_delta = None
         if freeze_base and sem_before is not None and sem_after is not None:
             sem_delta = float((sem_before - sem_after).abs().max().item())
@@ -985,6 +1101,7 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             "center_pos_frac_thr_0p05": pos_frac_005,
             "parameters_finite_after_step": bool(params_finite),
             "logits_finite_after_step": bool(logits_finite),
+            **precision_info,
         }
 
     if freeze_base:
@@ -1104,7 +1221,12 @@ def train(cfg: dict, device: torch.device) -> None:
     epochs = int(cfg["train"]["epochs"])
     log_every = int(cfg["train"].get("log_every", 10))
     amp_enabled = bool((cfg.get("train") or {}).get("amp", False)) and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    center_fp32 = _center_fp32_enabled(cfg)
+    print(f"amp_enabled_global: {amp_enabled}")
+    print(f"center_fp32: {center_fp32}")
+    print(f"center_autocast_enabled: {bool(amp_enabled and (not center_fp32))}")
+    print(f"center_grad_scaler_enabled: {bool(amp_enabled and (not center_fp32))}")
+    scaler = torch.cuda.amp.GradScaler(enabled=(amp_enabled and (not center_fp32)))
 
     metrics_csv = out_dir / "metrics.csv"
     if not metrics_csv.exists():
@@ -1314,17 +1436,48 @@ def train(cfg: dict, device: torch.device) -> None:
             centers = batch["center"].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            with _autocast_ctx(device, enabled=amp_enabled):
-                out = model(images)
-                sem_logits = out["semantic"]
-                center_logits = out["center"]
-                loss_sem = semantic_loss_fn(sem_logits, masks)
-                loss_center = center_loss_fn(center_logits, centers)
-                loss = loss_center if freeze_base else (loss_sem + float(lambda_center) * loss_center)
+            if freeze_base:
+                sem_logits, decoder_output = _forward_frozen_base(
+                    model=model,
+                    images=images,
+                    device=device,
+                    amp_enabled_global=amp_enabled,
+                )
+                _decoder_features, center_logits, center_payload, precision_info = _forward_center_with_precision(
+                    model=model,
+                    decoder_output=decoder_output,
+                    centers=centers,
+                    center_loss_fn=center_loss_fn,
+                    device=device,
+                    amp_enabled_global=amp_enabled,
+                    center_fp32=center_fp32,
+                    return_details=False,
+                )
+                assert torch.is_tensor(center_payload)
+                loss_center = center_payload
+                loss_sem = semantic_loss_fn(sem_logits.float(), masks)
+                loss = loss_center
+            else:
+                with _autocast_ctx(device, enabled=amp_enabled):
+                    out = model(images)
+                    sem_logits = out["semantic"]
+                    center_logits = out["center"]
+                    loss_sem = semantic_loss_fn(sem_logits, masks)
+                    loss_center = center_loss_fn(center_logits, centers)
+                    loss = loss_sem + float(lambda_center) * loss_center
+                precision_info = {
+                    "amp_enabled_global": bool(amp_enabled),
+                    "center_fp32": bool(center_fp32),
+                    "center_autocast_enabled": bool(amp_enabled),
+                    "center_grad_scaler_enabled": bool(amp_enabled),
+                    "decoder_features_dtype": None,
+                    "center_logits_dtype": _dtype_name(center_logits),
+                    "center_loss_dtype": _dtype_name(loss_center),
+                }
             if not bool(torch.isfinite(loss.detach()).all().item()):
                 train_loss_is_finite = False
 
-            if amp_enabled:
+            if bool(scaler.is_enabled()):
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 grad_before = _grad_l2_norm(center_params)

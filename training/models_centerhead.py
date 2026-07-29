@@ -98,18 +98,23 @@ class UnetPlusPlusSemanticCenterHead(torch.nn.Module):
             return self.center_head.out_conv
         raise RuntimeError(f"Unsupported center_head_type: {self.center_head_type}")
 
+    def forward_base(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        features = self.encoder(x)
+        decoder_output = self.decoder(features)
+        semantic = self.segmentation_head(decoder_output)
+        return semantic, decoder_output
+
+    def forward_center(self, decoder_features: torch.Tensor) -> torch.Tensor:
+        return self.center_head(decoder_features)
+
     def forward(self, x: torch.Tensor) -> dict:
         if bool(getattr(self, "freeze_base", False)):
             with torch.no_grad():
-                features = self.encoder(x)
-                decoder_output = self.decoder(features)
-                semantic = self.segmentation_head(decoder_output)
-            center = self.center_head(decoder_output.detach())
+                semantic, decoder_output = self.forward_base(x)
+            center = self.forward_center(decoder_output.detach())
         else:
-            features = self.encoder(x)
-            decoder_output = self.decoder(features)
-            semantic = self.segmentation_head(decoder_output)
-            center = self.center_head(decoder_output)
+            semantic, decoder_output = self.forward_base(x)
+            center = self.forward_center(decoder_output)
         return {"semantic": semantic, "center": center}
 
 
