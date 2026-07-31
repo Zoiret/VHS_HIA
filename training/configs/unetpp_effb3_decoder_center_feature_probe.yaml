@@ -1,0 +1,59 @@
+dataset:
+  root: datasets/converted_leaflet_distance
+  train_txt: datasets/converted_leaflet_distance/train.txt
+  val_txt: datasets/converted_leaflet_distance/val.txt
+  instance_root: datasets/converted_leaflet_instances
+
+model:
+  encoder: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+  center_head_type: spatial_dilated
+
+train:
+  device: cuda
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  amp: true
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth
+
+augment: null
+
+probe:
+  output_dir: training/analysis/decoder_center_feature_probe
+  seeds:
+    - 1337
+    - 2025
+    - 2026
+  candidate_taps:
+    - role: final
+      path: base.decoder.blocks.x_0_4
+    - role: intermediate
+      path: base.decoder.blocks.x_0_3
+    - role: deeper
+      path: base.decoder.blocks.x_1_3
+    - role: deeper
+      path: base.decoder.blocks.x_2_2
+  threshold_sweep:
+    - 0.005
+    - 0.01
+    - 0.02
+    - 0.03
+    - 0.05
+    - 0.10
+    - 0.20
+    - 0.30
+    - 0.50
+    - 0.70
+    - 0.80
+    - 0.90
+  probe_lr: 0.01
+  probe_weight_decay: 0.0001
+  probe_steps: 1000
+  smoke_probe_steps: 5
+  visual_samples: 20
