@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from losses import CenterNetFocalHeatmapLoss
 from models_centerhead import UnetPlusPlusSemanticCenterHead, load_semantic_checkpoint_non_strict
 from validate_centerhead import (
     _best_perm_sum,
+    _case_type,
     _connected_components,
     _extract_metadata_centers,
     _fallback_marker,
@@ -91,11 +93,144 @@ def _center_bias_init(model: UnetPlusPlusSemanticCenterHead, bias: float) -> Non
 def _freeze_base(model: UnetPlusPlusSemanticCenterHead) -> None:
     for p in model.base.parameters():
         p.requires_grad = False
+    if getattr(model, "center_adapter", None) is not None:
+        for p in model.center_adapter.parameters():
+            p.requires_grad = True
     for p in model.center_head.parameters():
         p.requires_grad = True
     model.freeze_base = True
     model.base.eval()
+    if getattr(model, "center_adapter", None) is not None:
+        model.center_adapter.train()
     model.center_head.train()
+
+
+def _center_feature_cfg_from_cfg(cfg: dict) -> dict | None:
+    center_feature = (cfg.get("model") or {}).get("center_feature", None)
+    return dict(center_feature) if isinstance(center_feature, dict) else None
+
+
+def _center_branch_named_params(model: UnetPlusPlusSemanticCenterHead) -> list[tuple[str, torch.nn.Parameter]]:
+    out = []
+    for n, p in model.named_parameters():
+        if not bool(p.requires_grad):
+            continue
+        if str(n).startswith("center_head.") or str(n).startswith("center_adapter."):
+            out.append((n, p))
+    return out
+
+
+def _center_branch_params(model: UnetPlusPlusSemanticCenterHead) -> list[torch.nn.Parameter]:
+    return [p for _n, p in _center_branch_named_params(model)]
+
+
+def _center_adapter_params(model: UnetPlusPlusSemanticCenterHead) -> list[torch.nn.Parameter]:
+    if getattr(model, "center_adapter", None) is None:
+        return []
+    return list(model.center_adapter.parameters())
+
+
+def _center_head_params(model: UnetPlusPlusSemanticCenterHead) -> list[torch.nn.Parameter]:
+    return list(model.center_head.parameters())
+
+
+def _parameter_count(params: list[torch.nn.Parameter]) -> int:
+    return int(sum(int(p.numel()) for p in params))
+
+
+def _snapshot_named_parameters(named_params: list[tuple[str, torch.nn.Parameter]]) -> dict[str, torch.Tensor]:
+    return {str(n): p.detach().clone() for n, p in named_params}
+
+
+def _max_parameter_delta(named_params: list[tuple[str, torch.nn.Parameter]], ref: dict[str, torch.Tensor]) -> float:
+    max_d = 0.0
+    for n, p in named_params:
+        old = ref.get(str(n), None)
+        if old is None:
+            continue
+        if p.numel():
+            max_d = max(max_d, float((p.detach() - old).abs().max().item()))
+    return float(max_d)
+
+
+def _count_present_grads(params: list[torch.nn.Parameter]) -> int:
+    return int(sum(1 for p in params if p.grad is not None))
+
+
+def _center_branch_prefix_ok(trainable_names: list[str]) -> bool:
+    return all(str(n).startswith("center_head.") or str(n).startswith("center_adapter.") for n in trainable_names)
+
+
+def _build_center_branch_optimizer(model: UnetPlusPlusSemanticCenterHead, *, center_lr: float, adapter_lr: float, weight_decay: float = 0.0) -> tuple[torch.optim.Optimizer, list[dict]]:
+    group_specs = []
+    adapter_named = [(n, p) for n, p in model.named_parameters() if p.requires_grad and str(n).startswith("center_adapter.")]
+    head_named = [(n, p) for n, p in model.named_parameters() if p.requires_grad and str(n).startswith("center_head.")]
+    if adapter_named:
+        group_specs.append({"name": "center_adapter", "lr": float(adapter_lr), "named_params": adapter_named})
+    if head_named:
+        group_specs.append({"name": "center_head", "lr": float(center_lr), "named_params": head_named})
+    if not group_specs:
+        raise SystemExit("No trainable center-branch parameters found for optimizer")
+    seen = set()
+    for g in group_specs:
+        for n, _p in g["named_params"]:
+            if n in seen:
+                raise SystemExit(f"Optimizer overlap detected for parameter: {n}")
+            seen.add(n)
+    frozen_in_optimizer = [n for g in group_specs for n, p in g["named_params"] if not p.requires_grad]
+    if frozen_in_optimizer:
+        raise SystemExit(f"Frozen parameters included in optimizer: {frozen_in_optimizer[:10]}")
+    opt = torch.optim.AdamW(
+        [{"params": [p for _n, p in g["named_params"]], "lr": float(g["lr"])} for g in group_specs],
+        weight_decay=float(weight_decay),
+    )
+    meta = [
+        {
+            "name": g["name"],
+            "lr": float(g["lr"]),
+            "parameter_count": int(sum(int(p.numel()) for _n, p in g["named_params"])),
+            "parameter_names": [n for n, _p in g["named_params"]],
+        }
+        for g in group_specs
+    ]
+    return opt, meta
+
+
+def _upsample_alignment_test(model: UnetPlusPlusSemanticCenterHead, device: torch.device) -> dict:
+    stride = max(int(getattr(model, "center_feature_native_stride", 1) or 1), 1)
+    if stride <= 1:
+        return {
+            "native_peak": None,
+            "expected_full_coordinate": None,
+            "actual_full_coordinate": None,
+            "error_px": 0.0,
+            "batch_consistent": True,
+        }
+    native_h = 192
+    native_w = 192
+    peak_y = 41
+    peak_x = 73
+    expected_y = int(peak_y * stride + stride // 2)
+    expected_x = int(peak_x * stride + stride // 2)
+    native = torch.zeros((1, 1, native_h, native_w), dtype=torch.float32, device=device)
+    native[0, 0, peak_y, peak_x] = 10.0
+    up1 = model.upsample_center_logits(native)
+    max_idx1 = int(torch.argmax(up1[0, 0]).item())
+    y1 = int(max_idx1 // int(up1.shape[-1]))
+    x1 = int(max_idx1 % int(up1.shape[-1]))
+    native_b = native.repeat(2, 1, 1, 1)
+    upb = model.upsample_center_logits(native_b)
+    max_idxb = int(torch.argmax(upb[1, 0]).item())
+    yb = int(max_idxb // int(upb.shape[-1]))
+    xb = int(max_idxb % int(upb.shape[-1]))
+    err = float(np.hypot(float(y1 - expected_y), float(x1 - expected_x)))
+    return {
+        "native_peak": [int(peak_y), int(peak_x)],
+        "expected_full_coordinate": [int(expected_y), int(expected_x)],
+        "actual_full_coordinate": [int(y1), int(x1)],
+        "error_px": float(err),
+        "batch_consistent": bool((y1 == yb) and (x1 == xb)),
+    }
 
 
 def _build_loader_for_split(
@@ -209,6 +344,15 @@ def _flatten_center_head_grads(params: list[torch.Tensor]) -> torch.Tensor:
     return torch.zeros((0,), dtype=torch.float32, device=(dev if dev is not None else torch.device("cpu")))
 
 
+def _instance_score_from_row(row: dict) -> float | None:
+    miou = row.get("instance_mean_matched_iou", None)
+    mr = row.get("instance_merged_rate", None)
+    fr = row.get("instance_fragmented_rate", None)
+    if miou is None or mr is None or fr is None:
+        return None
+    return float(miou) - 0.25 * float(mr) - 0.15 * float(fr)
+
+
 def _grad_cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float | None:
     if int(a.numel()) == 0 or int(b.numel()) == 0 or int(a.numel()) != int(b.numel()):
         return None
@@ -287,12 +431,13 @@ def _make_model_from_cfg(cfg: dict, device: torch.device) -> tuple[UnetPlusPlusS
         in_channels=int(cfg["model"]["in_channels"]),
         classes=int(cfg["model"]["classes"]),
         center_head_type=center_head_type,
+        center_feature=_center_feature_cfg_from_cfg(cfg),
     )
     init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
     if not init_path:
         raise SystemExit("Config: train.init_checkpoint is required")
     missing, _unexpected = load_semantic_checkpoint_non_strict(model, str(init_path))
-    center_from_scratch = bool(any(str(k).startswith("center_head.") for k in missing))
+    center_from_scratch = bool(any(str(k).startswith("center_head.") or str(k).startswith("center_adapter.") for k in missing))
     if not center_from_scratch:
         raise SystemExit("Expected center_head to be from scratch in micro-overfit setup")
     bias = float((cfg.get("model") or {}).get("center_head_init_bias", -2.19))
@@ -336,12 +481,15 @@ def _forward_center_with_precision(
     center_fp32: bool,
     return_details: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | dict, dict]:
-    decoder_features = decoder_output.detach()
+    decoder_features = model.resolve_center_features(decoder_output.detach())
+    captured_info = model.center_feature_capture_info()
+    captured_dtype_before_cast = captured_info.get("captured_dtype", _dtype_name(decoder_features))
     if center_fp32:
         decoder_features = decoder_features.float()
     center_autocast_enabled = bool(amp_enabled_global and (not center_fp32))
     with _autocast_ctx(device, enabled=center_autocast_enabled):
-        center_logits = model.forward_center(decoder_features)
+        native_center_logits = model.center_head(decoder_features if getattr(model, "center_adapter", None) is None else model.center_adapter(decoder_features))
+        center_logits = model.upsample_center_logits(native_center_logits)
         if return_details and isinstance(center_loss_fn, CenterNetFocalHeatmapLoss):
             details = center_loss_fn(center_logits.float(), centers.float(), return_details=True)
             center_loss = details["loss"]
@@ -355,7 +503,11 @@ def _forward_center_with_precision(
         "center_autocast_enabled": bool(center_autocast_enabled),
         "center_grad_scaler_enabled": bool(center_autocast_enabled),
         "decoder_features_dtype": _dtype_name(decoder_features),
+        "captured_center_features_dtype_before_cast": captured_dtype_before_cast,
         "center_logits_dtype": _dtype_name(center_logits),
+        "native_center_logits_dtype": _dtype_name(native_center_logits),
+        "native_center_logits_shape": list(native_center_logits.shape),
+        "final_center_logits_shape": list(center_logits.shape),
         "center_loss_dtype": _dtype_name(center_loss),
     }
     return decoder_features, center_logits, payload, precision_info
@@ -381,7 +533,7 @@ def _run_single_mode_one_batch(
 ) -> dict:
     model, _bias = _make_model_from_cfg(cfg, device)
     center_loss_fn = _make_center_loss_from_cfg(cfg, device, normalization_mode=normalization_mode)
-    optimizer = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
+    optimizer, _optimizer_meta = _build_center_branch_optimizer(model, center_lr=float(lr), adapter_lr=float(lr), weight_decay=0.0)
     amp_enabled = bool((cfg.get("train") or {}).get("amp", False)) and device.type == "cuda"
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
@@ -405,7 +557,7 @@ def _run_single_mode_one_batch(
     else:
         loss.backward()
 
-    params = list(model.center_head.parameters())
+    params = _center_branch_params(model)
     grad_norm_before = _grad_l2_norm(params)
     grad_finite = all(bool(torch.isfinite(p.grad).all().item()) for p in params if p.grad is not None)
     grad_max_abs = max([float(p.grad.detach().abs().max().item()) for p in params if p.grad is not None], default=0.0)
@@ -497,7 +649,7 @@ def _run_same_batch_comparison(
         out = model(images)
         center_logits = out["center"]
 
-    params = list(model.center_head.parameters())
+    params = _center_branch_params(model)
     results = {}
     flat_grads: dict[str, torch.Tensor] = {}
     modes = ["legacy_num_pos", "balanced_resolution", "legacy_sqrt_hw"]
@@ -579,8 +731,8 @@ def _run_same_batch_amp_vs_fp32_comparison(
         device=device,
         amp_enabled_global=amp_enabled_global,
     )
-    params = list(model.center_head.parameters())
-    optimizer = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
+    params = _center_branch_params(model)
+    optimizer, _optimizer_meta = _build_center_branch_optimizer(model, center_lr=float(lr), adapter_lr=float(lr), weight_decay=0.0)
     loss_fn = _make_center_loss_from_cfg(cfg, device, normalization_mode="legacy_num_pos")
 
     def _run_mode(center_fp32: bool) -> tuple[dict, torch.Tensor]:
@@ -667,11 +819,24 @@ def _threshold_sweep_on_microset(
         loc_err_n = 0
         count_ok = 0
         count_n = 0
+        pred_count_sum = 0
+        gt_count_sum = 0
+        zero_center_cases = 0
+        extra_center_cases = 0
 
         inst_exact = 0
         inst_n = 0
         inst_mean_iou_sum = 0.0
         inst_perfect = 0
+        inst_merged = 0
+        inst_fragmented = 0
+        inst_mixed = 0
+
+        gt_instance_total = 0
+        one_marker_gt_instances = 0
+        missing_gt_instance_markers = 0
+        several_markers_inside_one_gt_instance = 0
+        markers_outside_gt_instances = 0
 
         prob_pos_sum = 0.0
         prob_pos_n = 0
@@ -732,6 +897,10 @@ def _threshold_sweep_on_microset(
                         loc_err_n += 1
                     count_n += 1
                     count_ok += int(len(pred_pts) == len(gt_pts))
+                    pred_count_sum += int(len(pred_pts))
+                    gt_count_sum += int(len(gt_pts))
+                    zero_center_cases += int(len(pred_pts) == 0)
+                    extra_center_cases += int(len(pred_pts) > len(gt_pts))
 
                     gt_map = centers[i, 0]
                     pr_map = pr_center[i, 0]
@@ -798,11 +967,28 @@ def _threshold_sweep_on_microset(
 
                     inst_n += 1
                     inst_exact += int(int(pred_k) == int(gt_k))
+                    case = _case_type(gt_k, int(pred_k))
+                    inst_merged += int(case == "merged")
+                    inst_fragmented += int(case == "fragmented")
+                    inst_mixed += int(case == "mixed")
                     iou_mat = _iou_matrix(gt_inst, pred_inst, gt_k, int(pred_k))
                     sum_iou = _best_perm_sum(iou_mat)
                     mean_iou = float(sum_iou / max(gt_k, 1))
                     inst_mean_iou_sum += float(mean_iou)
                     inst_perfect += int((int(pred_k) == int(gt_k)) and (mean_iou >= 0.90))
+
+                    for inst_id in [1, 2, 3]:
+                        if int(np.sum(gt_inst == inst_id)) <= 0:
+                            continue
+                        gt_instance_total += 1
+                        marker_count = int(sum(1 for (y, x) in pred_pts if int(gt_inst[int(y), int(x)]) == inst_id))
+                        if marker_count == 1:
+                            one_marker_gt_instances += 1
+                        elif marker_count == 0:
+                            missing_gt_instance_markers += 1
+                        else:
+                            several_markers_inside_one_gt_instance += 1
+                    markers_outside_gt_instances += int(sum(1 for (y, x) in pred_pts if int(gt_inst[int(y), int(x)]) == 0))
 
         precision = float(tp / max(tp + fp, 1))
         recall = float(tp / max(tp + fn, 1))
@@ -812,6 +998,9 @@ def _threshold_sweep_on_microset(
         inst_exact_acc = float(inst_exact / max(inst_n, 1))
         inst_mean_iou = float(inst_mean_iou_sum / max(inst_n, 1))
         inst_perfect_rate = float(inst_perfect / max(inst_n, 1))
+        inst_merged_rate = float(inst_merged / max(inst_n, 1))
+        inst_fragmented_rate = float(inst_fragmented / max(inst_n, 1))
+        inst_mixed_rate = float(inst_mixed / max(inst_n, 1))
         row = {
             "threshold": float(thr),
             "center_precision": precision,
@@ -819,14 +1008,28 @@ def _threshold_sweep_on_microset(
             "center_f1": f1,
             "center_count_acc": count_acc,
             "center_loc_err_px": loc_err,
+            "center_pred_count_mean": float(pred_count_sum / max(count_n, 1)),
+            "center_gt_count_mean": float(gt_count_sum / max(count_n, 1)),
+            "center_zero_cases": int(zero_center_cases),
+            "center_extra_cases": int(extra_center_cases),
             "center_prob_mean_pos": float(prob_pos_sum / max(prob_pos_n, 1)),
             "center_prob_mean_near": float(prob_near_sum / max(prob_near_n, 1)),
             "center_prob_mean_far": float(prob_far_sum / max(prob_far_n, 1)),
             "center_prob_mean_max": float(prob_max_sum / max(prob_max_n, 1)),
+            "center_pos_minus_far": float((prob_pos_sum / max(prob_pos_n, 1)) - (prob_far_sum / max(prob_far_n, 1))),
+            "center_pos_minus_near": float((prob_pos_sum / max(prob_pos_n, 1)) - (prob_near_sum / max(prob_near_n, 1))),
+            "one_marker_per_gt_instance_rate": float(one_marker_gt_instances / max(gt_instance_total, 1)),
+            "missing_gt_instance_marker_count": int(missing_gt_instance_markers),
+            "several_markers_inside_one_gt_instance_count": int(several_markers_inside_one_gt_instance),
+            "markers_outside_gt_instances": int(markers_outside_gt_instances),
             "instance_exact_count_acc": inst_exact_acc,
+            "instance_merged_rate": inst_merged_rate,
+            "instance_fragmented_rate": inst_fragmented_rate,
+            "instance_mixed_rate": inst_mixed_rate,
             "instance_mean_matched_iou": inst_mean_iou,
             "instance_perfect_rate": inst_perfect_rate,
         }
+        row["instance_score"] = _instance_score_from_row(row)
         rows.append(row)
         if best is None or float(row["center_f1"]) > float(best["center_f1"]):
             best = row
@@ -972,6 +1175,7 @@ def _run_smoke_test(
     device: torch.device,
     center_loss_fn: CenterNetFocalHeatmapLoss,
     optimizer: torch.optim.Optimizer,
+    optimizer_meta: list[dict],
     clip_norm: float,
     amp_enabled_global: bool,
     center_fp32: bool,
@@ -980,8 +1184,23 @@ def _run_smoke_test(
     images = batch["image"].to(device)
     centers = batch["center"].to(device)
     model.base.eval()
+    if getattr(model, "center_adapter", None) is not None:
+        model.center_adapter.train()
     model.center_head.train()
     bn_ref = _copy_bn_stats(model.base)
+    adapter_named = [(n, p) for n, p in model.named_parameters() if str(n).startswith("center_adapter.")]
+    head_named = [(n, p) for n, p in model.named_parameters() if str(n).startswith("center_head.")]
+    frozen_named = [(n, p) for n, p in model.named_parameters() if not bool(p.requires_grad)]
+    adapter_ref = _snapshot_named_parameters(adapter_named)
+    head_ref = _snapshot_named_parameters(head_named)
+    frozen_ref = _snapshot_named_parameters(frozen_named)
+    align_t0 = time.perf_counter()
+    alignment = _upsample_alignment_test(model, device)
+    alignment["runtime_sec"] = float(time.perf_counter() - align_t0)
+    if alignment.get("error_px", 0.0) > 3.0:
+        raise SystemExit(f"Smoke test failed: upsample alignment error too large ({alignment['error_px']:.3f}px)")
+    if not bool(alignment.get("batch_consistent", False)):
+        raise SystemExit("Smoke test failed: upsample alignment differs across batch size")
     with torch.no_grad():
         sem_before, _decoder_before = _forward_frozen_base(
             model=model,
@@ -990,12 +1209,14 @@ def _run_smoke_test(
             amp_enabled_global=amp_enabled_global,
         )
     optimizer.zero_grad(set_to_none=True)
+    forward_t0 = time.perf_counter()
     _sem_logits, decoder_output = _forward_frozen_base(
         model=model,
         images=images,
         device=device,
         amp_enabled_global=amp_enabled_global,
     )
+    capture_info = model.center_feature_capture_info()
     decoder_features, center_logits, details, precision_info = _forward_center_with_precision(
         model=model,
         decoder_output=decoder_output,
@@ -1006,23 +1227,56 @@ def _run_smoke_test(
         center_fp32=center_fp32,
         return_details=True,
     )
+    forward_time = float(time.perf_counter() - forward_t0)
     assert isinstance(details, dict)
     loss = details["loss"]
     if not bool(torch.isfinite(loss).all().item()):
         raise SystemExit("Smoke test failed: non-finite loss")
+    expected_native_h = int(centers.shape[-2]) // max(int(capture_info.get("native_stride") or 1), 1)
+    expected_native_w = int(centers.shape[-1]) // max(int(capture_info.get("native_stride") or 1), 1)
+    captured_shape = capture_info.get("captured_shape") or []
+    if int(capture_info.get("hook_call_count") or 0) != 1:
+        raise SystemExit(f"Smoke test failed: expected hook_call_count=1, got {capture_info.get('hook_call_count')}")
+    if captured_shape and len(captured_shape) >= 4:
+        if int(captured_shape[-2]) != int(expected_native_h) or int(captured_shape[-1]) != int(expected_native_w):
+            raise SystemExit(
+                "Smoke test failed: captured feature shape does not match configured stride "
+                f"(expected spatial {expected_native_h}x{expected_native_w}, got {captured_shape[-2]}x{captured_shape[-1]})"
+            )
+    native_shape = precision_info.get("native_center_logits_shape") or []
+    final_shape = precision_info.get("final_center_logits_shape") or []
+    if native_shape and len(native_shape) >= 4:
+        if int(native_shape[-2]) != int(expected_native_h) or int(native_shape[-1]) != int(expected_native_w):
+            raise SystemExit(
+                "Smoke test failed: native center logits shape mismatch "
+                f"(expected {expected_native_h}x{expected_native_w}, got {native_shape[-2]}x{native_shape[-1]})"
+            )
+    if final_shape and len(final_shape) >= 4:
+        if int(final_shape[-2]) != int(centers.shape[-2]) or int(final_shape[-1]) != int(centers.shape[-1]):
+            raise SystemExit(
+                "Smoke test failed: upsampled center logits shape mismatch "
+                f"(expected {int(centers.shape[-2])}x{int(centers.shape[-1])}, got {final_shape[-2]}x{final_shape[-1]})"
+            )
+    backward_t0 = time.perf_counter()
     loss.backward()
+    backward_time = float(time.perf_counter() - backward_t0)
 
     trainable_names = [n for (n, p) in model.named_parameters() if bool(p.requires_grad)]
-    assert all(str(n).startswith("center_head.") for n in trainable_names), f"Non-center_head trainable params found: {trainable_names[:10]}"
-    base_grad_any = any(bool(p.grad is not None and torch.isfinite(p.grad).all().item() and p.grad.detach().abs().max().item() > 0.0) for p in model.base.parameters())
-
-    params = list(model.center_head.parameters())
-    grad_norm_before = _grad_l2_norm(params)
-    grad_nonzero = any(bool(p.grad is not None and torch.isfinite(p.grad).all().item() and p.grad.detach().abs().max().item() > 0.0) for p in params)
+    assert _center_branch_prefix_ok(trainable_names), f"Unexpected trainable params found: {trainable_names[:10]}"
+    frozen_base_grad_count = _count_present_grads(list(model.base.parameters()))
+    center_branch_params = _center_branch_params(model)
+    adapter_params = _center_adapter_params(model)
+    head_params = _center_head_params(model)
+    adapter_grad_before = _grad_l2_norm(adapter_params)
+    head_grad_before = _grad_l2_norm(head_params)
+    combined_grad_before = _grad_l2_norm(center_branch_params)
+    grad_nonzero = bool(combined_grad_before > 0.0)
     if not grad_nonzero:
-        raise SystemExit("Smoke test failed: center gradients are zero")
-    torch.nn.utils.clip_grad_norm_(params, max_norm=float(clip_norm))
-    grad_norm_after = _grad_l2_norm(params)
+        raise SystemExit("Smoke test failed: center-branch gradients are zero")
+    torch.nn.utils.clip_grad_norm_(center_branch_params, max_norm=float(clip_norm))
+    adapter_grad_after = _grad_l2_norm(adapter_params)
+    head_grad_after = _grad_l2_norm(head_params)
+    combined_grad_after = _grad_l2_norm(center_branch_params)
     optimizer.step()
 
     with torch.no_grad():
@@ -1034,8 +1288,11 @@ def _run_smoke_test(
         )
         sem_delta = float((sem_before - sem_after).abs().max().item())
         bn_delta = _max_bn_delta(model.base, bn_ref)
-        params_finite = _params_finite(params)
+        params_finite = _params_finite(center_branch_params)
         logits_finite = bool(torch.isfinite(center_logits.detach()).all().item())
+        adapter_delta = _max_parameter_delta(adapter_named, adapter_ref)
+        head_delta = _max_parameter_delta(head_named, head_ref)
+        frozen_delta = _max_parameter_delta(frozen_named, frozen_ref)
 
     peak_vram = None
     if device.type == "cuda":
@@ -1043,19 +1300,68 @@ def _run_smoke_test(
 
     return {
         "passed": True,
-        "output_shape": tuple(center_logits.shape),
-        "loss": float(loss.item()),
-        "gradients": "finite_nonzero" if grad_nonzero else "zero",
-        "base_gradients": bool(base_grad_any),
-        "semantic_delta": float(sem_delta),
-        "peak_vram_mb": peak_vram,
+        "feature_capture": {
+            "configured_module_path": capture_info.get("configured_module_path"),
+            "actual_module_path": capture_info.get("actual_module_path"),
+            "hook_call_count": int(capture_info.get("hook_call_count") or 0),
+            "captured_shape": capture_info.get("captured_shape"),
+            "captured_dtype_before_cast": precision_info.get("captured_center_features_dtype_before_cast"),
+            "captured_dtype_after_cast": precision_info.get("decoder_features_dtype"),
+            "expected_channels": capture_info.get("expected_channels"),
+            "actual_channels": capture_info.get("actual_channels"),
+            "native_stride": capture_info.get("native_stride"),
+        },
+        "model": {
+            "adapter_parameters": int(_parameter_count(adapter_params)),
+            "center_head_parameters": int(_parameter_count(head_params)),
+            "total_trainable_parameters": int(_parameter_count(center_branch_params)),
+            "exact_trainable_parameter_names": trainable_names,
+            "frozen_parameter_count": int(sum(int(p.numel()) for _n, p in frozen_named)),
+            "optimizer_groups": optimizer_meta,
+            "optimizer_overlap": False,
+            "frozen_parameters_in_optimizer": 0,
+        },
+        "forward": {
+            "semantic_logits_shape": list(_sem_logits.shape),
+            "semantic_logits_dtype": _dtype_name(_sem_logits),
+            "native_center_logits_shape": precision_info.get("native_center_logits_shape"),
+            "native_center_logits_dtype": precision_info.get("native_center_logits_dtype"),
+            "upsampled_center_logits_shape": precision_info.get("final_center_logits_shape"),
+            "upsampled_center_logits_dtype": precision_info.get("center_logits_dtype"),
+            "center_target_shape": list(centers.shape),
+            "center_target_dtype": _dtype_name(centers),
+            "center_loss_dtype": precision_info.get("center_loss_dtype"),
+            "loss": float(loss.item()),
+            "loss_finite": bool(torch.isfinite(loss).all().item()),
+            "logits_finite": bool(logits_finite),
+        },
+        "gradients": {
+            "adapter_grad_norm_before_clip": float(adapter_grad_before),
+            "center_head_grad_norm_before_clip": float(head_grad_before),
+            "combined_grad_norm_before_clip": float(combined_grad_before),
+            "adapter_grad_norm_after_clip": float(adapter_grad_after),
+            "center_head_grad_norm_after_clip": float(head_grad_after),
+            "combined_grad_norm_after_clip": float(combined_grad_after),
+            "nonfinite_gradient_tensors": int(sum(0 if (p.grad is None or bool(torch.isfinite(p.grad).all().item())) else 1 for p in center_branch_params)),
+            "frozen_base_gradient_count": int(frozen_base_grad_count),
+        },
+        "parameter_deltas": {
+            "adapter_parameter_delta": float(adapter_delta),
+            "center_head_parameter_delta": float(head_delta),
+            "frozen_parameter_max_delta": float(frozen_delta),
+            "frozen_bn_stats_max_delta": float(bn_delta),
+            "semantic_logits_max_abs_delta_after_step": float(sem_delta),
+        },
+        "runtime": {
+            "peak_vram_mb": peak_vram,
+            "forward_time_sec": float(forward_time),
+            "backward_time_sec": float(backward_time),
+        },
+        "alignment_test": alignment,
         "batchnorm_in_center_head": int(_count_center_head_batchnorms(model)),
         "groupnorm_present": bool(any(isinstance(m, torch.nn.GroupNorm) for m in model.center_head.modules())),
         "parameters_finite_after_step": bool(params_finite),
-        "logits_finite_after_step": bool(logits_finite),
         "final_bias": _center_head_output_bias(model),
-        "grad_norm_before": float(grad_norm_before),
-        "grad_norm_after": float(grad_norm_after),
         **precision_info,
         "decoder_features_dtype_runtime": _dtype_name(decoder_features),
     }
@@ -1079,6 +1385,9 @@ def main() -> None:
     cfg = _read_yaml(args.config.resolve())
     _seed_all(int(cfg.get("seed", 1337)))
     device = _make_device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        print("Configured CUDA device is unavailable; falling back to CPU for this run.")
+        device = torch.device("cpu")
     amp_enabled_global = _amp_enabled(cfg, device)
     center_fp32 = _center_fp32_enabled(cfg)
 
@@ -1086,6 +1395,8 @@ def main() -> None:
     normalization_mode = str((focal_cfg.get("normalization_mode", "legacy_num_pos") if isinstance(focal_cfg, dict) else "legacy_num_pos")).strip().lower() or "legacy_num_pos"
     if args.out_dir is not None:
         out_dir = args.out_dir.resolve()
+    elif normalization_mode == "legacy_num_pos" and center_fp32 and str(((cfg.get("model") or {}).get("center_feature") or {}).get("module_path", "")).strip() == "base.decoder.blocks.x_2_2":
+        out_dir = Path("training/analysis/centerhead_spatial_x2_2_adapter_legacy_fp32_micro_overfit").resolve()
     elif normalization_mode == "legacy_num_pos" and center_fp32:
         out_dir = Path("training/analysis/centerhead_spatial_legacy_fp32_micro_overfit").resolve()
     elif normalization_mode == "legacy_sqrt_hw":
@@ -1122,8 +1433,9 @@ def main() -> None:
     center_loss_fn = _make_center_loss_from_cfg(cfg, device, normalization_mode=normalization_mode)
 
     lr = float(args.lr if float(args.lr) > 0 else float((cfg.get("train") or {}).get("lr_center_head", 1e-4)))
+    adapter_lr = float((cfg.get("train") or {}).get("lr_center_adapter", lr))
     clip_norm = float(args.grad_clip_norm if float(args.grad_clip_norm) > 0 else float((cfg.get("train") or {}).get("center_grad_clip_norm", 5.0)))
-    opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
+    opt, opt_meta = _build_center_branch_optimizer(model, center_lr=float(lr), adapter_lr=float(adapter_lr), weight_decay=0.0)
     thresholds = [0.005, 0.01, 0.02, 0.03, 0.05, 0.10, 0.20, 0.30, 0.50, 0.70, 0.80, 0.90]
 
     layer_out = model.center_head_output_layer()
@@ -1133,6 +1445,7 @@ def main() -> None:
         "layers": "3x3 stem -> 4 residual dilated blocks -> 3x3 refine -> 1x1 out" if center_head_type == "spatial_dilated" else "single segmentation head",
         "dilation_sequence": [1, 2, 4, 8] if center_head_type == "spatial_dilated" else [],
         "trainable_parameters": int(sum(int(p.numel()) for p in model.parameters() if bool(p.requires_grad))),
+        "center_adapter_parameters": int(_parameter_count(_center_adapter_params(model))),
         "center_head_parameters": int(sum(int(p.numel()) for p in model.center_head.parameters())),
         "total_parameters": int(sum(int(p.numel()) for p in model.parameters())),
         "receptive_field": "approx 35x35 from center head alone" if center_head_type == "spatial_dilated" else "pointwise/near-local",
@@ -1142,16 +1455,17 @@ def main() -> None:
         "amp_enabled_global": bool(amp_enabled_global),
         "center_fp32": bool(center_fp32),
         "trainable_names": trainable_names,
+        "center_feature": model.center_feature_cfg,
     }
     (out_dir / "architecture.json").write_text(json.dumps(architecture, ensure_ascii=False, indent=2), encoding="utf-8")
 
     legacy_sqrt_precheck = _read_legacy_sqrt_precheck()
-    if not legacy_sqrt_precheck.get("exists"):
-        raise SystemExit(f"legacy_sqrt_hw precheck file not found: {legacy_sqrt_precheck.get('path')}")
     cosine_precheck = legacy_sqrt_precheck.get("gradient_cosine_legacy_vs_legacy_sqrt_hw")
-    if cosine_precheck is None:
+    if normalization_mode == "legacy_sqrt_hw" and not legacy_sqrt_precheck.get("exists"):
+        raise SystemExit(f"legacy_sqrt_hw precheck file not found: {legacy_sqrt_precheck.get('path')}")
+    if normalization_mode == "legacy_sqrt_hw" and cosine_precheck is None:
         raise SystemExit("legacy_sqrt_hw precheck missing gradient_cosine_legacy_vs_legacy_sqrt_hw")
-    if legacy_sqrt_precheck.get("exists") and cosine_precheck is not None and float(cosine_precheck) < 0.99999:
+    if normalization_mode == "legacy_sqrt_hw" and legacy_sqrt_precheck.get("exists") and cosine_precheck is not None and float(cosine_precheck) < 0.99999:
         raise SystemExit(f"legacy_sqrt_hw precheck failed: cosine={float(cosine_precheck):.8f} < 0.99999")
     (out_dir / "legacy_sqrt_hw_precheck.json").write_text(json.dumps(legacy_sqrt_precheck, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1179,6 +1493,7 @@ def main() -> None:
         device=device,
         center_loss_fn=center_loss_fn,
         optimizer=opt,
+        optimizer_meta=opt_meta,
         clip_norm=clip_norm,
         amp_enabled_global=amp_enabled_global,
         center_fp32=center_fp32,
@@ -1187,7 +1502,7 @@ def main() -> None:
 
     # Rebuild a fresh model after smoke test so iter=0 truly starts before any optimizer step.
     model, _bias2 = _make_model_from_cfg(cfg, device)
-    opt = torch.optim.AdamW(model.center_head.parameters(), lr=float(lr), weight_decay=0.0)
+    opt, opt_meta = _build_center_branch_optimizer(model, center_lr=float(lr), adapter_lr=float(adapter_lr), weight_decay=0.0)
     scaler = torch.cuda.amp.GradScaler(enabled=(amp_enabled_global and (not center_fp32)))
 
     vis_iters = sorted({int(x.strip()) for x in str(args.vis_iters).split(",") if str(x).strip()})
@@ -1209,6 +1524,8 @@ def main() -> None:
                     "center_prob_mean_pos",
                     "center_prob_mean_near",
                     "center_prob_mean_far",
+                    "center_pos_minus_far",
+                    "center_pos_minus_near",
                     "center_prob_mean_max",
                     "best_thr",
                     "best_precision",
@@ -1216,13 +1533,28 @@ def main() -> None:
                     "best_f1",
                     "best_count_acc",
                     "best_loc_err_px",
+                    "best_pred_count_mean",
+                    "best_gt_count_mean",
+                    "one_marker_per_gt_instance_rate",
+                    "missing_gt_instance_marker_count",
+                    "several_markers_inside_one_gt_instance_count",
+                    "markers_outside_gt_instances",
                     "inst_exact_count_acc",
+                    "inst_merged_rate",
+                    "inst_fragmented_rate",
+                    "inst_mixed_rate",
                     "inst_mean_matched_iou",
                     "inst_perfect_rate",
-                    "grad_norm_before",
-                    "grad_norm_after",
+                    "instance_score",
+                    "adapter_grad_norm_before",
+                    "center_head_grad_norm_before",
+                    "combined_grad_norm_before",
+                    "adapter_grad_norm_after",
+                    "center_head_grad_norm_after",
+                    "combined_grad_norm_after",
                     "clipped",
                     "clipped_pct",
+                    "nonfinite_gradient_tensors",
                     "nonfinite_grad_count",
                     "skipped_step_count",
                     "center_weight_norm",
@@ -1264,6 +1596,8 @@ def main() -> None:
 
     for step in range(1, iters + 1):
         model.base.eval()
+        if getattr(model, "center_adapter", None) is not None:
+            model.center_adapter.train()
         model.center_head.train()
 
         batch = next(iter(loader))
@@ -1297,9 +1631,14 @@ def main() -> None:
         else:
             loss.backward()
 
-        params = list(model.center_head.parameters())
+        params = _center_branch_params(model)
+        adapter_params = _center_adapter_params(model)
+        head_params = _center_head_params(model)
+        adapter_grad_norm_before = _grad_l2_norm(adapter_params)
+        head_grad_norm_before = _grad_l2_norm(head_params)
         grad_norm_before = _grad_l2_norm(params)
-        grad_nonfinite = not math.isfinite(grad_norm_before)
+        nonfinite_gradient_tensors = int(sum(0 if (p.grad is None or bool(torch.isfinite(p.grad).all().item())) else 1 for p in params))
+        grad_nonfinite = bool(nonfinite_gradient_tensors > 0) or (not math.isfinite(grad_norm_before))
         if grad_nonfinite:
             nonfinite_grad_n += 1
         clipped = False
@@ -1308,6 +1647,8 @@ def main() -> None:
             if clipped:
                 clipped_n += 1
             torch.nn.utils.clip_grad_norm_(params, max_norm=float(clip_norm))
+        adapter_grad_norm_after = _grad_l2_norm(adapter_params)
+        head_grad_norm_after = _grad_l2_norm(head_params)
         grad_norm_after = _grad_l2_norm(params)
         skipped_steps = 0
         if bool(scaler.is_enabled()):
@@ -1373,6 +1714,8 @@ def main() -> None:
                         float(best.get("center_prob_mean_pos") or 0.0),
                         float(best.get("center_prob_mean_near") or 0.0),
                         float(best.get("center_prob_mean_far") or 0.0),
+                        float(best.get("center_pos_minus_far") or 0.0),
+                        float(best.get("center_pos_minus_near") or 0.0),
                         float(best.get("center_prob_mean_max") or 0.0),
                         float(best.get("threshold") or 0.0),
                         float(best.get("center_precision") or 0.0),
@@ -1380,13 +1723,28 @@ def main() -> None:
                         float(best.get("center_f1") or 0.0),
                         float(best.get("center_count_acc") or 0.0),
                         float(best.get("center_loc_err_px") or 0.0),
+                        float(best.get("center_pred_count_mean") or 0.0),
+                        float(best.get("center_gt_count_mean") or 0.0),
+                        float(best.get("one_marker_per_gt_instance_rate") or 0.0),
+                        int(best.get("missing_gt_instance_marker_count") or 0),
+                        int(best.get("several_markers_inside_one_gt_instance_count") or 0),
+                        int(best.get("markers_outside_gt_instances") or 0),
                         float(best.get("instance_exact_count_acc") or 0.0),
+                        float(best.get("instance_merged_rate") or 0.0),
+                        float(best.get("instance_fragmented_rate") or 0.0),
+                        float(best.get("instance_mixed_rate") or 0.0),
                         float(best.get("instance_mean_matched_iou") or 0.0),
                         float(best.get("instance_perfect_rate") or 0.0),
+                        float(best.get("instance_score") or 0.0),
+                        float(adapter_grad_norm_before),
+                        float(head_grad_norm_before),
                         float(grad_norm_before),
+                        float(adapter_grad_norm_after),
+                        float(head_grad_norm_after),
                         float(grad_norm_after),
                         int(clipped),
                         float(100.0 * float(clipped_n) / float(max(step, 1))),
+                        int(nonfinite_gradient_tensors),
                         int(nonfinite_grad_n),
                         int(skipped_steps_n),
                         float(w_norm) if w_norm is not None else "",

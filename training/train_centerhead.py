@@ -177,6 +177,7 @@ def _build_model(cfg: dict) -> torch.nn.Module:
         in_channels=int(cfg["model"]["in_channels"]),
         classes=int(cfg["model"]["classes"]),
         center_head_type=center_head_type,
+        center_feature=(cfg.get("model") or {}).get("center_feature", None),
     )
 
     init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
@@ -292,6 +293,9 @@ def _apply_training_policy(model: UnetPlusPlusSemanticCenterHead, cfg: dict) -> 
 
     for p in model.parameters():
         p.requires_grad = False
+    if getattr(model, "center_adapter", None) is not None:
+        for p in model.center_adapter.parameters():
+            p.requires_grad = True
     for p in model.center_head.parameters():
         p.requires_grad = True
 
@@ -313,10 +317,10 @@ def _apply_training_policy(model: UnetPlusPlusSemanticCenterHead, cfg: dict) -> 
     total_params = int(sum(int(p.numel()) for p in model.parameters()))
     trainable_params = int(sum(int(p.numel()) for p in model.parameters() if bool(p.requires_grad)))
     trainable_names = [n for (n, p) in model.named_parameters() if bool(p.requires_grad)]
-    allowed_prefixes = ["center_head."] + [f"{p}." for p in trainable_base_modules]
+    allowed_prefixes = ["center_head.", "center_adapter."] + [f"{p}." for p in trainable_base_modules]
     assert all(any(n.startswith(pref) for pref in allowed_prefixes) for n in trainable_names), f"Unexpected trainable params found: {trainable_names[:10]}"
 
-    center_param_names = [n for n, _p in model.named_parameters() if n.startswith("center_head.")]
+    center_param_names = [n for n, _p in model.named_parameters() if n.startswith("center_head.") or n.startswith("center_adapter.")]
     decoder_param_names = sorted(set(selected_param_names))
     return {
         "freeze_base": bool(freeze_base),
@@ -339,6 +343,8 @@ def _set_train_modes(model: UnetPlusPlusSemanticCenterHead, *, freeze_base: bool
         model.encoder.eval()
         model.segmentation_head.eval()
         model.base.decoder.eval()
+        if getattr(model, "center_adapter", None) is not None:
+            model.center_adapter.train()
         model.center_head.train()
         for module_path in list(getattr(model, "trainable_base_module_paths", []) or []):
             _resolve_named_module(model, module_path).train()
@@ -466,14 +472,14 @@ def _build_optimizer_groups(model: UnetPlusPlusSemanticCenterHead, cfg: dict, fr
 
     group_specs: list[dict] = []
     if freeze_base:
-        center_named = [(n, p) for n, p in model.named_parameters() if n.startswith("center_head.") and p.requires_grad]
-        decoder_named = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not n.startswith("center_head."))]
+        center_named = [(n, p) for n, p in model.named_parameters() if (n.startswith("center_head.") or n.startswith("center_adapter.")) and p.requires_grad]
+        decoder_named = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not n.startswith("center_head.")) and (not n.startswith("center_adapter."))]
         group_specs.append({"name": "center_head", "named_params": center_named, "lr": head_lr})
         if decoder_named:
             group_specs.append({"name": "unfrozen_decoder", "named_params": decoder_named, "lr": decoder_lr})
     else:
-        params_base = [(n, p) for n, p in model.named_parameters() if p.requires_grad and not (n.startswith("center_head.") or ".center_head." in n)]
-        params_head = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (n.startswith("center_head.") or ".center_head." in n)]
+        params_base = [(n, p) for n, p in model.named_parameters() if p.requires_grad and not (n.startswith("center_head.") or n.startswith("center_adapter.") or ".center_head." in n)]
+        params_head = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (n.startswith("center_head.") or n.startswith("center_adapter.") or ".center_head." in n)]
         group_specs = [
             {"name": "base", "named_params": params_base, "lr": base_lr},
             {"name": "center_head", "named_params": params_head, "lr": head_lr},
@@ -590,11 +596,12 @@ def _forward_center_with_precision(
     return_details: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | dict, dict]:
     decoder_features = decoder_output.detach() if bool(detach_decoder_output) else decoder_output
+    decoder_features = model.resolve_center_features(decoder_features)
     if center_fp32:
         decoder_features = decoder_features.float()
     center_autocast_enabled = bool(amp_enabled_global and (not center_fp32))
     with _autocast_ctx(device, enabled=center_autocast_enabled):
-        center_logits = model.forward_center(decoder_features)
+        center_logits = model.forward_center_from_features(decoder_features)
         if return_details and isinstance(center_loss_fn, CenterNetFocalHeatmapLoss):
             details = center_loss_fn(center_logits.float(), centers.float(), return_details=True)
             center_loss = details["loss"]
