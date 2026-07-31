@@ -142,6 +142,147 @@ def _keep_top3_by_area(labels_u8: np.ndarray) -> tuple[np.ndarray, int]:
     return out, 3
 
 
+def reconstruct_instances_from_semantic_and_center(
+    pred_sem_u8: np.ndarray,
+    center_prob_f32: np.ndarray,
+    center_thr: float,
+    *,
+    max_markers: int = 3,
+    return_trace: bool = False,
+):
+    leaf_union = pred_sem_u8 == 1
+    pred_pts_scored = _markers_from_center_map(center_prob_f32, leaf_union, float(center_thr), max_markers=max_markers)
+    pred_pts = [(int(y), int(x)) for (y, x, _) in pred_pts_scored]
+
+    marker_labels = np.zeros_like(pred_sem_u8, dtype=np.uint8)
+    for idx, (y, x, _score) in enumerate(pred_pts_scored, start=1):
+        marker_labels[int(y), int(x)] = np.uint8(idx)
+
+    labels_cc, cc_k = _connected_components(leaf_union.astype(np.uint8))
+    pred_inst = np.zeros_like(pred_sem_u8, dtype=np.uint8)
+    next_lab = 1
+    component_traces = []
+
+    for comp_id in range(1, int(cc_k) + 1):
+        comp01 = labels_cc == comp_id
+        in_markers_initial = [(y, x) for (y, x) in pred_pts if bool(comp01[int(y), int(x)])]
+        in_markers = list(in_markers_initial)
+        fallback_marker = None
+        used_fallback = False
+        watershed_local_count_before_keep = 0
+        watershed_local_count_after_keep = 0
+        output_labels = []
+        path = "single_label"
+
+        if len(in_markers) == 0:
+            fb = _fallback_marker(comp01)
+            if fb is not None:
+                fallback_marker = (int(fb[0]), int(fb[1]))
+                in_markers = [fallback_marker]
+                used_fallback = True
+
+        if len(in_markers) <= 1:
+            pred_inst[comp01] = np.uint8(next_lab)
+            output_labels = [int(next_lab)]
+            next_lab += 1
+        else:
+            path = "watershed"
+            topo = _geometry_topo_u8(comp01.astype(np.uint8))
+            seg = _watershed(comp01.astype(np.uint8), in_markers, topo)
+            watershed_local_count_before_keep = int(seg.max())
+            seg, seg_k = _keep_top3_by_area(seg)
+            watershed_local_count_after_keep = int(seg_k)
+            if seg_k <= 1:
+                path = "watershed_collapsed"
+                pred_inst[comp01] = np.uint8(next_lab)
+                output_labels = [int(next_lab)]
+                next_lab += 1
+            else:
+                for local in range(1, int(seg_k) + 1):
+                    pred_inst[seg == local] = np.uint8(next_lab)
+                    output_labels.append(int(next_lab))
+                    next_lab += 1
+
+        component_traces.append(
+            {
+                "component_id": int(comp_id),
+                "area": int(np.sum(comp01)),
+                "marker_count_before_fallback": int(len(in_markers_initial)),
+                "marker_count_after_fallback": int(len(in_markers)),
+                "markers_before_fallback": [{"y": int(y), "x": int(x)} for (y, x) in in_markers_initial],
+                "markers_used": [{"y": int(y), "x": int(x)} for (y, x) in in_markers],
+                "used_fallback": bool(used_fallback),
+                "fallback_marker": (
+                    {"y": int(fallback_marker[0]), "x": int(fallback_marker[1])}
+                    if fallback_marker is not None
+                    else None
+                ),
+                "path": path,
+                "watershed_local_count_before_keep": int(watershed_local_count_before_keep),
+                "watershed_local_count_after_keep": int(watershed_local_count_after_keep),
+                "output_labels": [int(v) for v in output_labels],
+            }
+        )
+
+    raw_inst = pred_inst.copy()
+    raw_k = int(raw_inst.max())
+    final_inst, final_k = _keep_top3_by_area(pred_inst)
+
+    if not return_trace:
+        return final_inst, int(final_k), pred_pts_scored
+
+    trace = {
+        "leaf_union": leaf_union.astype(np.uint8),
+        "semantic_components": labels_cc.astype(np.int32),
+        "semantic_component_count": int(cc_k),
+        "marker_labels": marker_labels,
+        "marker_count": int(len(pred_pts_scored)),
+        "marker_points": [{"y": int(y), "x": int(x), "score": float(s)} for (y, x, s) in pred_pts_scored],
+        "raw_reconstruction_labels": raw_inst.astype(np.uint8),
+        "raw_reconstruction_count": int(raw_k),
+        "postprocessed_labels": final_inst.astype(np.uint8),
+        "postprocessed_count": int(final_k),
+        "final_labels": final_inst.astype(np.uint8),
+        "final_count": int(final_k),
+        "component_traces": component_traces,
+    }
+    return final_inst, int(final_k), pred_pts_scored, trace
+
+
+def compute_instance_metrics_from_masks(
+    gt_inst_u8: np.ndarray,
+    pred_inst_u8: np.ndarray,
+    *,
+    gt_k: int | None = None,
+    pred_k: int | None = None,
+) -> dict:
+    if gt_k is None:
+        gt_k = int(len([int(v) for v in np.unique(gt_inst_u8) if int(v) > 0]))
+    if pred_k is None:
+        pred_k = int(len([int(v) for v in np.unique(pred_inst_u8) if int(v) > 0]))
+    case = _case_type(int(gt_k), int(pred_k))
+    iou_mat = _iou_matrix(gt_inst_u8, pred_inst_u8, int(gt_k), int(pred_k))
+    sum_iou = _best_perm_sum(iou_mat)
+    mean_iou = float(sum_iou / max(int(gt_k), 1))
+    return {
+        "gt_instance_count": int(gt_k),
+        "pred_instance_count": int(pred_k),
+        "case": str(case),
+        "instance_exact_count": bool(int(pred_k) == int(gt_k)),
+        "instance_exact_count_acc": float(int(int(pred_k) == int(gt_k))),
+        "instance_mean_matched_iou": float(mean_iou),
+        "instance_merged": bool(case == "merged"),
+        "instance_fragmented": bool(case == "fragmented"),
+        "instance_mixed": bool(case == "mixed"),
+        "instance_merged_rate": float(int(case == "merged")),
+        "instance_fragmented_rate": float(int(case == "fragmented")),
+        "instance_mixed_rate": float(int(case == "mixed")),
+        "instance_perfect": bool((int(pred_k) == int(gt_k)) and (mean_iou >= 0.90)),
+        "instance_perfect_rate": float(int((int(pred_k) == int(gt_k)) and (mean_iou >= 0.90))),
+        "iou_matrix": iou_mat,
+    }
+
+
 def _iou_matrix(gt_u8: np.ndarray, pred_u8: np.ndarray, gt_k: int, pred_k: int) -> np.ndarray:
     m = np.zeros((int(gt_k), int(pred_k)), dtype=np.float64)
     if gt_k == 0 or pred_k == 0:
@@ -344,45 +485,25 @@ def validate_centerhead(
             if gt_k <= 0:
                 continue
 
-            labels_cc, cc_k = _connected_components(leaf_union.astype(np.uint8))
-            pred_inst = np.zeros_like(gt_inst, dtype=np.uint8)
-            next_lab = 1
-            for comp_id in range(1, int(cc_k) + 1):
-                comp01 = labels_cc == comp_id
-                in_markers = [(y, x) for (y, x) in pred_pts if bool(comp01[int(y), int(x)])]
-                if len(in_markers) == 0:
-                    fb = _fallback_marker(comp01)
-                    if fb is not None:
-                        in_markers = [fb]
-                if len(in_markers) <= 1:
-                    pred_inst[comp01] = np.uint8(next_lab)
-                    next_lab += 1
-                    continue
-                topo = _geometry_topo_u8(comp01.astype(np.uint8))
-                seg = _watershed(comp01.astype(np.uint8), in_markers, topo)
-                seg, seg_k = _keep_top3_by_area(seg)
-                if seg_k <= 1:
-                    pred_inst[comp01] = np.uint8(next_lab)
-                    next_lab += 1
-                    continue
-                for local in range(1, int(seg_k) + 1):
-                    pred_inst[seg == local] = np.uint8(next_lab)
-                    next_lab += 1
-            pred_inst, pred_k = _keep_top3_by_area(pred_inst)
+            pred_inst, pred_k, _pred_pts_scored = reconstruct_instances_from_semantic_and_center(
+                pred_sem[i],
+                pred_center[i, 0],
+                float(center_thr),
+                max_markers=3,
+                return_trace=False,
+            )
 
-            case = _case_type(gt_k, pred_k)
+            inst_metrics = compute_instance_metrics_from_masks(gt_inst, pred_inst, gt_k=gt_k, pred_k=pred_k)
+            case = str(inst_metrics["case"])
             inst_n += 1
-            inst_exact += int(pred_k == gt_k)
+            inst_exact += int(bool(inst_metrics["instance_exact_count"]))
             inst_merged += int(case == "merged")
             inst_fragmented += int(case == "fragmented")
             inst_mixed += int(case == "mixed")
-
-            iou_mat = _iou_matrix(gt_inst, pred_inst, gt_k, pred_k)
-            sum_iou = _best_perm_sum(iou_mat)
-            mean_iou = float(sum_iou / max(gt_k, 1))
+            mean_iou = float(inst_metrics["instance_mean_matched_iou"])
             inst_mean_iou_sum += float(mean_iou)
             inst_median_iou_list.append(float(mean_iou))
-            inst_perfect += int((pred_k == gt_k) and (mean_iou >= 0.90))
+            inst_perfect += int(bool(inst_metrics["instance_perfect"]))
 
     n_samples = float(max(n_batches, 1))
     dice = [float(x / n_samples) for x in dice_sum]
