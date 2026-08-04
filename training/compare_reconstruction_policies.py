@@ -76,6 +76,18 @@ class BaselineMismatchError(RuntimeError):
     pass
 
 
+class AuthoritativeSchemaError(RuntimeError):
+    def __init__(self, payload: dict):
+        super().__init__(json.dumps(payload, ensure_ascii=False, indent=2))
+        self.payload = payload
+
+
+class AuthoritativeSourceMismatchError(RuntimeError):
+    def __init__(self, payload: dict):
+        super().__init__(json.dumps(payload, ensure_ascii=False, indent=2))
+        self.payload = payload
+
+
 def _positive_ids(labels: np.ndarray) -> list[int]:
     return [int(v) for v in np.unique(labels) if int(v) > 0]
 
@@ -823,7 +835,7 @@ def _make_policy_comparison_panel(
 
 def _read_authoritative_per_sample(path: Path) -> list[dict]:
     if path.suffix.lower() == ".csv":
-        with path.open("r", encoding="utf-8", newline="") as f:
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
             return list(csv.DictReader(f))
     obj = _read_json(path)
     if isinstance(obj, dict) and isinstance(obj.get("rows"), list):
@@ -833,14 +845,266 @@ def _read_authoritative_per_sample(path: Path) -> list[dict]:
     raise RuntimeError(f"Unsupported authoritative per-sample format: {path}")
 
 
-def _find_authoritative_per_sample_file(audit_dir: Path) -> Path:
-    csv_path = (audit_dir / "per_sample_audit.csv").resolve()
+def _parse_bool_str(value: object, *, source: str, canonical_field: str, available_headers: list[str] | None = None) -> bool:
+    if isinstance(value, bool):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "1"}:
+        return True
+    if text in {"false", "0"}:
+        return False
+    payload = {
+        "status": "authoritative_schema_error",
+        "source": source,
+        "canonical_field": canonical_field,
+        "value": value,
+    }
+    if available_headers is not None:
+        payload["available_headers"] = available_headers
+    raise AuthoritativeSchemaError(payload)
+
+
+def _parse_failure_class_csv(value: object) -> tuple[str, ...]:
+    text = str(value or "").strip()
+    if not text:
+        return ()
+    return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
+def _parse_failure_class_json(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, list):
+        return tuple(str(part).strip() for part in value if str(part).strip())
+    text = str(value).strip()
+    if not text:
+        return ()
+    return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
+def _get_json_nested(row: dict, path: list[str], *, row_index: int, canonical_field: str) -> object:
+    cur = row
+    parent = None
+    for idx, key in enumerate(path):
+        parent = cur
+        if not isinstance(cur, dict) or key not in cur:
+            payload = {
+                "status": "authoritative_schema_error",
+                "source": "per_sample_audit.json",
+                "row_index": int(row_index),
+                "canonical_field": canonical_field,
+                "missing_path": path,
+                "available_top_level_keys": sorted(row.keys()) if isinstance(row, dict) else [],
+                "available_parent_keys": sorted(parent.keys()) if isinstance(parent, dict) else [],
+            }
+            raise AuthoritativeSchemaError(payload)
+        cur = cur[key]
+    return cur
+
+
+def _normalize_authoritative_json_rows(rows: list[dict]) -> list[dict]:
+    normalized = []
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise AuthoritativeSchemaError(
+                {
+                    "status": "authoritative_schema_error",
+                    "source": "per_sample_audit.json",
+                    "row_index": int(row_index),
+                    "canonical_field": "row",
+                    "missing_path": [],
+                    "available_top_level_keys": [],
+                    "available_parent_keys": [],
+                }
+            )
+        final_count = int(_get_json_nested(row, ["reconstruction_stages", "final_labels_passed_to_metrics", "count"], row_index=row_index, canonical_field="final_reconstructed"))
+        metrics_reconstructed = int(_get_json_nested(row, ["metrics", "reconstructed_instance_count"], row_index=row_index, canonical_field="metrics.reconstructed_instance_count"))
+        if final_count != metrics_reconstructed:
+            raise AuthoritativeSchemaError(
+                {
+                    "status": "authoritative_schema_error",
+                    "source": "per_sample_audit.json",
+                    "row_index": int(row_index),
+                    "canonical_field": "final_reconstructed",
+                    "message": "metrics.reconstructed_instance_count must equal final_labels_passed_to_metrics.count",
+                    "expected_equal_fields": [
+                        ["metrics", "reconstructed_instance_count"],
+                        ["reconstruction_stages", "final_labels_passed_to_metrics", "count"],
+                    ],
+                    "metrics_reconstructed_instance_count": metrics_reconstructed,
+                    "final_labels_passed_to_metrics_count": final_count,
+                }
+            )
+        normalized.append(
+            {
+                "checkpoint_tag": str(_get_json_nested(row, ["checkpoint_tag"], row_index=row_index, canonical_field="checkpoint_tag")),
+                "checkpoint_iteration": int(_get_json_nested(row, ["checkpoint_iteration"], row_index=row_index, canonical_field="checkpoint_iteration")) if _get_json_nested(row, ["checkpoint_iteration"], row_index=row_index, canonical_field="checkpoint_iteration") is not None else None,
+                "threshold": float(_get_json_nested(row, ["threshold"], row_index=row_index, canonical_field="threshold")),
+                "sample": str(_get_json_nested(row, ["sample"], row_index=row_index, canonical_field="sample")),
+                "sample_index": int(_get_json_nested(row, ["sample_index"], row_index=row_index, canonical_field="sample_index")),
+                "gt_instances": int(_get_json_nested(row, ["identifiers", "gt_instance_count"], row_index=row_index, canonical_field="gt_instances")),
+                "markers": int(_get_json_nested(row, ["marker_contract", "extracted_marker_count"], row_index=row_index, canonical_field="markers")),
+                "marker_contract": bool(_get_json_nested(row, ["marker_contract", "marker_contract_pass"], row_index=row_index, canonical_field="marker_contract")),
+                "semantic_cc": int(_get_json_nested(row, ["semantic_topology", "predicted_leaflet_connected_components"], row_index=row_index, canonical_field="semantic_cc")),
+                "raw_reconstructed": int(_get_json_nested(row, ["reconstruction_stages", "raw_reconstruction", "count"], row_index=row_index, canonical_field="raw_reconstructed")),
+                "final_reconstructed": int(final_count),
+                "exact_count": bool(_get_json_nested(row, ["metrics", "instance_exact_count"], row_index=row_index, canonical_field="exact_count")),
+                "failure_class": _parse_failure_class_json(_get_json_nested(row, ["failure_class"], row_index=row_index, canonical_field="failure_class")),
+                "invariant": row.get("invariant"),
+            }
+        )
+    return normalized
+
+
+def _normalize_authoritative_csv_rows(rows: list[dict]) -> list[dict]:
+    normalized = []
+    for row in rows:
+        headers = sorted(list(row.keys()))
+        required = [
+            "checkpoint_tag",
+            "checkpoint_iteration",
+            "threshold",
+            "sample",
+            "sample_index",
+            "gt_instances",
+            "markers",
+            "marker_contract",
+            "semantic_cc",
+            "raw_reconstructed",
+            "final_reconstructed",
+            "exact_count",
+            "failure_class",
+        ]
+        for key in required:
+            if key not in row:
+                raise AuthoritativeSchemaError(
+                    {
+                        "status": "authoritative_schema_error",
+                        "source": "per_sample_audit.csv",
+                        "canonical_field": key,
+                        "available_headers": headers,
+                    }
+                )
+        normalized.append(
+            {
+                "checkpoint_tag": str(row["checkpoint_tag"]),
+                "checkpoint_iteration": int(row["checkpoint_iteration"]) if str(row["checkpoint_iteration"]).strip() else None,
+                "threshold": float(row["threshold"]),
+                "sample": str(row["sample"]),
+                "sample_index": int(row["sample_index"]),
+                "gt_instances": int(row["gt_instances"]),
+                "markers": int(row["markers"]),
+                "marker_contract": _parse_bool_str(row["marker_contract"], source="per_sample_audit.csv", canonical_field="marker_contract", available_headers=headers),
+                "semantic_cc": int(row["semantic_cc"]),
+                "raw_reconstructed": int(row["raw_reconstructed"]),
+                "final_reconstructed": int(row["final_reconstructed"]),
+                "exact_count": _parse_bool_str(row["exact_count"], source="per_sample_audit.csv", canonical_field="exact_count", available_headers=headers),
+                "failure_class": _parse_failure_class_csv(row["failure_class"]),
+                "invariant": None,
+            }
+        )
+    return normalized
+
+
+def _identity_key(row: dict) -> tuple:
+    return (
+        str(row["checkpoint_tag"]),
+        None if row["checkpoint_iteration"] is None else int(row["checkpoint_iteration"]),
+        float(row["threshold"]),
+        str(row["sample"]),
+    )
+
+
+def _canonical_row_projection(row: dict) -> dict:
+    return {
+        "markers": int(row["markers"]),
+        "marker_contract": bool(row["marker_contract"]),
+        "semantic_cc": int(row["semantic_cc"]),
+        "raw_reconstructed": int(row["raw_reconstructed"]),
+        "final_reconstructed": int(row["final_reconstructed"]),
+        "exact_count": bool(row["exact_count"]),
+    }
+
+
+def _load_authoritative_sources(audit_dir: Path) -> dict:
     json_path = (audit_dir / "per_sample_audit.json").resolve()
-    if json_path.exists():
-        return json_path
-    if csv_path.exists():
-        return csv_path
-    raise RuntimeError(f"Missing authoritative per-sample audit in {audit_dir}")
+    csv_path = (audit_dir / "per_sample_audit.csv").resolve()
+    if not json_path.exists() and not csv_path.exists():
+        raise RuntimeError(f"Missing authoritative per-sample audit sources in {audit_dir}")
+
+    json_rows_raw = _read_authoritative_per_sample(json_path) if json_path.exists() else None
+    csv_rows_raw = _read_authoritative_per_sample(csv_path) if csv_path.exists() else None
+    json_rows = _normalize_authoritative_json_rows(json_rows_raw) if json_rows_raw is not None else None
+    csv_rows = _normalize_authoritative_csv_rows(csv_rows_raw) if csv_rows_raw is not None else None
+
+    if json_rows is not None and csv_rows is not None:
+        if len(json_rows) != len(csv_rows):
+            raise AuthoritativeSourceMismatchError(
+                {
+                    "status": "authoritative_source_mismatch",
+                    "json_rows": len(json_rows),
+                    "csv_rows": len(csv_rows),
+                    "reason": "row_count_mismatch",
+                }
+            )
+        json_keys = [_identity_key(row) for row in json_rows]
+        csv_keys = [_identity_key(row) for row in csv_rows]
+        if json_keys != csv_keys:
+            raise AuthoritativeSourceMismatchError(
+                {
+                    "status": "authoritative_source_mismatch",
+                    "json_rows": len(json_rows),
+                    "csv_rows": len(csv_rows),
+                    "reason": "identity_key_mismatch",
+                    "first_json_key": json_keys[0] if json_keys else None,
+                    "first_csv_key": csv_keys[0] if csv_keys else None,
+                }
+            )
+        mismatch_rows = []
+        for idx, (json_row, csv_row) in enumerate(zip(json_rows, csv_rows)):
+            if _canonical_row_projection(json_row) != _canonical_row_projection(csv_row):
+                mismatch_rows.append(
+                    {
+                        "row_index": int(idx),
+                        "identity_key": json_keys[idx],
+                        "json": _canonical_row_projection(json_row),
+                        "csv": _canonical_row_projection(csv_row),
+                    }
+                )
+        if mismatch_rows:
+            raise AuthoritativeSourceMismatchError(
+                {
+                    "status": "authoritative_source_mismatch",
+                    "json_rows": len(json_rows),
+                    "csv_rows": len(csv_rows),
+                    "reason": "canonical_field_mismatch",
+                    "mismatch_rows": mismatch_rows,
+                }
+            )
+
+        enriched_rows = []
+        for csv_row, json_row in zip(csv_rows, json_rows):
+            enriched = dict(csv_row)
+            enriched["invariant"] = json_row.get("invariant")
+            enriched_rows.append(enriched)
+        return {
+            "canonical_rows": enriched_rows,
+            "json_rows": json_rows,
+            "csv_rows": csv_rows,
+            "json_row_count": len(json_rows),
+            "csv_row_count": len(csv_rows),
+            "source_consistency": True,
+        }
+
+    canonical_rows = csv_rows if csv_rows is not None else json_rows
+    return {
+        "canonical_rows": canonical_rows,
+        "json_rows": json_rows,
+        "csv_rows": csv_rows,
+        "json_row_count": None if json_rows is None else len(json_rows),
+        "csv_row_count": None if csv_rows is None else len(csv_rows),
+        "source_consistency": json_rows is not None and csv_rows is not None,
+    }
 
 
 def _extract_possible_iteration_fields(ckpt: dict) -> list[dict]:
@@ -1059,22 +1323,23 @@ def _hash_match_status(actual_hash: str | None, authoritative_hash: str | None) 
 
 def _expected_primary_first_failure_from_rows(rows: list[dict]) -> dict | None:
     for row in rows:
-        marker_contract = str(row.get("marker_contract", "")).strip().lower() == "true" if isinstance(row.get("marker_contract"), str) else bool(row.get("marker_contract"))
+        marker_contract = bool(row.get("marker_contract"))
         if not marker_contract:
             continue
         markers = int(row["markers"])
         raw_reconstructed = int(row["raw_reconstructed"])
         if raw_reconstructed != markers:
+            invariant = row.get("invariant")
             return {
                 "checkpoint_tag": str(row.get("checkpoint_tag", "best")),
                 "checkpoint_iteration": int(row["checkpoint_iteration"]) if row.get("checkpoint_iteration") not in (None, "") else None,
                 "threshold": float(row["threshold"]) if row.get("threshold") not in (None, "") else None,
                 "sample": str(row["sample"]),
-                "stage": "raw reconstruction/watershed",
+                "stage": str(invariant.get("stage")) if isinstance(invariant, dict) and invariant.get("stage") is not None else "raw reconstruction/watershed",
                 "before": int(markers),
                 "after": int(raw_reconstructed),
-                "function": "_fallback_marker",
-                "labels": "unrecoverable",
+                "function": invariant.get("function") if isinstance(invariant, dict) and invariant.get("function") is not None else None,
+                "labels": invariant.get("labels") if isinstance(invariant, dict) and invariant.get("labels") is not None else "unrecoverable",
             }
     return None
 
@@ -1340,7 +1605,8 @@ def main() -> None:
     audit_summary_path = (authoritative_audit_dir / "audit_summary.json").resolve()
     reconstruction_invariants_path = (authoritative_audit_dir / "reconstruction_invariants.json").resolve()
     checkpoint_metadata_path = (authoritative_audit_dir / "checkpoint_metadata.json").resolve()
-    authoritative_per_sample_path = _find_authoritative_per_sample_file(authoritative_audit_dir)
+    authoritative_json_path = (authoritative_audit_dir / "per_sample_audit.json").resolve()
+    authoritative_csv_path = (authoritative_audit_dir / "per_sample_audit.csv").resolve()
 
     cfg = _read_yaml(cfg_path)
     _seed_all(int(cfg.get("seed", 1337)))
@@ -1351,7 +1617,17 @@ def main() -> None:
     authoritative_summary = _read_json(audit_summary_path)
     authoritative_invariants = _read_json(reconstruction_invariants_path)
     authoritative_checkpoint_metadata = _read_json(checkpoint_metadata_path)
-    authoritative_per_sample_rows = _read_authoritative_per_sample(authoritative_per_sample_path)
+    try:
+        authoritative_sources = _load_authoritative_sources(authoritative_audit_dir)
+    except AuthoritativeSchemaError as exc:
+        print(json.dumps(exc.payload, ensure_ascii=False, indent=2))
+        raise SystemExit(1)
+    except AuthoritativeSourceMismatchError as exc:
+        (out_dir / "authoritative_source_mismatch.json").write_text(json.dumps(exc.payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(exc.payload, ensure_ascii=False, indent=2))
+        raise SystemExit(1)
+
+    authoritative_per_sample_rows = authoritative_sources["canonical_rows"]
 
     authoritative_global_first_failure = authoritative_summary.get("first_failing_stage")
     best_authoritative_primary_rows = _policy_rows_for_primary(authoritative_per_sample_rows)
@@ -1430,6 +1706,10 @@ def main() -> None:
         "adapter_channels": checkpoint_identity["adapter_channels"],
         "normalization_mode": checkpoint_identity["normalization_mode"],
         "center_fp32": checkpoint_identity["center_fp32"],
+        "authoritative_json_rows": authoritative_sources["json_row_count"],
+        "authoritative_csv_rows": authoritative_sources["csv_row_count"],
+        "source_consistency": authoritative_sources["source_consistency"],
+        "authoritative_primary_rows": len(best_authoritative_primary_rows),
         "authoritative_global_first_failure": authoritative_global_first_failure,
         "authoritative_primary_first_failure": authoritative_primary_first_failure,
     }
@@ -1661,6 +1941,10 @@ def main() -> None:
                 "semantic_checkpoint_sha256": checkpoint_identity["semantic_checkpoint_sha256"],
                 "microset_hash": microset_info["raw_sha256"],
                 "device": str(device),
+                "authoritative_json_rows": authoritative_sources["json_row_count"],
+                "authoritative_csv_rows": authoritative_sources["csv_row_count"],
+                "source_consistency": authoritative_sources["source_consistency"],
+                "authoritative_primary_rows": len(best_authoritative_primary_rows),
                 "authoritative_global_first_failure": authoritative_global_first_failure,
                 "authoritative_primary_first_failure": authoritative_primary_first_failure,
                 "actual_primary_first_failure": actual_primary_first_failure,
@@ -1762,6 +2046,9 @@ def main() -> None:
         },
         "invariants": invariants,
         "server_preflight": {
+            "authoritative_json_rows": authoritative_sources["json_row_count"],
+            "authoritative_csv_rows": authoritative_sources["csv_row_count"],
+            "source_consistency": authoritative_sources["source_consistency"],
             "global_first_failure": authoritative_global_first_failure,
             "primary_expected_first_failure": authoritative_primary_first_failure,
             "primary_actual_first_failure": actual_primary_first_failure,
