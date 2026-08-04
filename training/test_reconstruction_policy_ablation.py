@@ -494,6 +494,153 @@ class TestReconstructionPolicyAblation(unittest.TestCase):
             crlf.write_text(content_crlf, encoding="utf-8")
             self.assertEqual(mod._normalized_microset_sha256(lf), mod._normalized_microset_sha256(crlf))
 
+    def test_labels_to_bgr_all_zero_map(self):
+        mod = self._mod()
+        labels = np.zeros((8, 9), dtype=np.int32)
+        out = mod._labels_to_bgr(labels)
+        self.assertEqual(out.shape, (8, 9, 3))
+        self.assertEqual(out.dtype, np.uint8)
+        self.assertTrue(np.array_equal(out, np.zeros((8, 9, 3), dtype=np.uint8)))
+
+    def test_labels_to_bgr_one_positive_label(self):
+        mod = self._mod()
+        labels = np.zeros((6, 6), dtype=np.int32)
+        labels[1:4, 2:5] = 3
+        out = mod._labels_to_bgr(labels)
+        self.assertTrue(np.all(out[0, 0] == 0))
+        self.assertTrue(np.any(out[2, 3] != 0))
+
+    def test_labels_to_bgr_non_contiguous_labels_get_distinct_colors(self):
+        mod = self._mod()
+        labels = np.zeros((5, 6), dtype=np.int32)
+        labels[0:2, 0:2] = 2
+        labels[2:4, 2:4] = 5
+        labels[1:3, 4:6] = 11
+        out = mod._labels_to_bgr(labels)
+        self.assertFalse(np.array_equal(out[0, 0], out[2, 2]))
+        self.assertFalse(np.array_equal(out[0, 0], out[1, 4]))
+        self.assertFalse(np.array_equal(out[2, 2], out[1, 4]))
+
+    def test_labels_to_bgr_repeated_calls_are_byte_identical(self):
+        mod = self._mod()
+        labels = np.zeros((7, 7), dtype=np.int32)
+        labels[1:3, 1:3] = 2
+        labels[4:6, 4:6] = 5
+        self.assertTrue(np.array_equal(mod._labels_to_bgr(labels), mod._labels_to_bgr(labels)))
+
+    def test_labels_to_bgr_does_not_mutate_input(self):
+        mod = self._mod()
+        labels = np.zeros((6, 6), dtype=np.int32)
+        labels[2:4, 2:4] = 7
+        original = labels.copy()
+        _ = mod._labels_to_bgr(labels)
+        self.assertTrue(np.array_equal(labels, original))
+
+    def test_labels_to_bgr_int16_int32_int64_equivalent(self):
+        mod = self._mod()
+        base = np.zeros((6, 6), dtype=np.int64)
+        base[1:3, 1:3] = 2
+        base[3:5, 3:5] = 11
+        out16 = mod._labels_to_bgr(base.astype(np.int16))
+        out32 = mod._labels_to_bgr(base.astype(np.int32))
+        out64 = mod._labels_to_bgr(base.astype(np.int64))
+        self.assertTrue(np.array_equal(out16, out32))
+        self.assertTrue(np.array_equal(out32, out64))
+
+    def test_make_policy_comparison_panel_synthetic_smoke(self):
+        mod = self._mod()
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        gt_inst = np.zeros((32, 32), dtype=np.int32)
+        gt_inst[4:12, 4:12] = 1
+        gt_inst[18:28, 18:28] = 2
+        pred_sem = np.zeros((32, 32), dtype=np.uint8)
+        pred_sem[4:12, 4:12] = 1
+        pred_sem[18:28, 18:28] = 1
+        semantic_cc = np.zeros((32, 32), dtype=np.int32)
+        semantic_cc[4:12, 4:12] = 1
+        semantic_cc[18:28, 18:28] = 2
+        labels = gt_inst.astype(np.uint8)
+        metrics = {
+            "counts": {"final_output_label_count": 2},
+            "instance_metrics": {"matched_iou": 0.9},
+            "area_accounting": {"assigned_area_fraction": 1.0},
+        }
+        policy_outputs = {
+            "P0_CURRENT": {"labels": labels, "metrics": metrics},
+            "P1_DROP_UNMARKED": {"labels": labels, "metrics": metrics},
+            "P2_ATTACH_TO_NEAREST_MARKER": {"labels": labels, "metrics": metrics},
+            "P3_GATED_ATTACH": {"labels": labels, "metrics": metrics},
+            "P4_GLOBAL_MARKER_CONTROLLED": {"labels": labels, "metrics": metrics},
+        }
+        panel = mod._make_policy_comparison_panel(
+            sample="synthetic_sample",
+            image_rgb_u8=image,
+            gt_inst=gt_inst,
+            pred_sem=pred_sem,
+            semantic_cc=semantic_cc,
+            marker_points=[{"marker_id": 1, "y": 8, "x": 8}, {"marker_id": 2, "y": 22, "x": 22}],
+            policy_outputs=policy_outputs,
+            recommended_policy="P0_CURRENT",
+        )
+        self.assertEqual(panel.dtype, np.uint8)
+        self.assertEqual(panel.ndim, 3)
+        self.assertEqual(panel.shape[2], 3)
+        self.assertGreater(panel.size, 0)
+
+    def test_panel_invalid_shape_raises_controlled_visualization_error(self):
+        mod = self._mod()
+        labels = np.zeros((16, 16), dtype=np.int32)
+        metrics = {
+            "counts": {"final_output_label_count": 0},
+            "instance_metrics": {"matched_iou": 0.0},
+            "area_accounting": {"assigned_area_fraction": 0.0},
+        }
+        policy_outputs = {
+            "P0_CURRENT": {"labels": labels, "metrics": metrics},
+            "P1_DROP_UNMARKED": {"labels": labels, "metrics": metrics},
+            "P2_ATTACH_TO_NEAREST_MARKER": {"labels": labels, "metrics": metrics},
+            "P3_GATED_ATTACH": {"labels": labels, "metrics": metrics},
+            "P4_GLOBAL_MARKER_CONTROLLED": {"labels": labels, "metrics": metrics},
+        }
+        with self.assertRaises(mod.VisualizationError) as ctx:
+            mod._make_policy_comparison_panel(
+                sample="bad_sample",
+                image_rgb_u8=np.zeros((16, 16, 3), dtype=np.uint8),
+                gt_inst=np.zeros((8, 8), dtype=np.int32),
+                pred_sem=np.zeros((16, 16), dtype=np.uint8),
+                semantic_cc=np.zeros((16, 16), dtype=np.int32),
+                marker_points=[],
+                policy_outputs=policy_outputs,
+                recommended_policy="P0_CURRENT",
+            )
+        self.assertEqual(ctx.exception.payload["sample"], "bad_sample")
+
+    def test_write_core_policy_artifacts_preserves_results_before_visual_failure(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            summary = {"recommended_policy": {"policy": "P1_DROP_UNMARKED"}}
+            rows = [{"sample": "s1", "policy": "P0_CURRENT"}]
+            per_component_assignments = {"samples": []}
+            invariants = {"primary_threshold": 0.03}
+            recommended = {"policy": "P1_DROP_UNMARKED"}
+            mod._write_core_policy_artifacts(
+                out_dir=out_dir,
+                summary=summary,
+                per_sample_csv_rows=rows,
+                per_component_assignments=per_component_assignments,
+                invariants=invariants,
+                recommended=recommended,
+            )
+            payload = {"status": "visualization_error", "sample": "s1"}
+            mod._write_json_atomic(out_dir / "visualization_error.json", payload)
+            self.assertTrue((out_dir / "policy_summary.json").exists())
+            self.assertTrue((out_dir / "per_sample_policy_metrics.csv").exists())
+            self.assertTrue((out_dir / "per_component_assignments.json").exists())
+            self.assertTrue((out_dir / "invariants.json").exists())
+            self.assertTrue((out_dir / "recommended_policy.json").exists())
+            self.assertTrue((out_dir / "visualization_error.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

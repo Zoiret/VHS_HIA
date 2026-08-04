@@ -88,6 +88,12 @@ class AuthoritativeSourceMismatchError(RuntimeError):
         self.payload = payload
 
 
+class VisualizationError(RuntimeError):
+    def __init__(self, payload: dict):
+        super().__init__(json.dumps(payload, ensure_ascii=False, indent=2))
+        self.payload = payload
+
+
 def _positive_ids(labels: np.ndarray) -> list[int]:
     return [int(v) for v in np.unique(labels) if int(v) > 0]
 
@@ -773,6 +779,149 @@ def _json_safe_trace(trace: dict) -> dict:
     return out
 
 
+def _write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding=encoding)
+    tmp.replace(path)
+
+
+def _write_json_atomic(path: Path, payload: object) -> None:
+    _write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_csv_atomic(path: Path, rows: list[dict]) -> None:
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="") as f:
+        if rows:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+    tmp.replace(path)
+
+
+def _label_id_to_bgr(label_id: int) -> tuple[int, int, int]:
+    if int(label_id) <= 0:
+        return (0, 0, 0)
+    # Deterministic color from label id, independent of label discovery order.
+    hue = int((int(label_id) * 37) % 180)
+    sat = 200 + int((int(label_id) * 17) % 40)
+    val = 220 + int((int(label_id) * 29) % 35)
+    hsv = np.array([[[hue, min(sat, 255), min(val, 255)]]], dtype=np.uint8)
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+    return (int(bgr[0]), int(bgr[1]), int(bgr[2]))
+
+
+def _labels_to_bgr(labels: np.ndarray) -> np.ndarray:
+    arr = np.asarray(labels)
+    if arr.ndim != 2:
+        raise VisualizationError(
+            {
+                "status": "visualization_error",
+                "message": "_labels_to_bgr expects a 2D label map",
+                "array_name": "labels",
+                "expected_shape": "H x W",
+                "actual_shape": list(arr.shape),
+                "dtype": str(arr.dtype),
+            }
+        )
+    if not np.issubdtype(arr.dtype, np.integer):
+        arr = arr.astype(np.int64)
+    else:
+        arr = arr.astype(np.int64, copy=False)
+    if not np.isfinite(arr.astype(np.float64)).all():
+        raise VisualizationError(
+            {
+                "status": "visualization_error",
+                "message": "label map contains non-finite values",
+                "array_name": "labels",
+                "expected_shape": "H x W",
+                "actual_shape": list(arr.shape),
+                "dtype": str(arr.dtype),
+            }
+        )
+    if int(arr.min(initial=0)) < 0:
+        raise VisualizationError(
+            {
+                "status": "visualization_error",
+                "message": "label map contains negative IDs",
+                "array_name": "labels",
+                "expected_shape": "H x W",
+                "actual_shape": list(arr.shape),
+                "dtype": str(arr.dtype),
+            }
+        )
+    h, w = arr.shape
+    out = np.zeros((h, w, 3), dtype=np.uint8)
+    for lab in [int(v) for v in np.unique(arr) if int(v) > 0]:
+        out[arr == lab] = np.array(_label_id_to_bgr(lab), dtype=np.uint8)
+    return out
+
+
+def _raise_visualization_array_error(*, sample: str, panel_name: str, array_name: str, expected_shape: str, actual_shape: object, dtype: object, message: str) -> None:
+    raise VisualizationError(
+        {
+            "status": "visualization_error",
+            "sample": sample,
+            "panel_name": panel_name,
+            "array_name": array_name,
+            "expected_shape": expected_shape,
+            "actual_shape": actual_shape,
+            "dtype": str(dtype),
+            "message": message,
+        }
+    )
+
+
+def _validate_visual_array(*, sample: str, panel_name: str, array_name: str, arr: np.ndarray, expected_hw: tuple[int, int], require_three_channels: bool = False) -> None:
+    expected_h, expected_w = expected_hw
+    if require_three_channels:
+        if arr.ndim != 3 or arr.shape[2] != 3 or arr.shape[0] != expected_h or arr.shape[1] != expected_w:
+            _raise_visualization_array_error(
+                sample=sample,
+                panel_name=panel_name,
+                array_name=array_name,
+                expected_shape=f"{expected_h} x {expected_w} x 3",
+                actual_shape=list(arr.shape),
+                dtype=arr.dtype,
+                message="image must be H x W x 3",
+            )
+    else:
+        if arr.ndim != 2 or arr.shape[0] != expected_h or arr.shape[1] != expected_w:
+            _raise_visualization_array_error(
+                sample=sample,
+                panel_name=panel_name,
+                array_name=array_name,
+                expected_shape=f"{expected_h} x {expected_w}",
+                actual_shape=list(arr.shape),
+                dtype=arr.dtype,
+                message="array must be H x W",
+            )
+    if not np.isfinite(arr.astype(np.float32)).all():
+        _raise_visualization_array_error(
+            sample=sample,
+            panel_name=panel_name,
+            array_name=array_name,
+            expected_shape=f"{expected_h} x {expected_w}" + (" x 3" if require_three_channels else ""),
+            actual_shape=list(arr.shape),
+            dtype=arr.dtype,
+            message="array contains non-finite values",
+        )
+    if not require_three_channels and np.min(arr) < 0:
+        _raise_visualization_array_error(
+            sample=sample,
+            panel_name=panel_name,
+            array_name=array_name,
+            expected_shape=f"{expected_h} x {expected_w}",
+            actual_shape=list(arr.shape),
+            dtype=arr.dtype,
+            message="label IDs must be non-negative",
+        )
+
+
 def _overlay_component_ids(pred_sem: np.ndarray, labels_cc: np.ndarray) -> np.ndarray:
     base = _mask_to_bgr(pred_sem)
     out = base.copy()
@@ -801,6 +950,7 @@ def _policy_panel(label_img: np.ndarray, title: str, metrics: dict) -> np.ndarra
 
 def _make_policy_comparison_panel(
     *,
+    sample: str,
     image_rgb_u8: np.ndarray,
     gt_inst: np.ndarray,
     pred_sem: np.ndarray,
@@ -809,6 +959,35 @@ def _make_policy_comparison_panel(
     policy_outputs: dict,
     recommended_policy: str,
 ) -> np.ndarray:
+    expected_hw = tuple(int(v) for v in image_rgb_u8.shape[:2])
+    _validate_visual_array(sample=sample, panel_name="1. original", array_name="image_rgb_u8", arr=image_rgb_u8, expected_hw=expected_hw, require_three_channels=True)
+    _validate_visual_array(sample=sample, panel_name="2. GT instances", array_name="gt_inst", arr=gt_inst, expected_hw=expected_hw)
+    _validate_visual_array(sample=sample, panel_name="3. semantic + CC", array_name="pred_sem", arr=pred_sem, expected_hw=expected_hw)
+    _validate_visual_array(sample=sample, panel_name="3. semantic + CC", array_name="semantic_cc", arr=semantic_cc, expected_hw=expected_hw)
+    for panel_title, policy_name in (
+        ("5. P0 current", "P0_CURRENT"),
+        ("6. P1 drop", "P1_DROP_UNMARKED"),
+        ("7. P2 nearest", "P2_ATTACH_TO_NEAREST_MARKER"),
+        ("8. P3 gated", "P3_GATED_ATTACH"),
+        ("9. P4 global", "P4_GLOBAL_MARKER_CONTROLLED"),
+    ):
+        _validate_visual_array(sample=sample, panel_name=panel_title, array_name=f"{policy_name}.labels", arr=policy_outputs[policy_name]["labels"], expected_hw=expected_hw)
+    for idx, mp in enumerate(marker_points, start=1):
+        y = int(mp["y"])
+        x = int(mp["x"])
+        if not (0 <= y < expected_hw[0] and 0 <= x < expected_hw[1]):
+            raise VisualizationError(
+                {
+                    "status": "visualization_error",
+                    "sample": sample,
+                    "panel_name": "4. center markers",
+                    "array_name": f"marker_points[{idx}]",
+                    "expected_shape": f"0 <= y < {expected_hw[0]}, 0 <= x < {expected_hw[1]}",
+                    "actual_shape": {"y": y, "x": x},
+                    "dtype": "int",
+                    "message": "marker coordinate is outside image bounds",
+                }
+            )
     original = cv2.cvtColor(image_rgb_u8, cv2.COLOR_RGB2BGR)
     panels = [
         ("1. original", original),
@@ -830,6 +1009,19 @@ def _make_policy_comparison_panel(
     top = np.concatenate(tiles[:5], axis=1)
     bottom = np.concatenate(tiles[5:], axis=1)
     grid = np.concatenate([top, bottom], axis=0)
+    if grid.ndim != 3 or grid.shape[2] != 3 or grid.dtype != np.uint8 or int(grid.size) == 0:
+        raise VisualizationError(
+            {
+                "status": "visualization_error",
+                "sample": sample,
+                "panel_name": "policy_comparison_grid",
+                "array_name": "grid",
+                "expected_shape": "H x W x 3 non-empty uint8",
+                "actual_shape": list(grid.shape),
+                "dtype": str(grid.dtype),
+                "message": "panel grid is not a valid uint8 3-channel image",
+            }
+        )
     return grid
 
 
@@ -1505,6 +1697,12 @@ def _clear_baseline_mismatch_if_present(output_dir: Path) -> None:
         path.unlink()
 
 
+def _clear_visualization_error_if_present(output_dir: Path) -> None:
+    path = (output_dir / "visualization_error.json").resolve()
+    if path.exists():
+        path.unlink()
+
+
 def _print_primary_sections(summary: dict) -> None:
     print("# PRIMARY OPERATING POINT")
     print(json.dumps(summary["primary_operating_point"], ensure_ascii=False, indent=2))
@@ -1533,6 +1731,22 @@ def _print_baseline_mismatch_sections(report: dict) -> None:
     print(json.dumps({"expected": {"exact_count_accuracy": report["expected_exact_count_accuracy"], "marker_contract_passes": report["expected_marker_contract_passes"], "authoritative_global_first_failure": report["authoritative_global_first_failure"], "authoritative_primary_first_failure": report["authoritative_primary_first_failure"]}}, ensure_ascii=False, indent=2))
     print(json.dumps({"actual": {"exact_count_accuracy": report["actual_exact_count_accuracy"], "marker_contract_passes": report["actual_marker_contract_passes"], "actual_primary_first_failure": report["actual_primary_first_failure"]}}, ensure_ascii=False, indent=2))
     print(json.dumps({"first_differing_sample": report["first_differing_sample"], "classification": report["classification"], "next_diagnostic": "Inspect baseline_mismatch.json and checkpoint iteration parsing before running P1-P4."}, ensure_ascii=False, indent=2))
+
+
+def _write_core_policy_artifacts(
+    *,
+    out_dir: Path,
+    summary: dict,
+    per_sample_csv_rows: list[dict],
+    per_component_assignments: dict,
+    invariants: dict,
+    recommended: dict,
+) -> None:
+    _write_json_atomic(out_dir / "policy_summary.json", summary)
+    _write_csv_atomic(out_dir / "per_sample_policy_metrics.csv", per_sample_csv_rows)
+    _write_json_atomic(out_dir / "per_component_assignments.json", per_component_assignments)
+    _write_json_atomic(out_dir / "invariants.json", invariants)
+    _write_recommended_policy_if_allowed(out_dir, recommended, baseline_exact_match=True)
 
 
 def _assert_policy_contract(policy_name: str, metrics: dict) -> None:
@@ -1900,7 +2114,7 @@ def main() -> None:
 
     if not exact_match:
         baseline_report["status"] = "authoritative_baseline_mismatch"
-        (out_dir / "baseline_mismatch.json").write_text(json.dumps(baseline_report, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_json_atomic(out_dir / "baseline_mismatch.json", baseline_report)
         print(
             json.dumps(
                 {
@@ -1929,6 +2143,7 @@ def main() -> None:
         raise SystemExit(1)
 
     _clear_baseline_mismatch_if_present(out_dir)
+    _clear_visualization_error_if_present(out_dir)
     print(
         json.dumps(
             {
@@ -1970,28 +2185,6 @@ def main() -> None:
         p3_entry = sample_pack["thresholds"][primary_key]["P3_GRID"][best_p3_key]
         sample_pack["thresholds"][primary_key]["P3_GATED_ATTACH"] = p3_entry
 
-    for sample_pack in per_component_assignments["samples"]:
-        sample_id = sample_pack["sample"]
-        cached = cached_primary_outputs[sample_id]
-        panel = _make_policy_comparison_panel(
-            image_rgb_u8=cached["image_rgb_u8"],
-            gt_inst=cached["gt_inst"],
-            pred_sem=cached["pred_sem"],
-            semantic_cc=cached["semantic_cc"],
-            marker_points=cached["marker_points"],
-            policy_outputs=cached["policy_outputs"],
-            recommended_policy=str(recommended["policy"]) if recommended["policy"] != "none" else "P0_CURRENT",
-        )
-        cv2.imwrite(str((out_dir / "visual_review" / f"{sample_id}.png").resolve()), panel)
-
-    with (out_dir / "per_sample_policy_metrics.csv").open("w", encoding="utf-8", newline="") as f:
-        if per_sample_csv_rows:
-            writer = csv.DictWriter(f, fieldnames=list(per_sample_csv_rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(per_sample_csv_rows)
-
-    (out_dir / "per_component_assignments.json").write_text(json.dumps(per_component_assignments, ensure_ascii=False, indent=2), encoding="utf-8")
-
     invariants = {
         "primary_threshold": PRIMARY_THRESHOLD,
         "secondary_thresholds": list(SECONDARY_THRESHOLDS),
@@ -1999,7 +2192,6 @@ def main() -> None:
         "primary_summary": final_primary_summary,
         "authoritative_baseline_status": "exact_match",
     }
-    (out_dir / "invariants.json").write_text(json.dumps(invariants, ensure_ascii=False, indent=2), encoding="utf-8")
 
     policy_table = []
     for policy_name in ("P0_CURRENT", "P1_DROP_UNMARKED", "P2_ATTACH_TO_NEAREST_MARKER", "P3_GATED_ATTACH", "P4_GLOBAL_MARKER_CONTROLLED"):
@@ -2059,8 +2251,64 @@ def main() -> None:
         "production_change_proposal": "Do not change production until this offline ablation is reviewed; the baseline now matches authoritative P0 exactly.",
         "next_step": "Review policy artifacts and decide whether to promote a marker-authoritative reconstruction policy into a separate production patch.",
     }
-    (out_dir / "policy_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    _write_recommended_policy_if_allowed(out_dir, recommended, baseline_exact_match=True)
+    _write_core_policy_artifacts(
+        out_dir=out_dir,
+        summary=summary,
+        per_sample_csv_rows=per_sample_csv_rows,
+        per_component_assignments=per_component_assignments,
+        invariants=invariants,
+        recommended=recommended,
+    )
+
+    try:
+        for sample_pack in per_component_assignments["samples"]:
+            sample_id = sample_pack["sample"]
+            cached = cached_primary_outputs[sample_id]
+            panel = _make_policy_comparison_panel(
+                sample=sample_id,
+                image_rgb_u8=cached["image_rgb_u8"],
+                gt_inst=cached["gt_inst"],
+                pred_sem=cached["pred_sem"],
+                semantic_cc=cached["semantic_cc"],
+                marker_points=cached["marker_points"],
+                policy_outputs=cached["policy_outputs"],
+                recommended_policy=str(recommended["policy"]) if recommended["policy"] != "none" else "P0_CURRENT",
+            )
+            cv2.imwrite(str((out_dir / "visual_review" / f"{sample_id}.png").resolve()), panel)
+    except VisualizationError as exc:
+        _write_json_atomic(out_dir / "visualization_error.json", exc.payload)
+        print(
+            json.dumps(
+                {
+                    "status": "visualization_failed_after_core_results",
+                    "output_dir": str(out_dir),
+                    "visualization_error": exc.payload,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        raise SystemExit(1)
+    except Exception as exc:
+        payload = {
+            "status": "visualization_error",
+            "message": f"unexpected visualization exception: {type(exc).__name__}: {exc}",
+        }
+        _write_json_atomic(out_dir / "visualization_error.json", payload)
+        print(
+            json.dumps(
+                {
+                    "status": "visualization_failed_after_core_results",
+                    "output_dir": str(out_dir),
+                    "visualization_error": payload,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        raise SystemExit(1)
+
+    _clear_visualization_error_if_present(out_dir)
     _print_primary_sections(summary)
 
     print(
