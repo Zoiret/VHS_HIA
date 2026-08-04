@@ -46,13 +46,18 @@ from validate_centerhead import (
 )
 from validate_reconstruction_policies_holdout import (
     AUTHORITATIVE_BEST_CHECKPOINT_SHA256,
+    AUTHORITATIVE_SEMANTIC_CHECKPOINT_SHA256,
     DEFAULT_OUTPUT_DIR as HOLDOUT_OUTPUT_DIR,
     EXPECTED_HOLDOUT_MANIFEST_SHA256,
+    _canonical_manifest_stdout_payload,
     _aggregate_rows,
     _build_loader_split_file,
     _checkpoint_identity,
     _conditioned_evidence_summary,
+    _expected_manifest_identity_sha,
     _inventory_holdout_samples,
+    _manifest_identity_status,
+    _overall_authoritative_status,
     _safe_git_commit,
     _safe_hostname,
     _scope_invariant_summary,
@@ -490,6 +495,8 @@ def main() -> None:
     ap.add_argument("--run-dir", type=str, default="training/runs/unetpp_effb3_centerhead_spatial_x2_2_adapter_legacy_fp32_micro")
     ap.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     ap.add_argument("--device", type=str, default="")
+    ap.add_argument("--expected-manifest-identity-sha", type=str, default="")
+    ap.add_argument("--allow-manifest-mismatch-for-diagnostics", action="store_true")
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -504,8 +511,10 @@ def main() -> None:
     (out_dir / "visual_review").mkdir(parents=True, exist_ok=True)
 
     inventory = _inventory_holdout_samples(cfg, repo_root)
-    manifest_path, manifest_meta_path = _write_holdout_manifest(out_dir, inventory)
+    manifest_path, identity_manifest_path, manifest_meta_path = _write_holdout_manifest(out_dir, inventory)
     manifest_metadata = json.loads(manifest_meta_path.read_text(encoding="utf-8"))
+    identity_entries = [json.loads(line) for line in identity_manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    print(json.dumps({"manifest_inspection": _canonical_manifest_stdout_payload(manifest_metadata, identity_entries)}, ensure_ascii=False, indent=2))
     eligible_entries = list(inventory["eligible"])
     if not eligible_entries:
         raise SystemExit(json.dumps({"status": "insufficient_holdout_data"}, ensure_ascii=False, indent=2))
@@ -521,15 +530,40 @@ def main() -> None:
         str(ckpt_info["checkpoint_sha256"]) == str(AUTHORITATIVE_BEST_CHECKPOINT_SHA256)
         and int(ckpt_info["checkpoint_iteration"]) == 75
     )
+    ckpt_info["checkpoint_identity_status"] = "exact_match" if bool(ckpt_info["authoritative_checkpoint_match"]) else "checkpoint_identity_mismatch"
     ckpt_info["iteration_matches_authoritative"] = bool(int(ckpt_info["checkpoint_iteration"]) == 75)
+    ckpt_info["semantic_checkpoint_expected_sha256"] = AUTHORITATIVE_SEMANTIC_CHECKPOINT_SHA256
+    ckpt_info["semantic_checkpoint_identity_status"] = (
+        "exact_match"
+        if str(ckpt_info["semantic_checkpoint_sha256"]) == str(AUTHORITATIVE_SEMANTIC_CHECKPOINT_SHA256)
+        else "semantic_checkpoint_identity_mismatch"
+    )
     ckpt_info["hostname"] = _safe_hostname()["value"]
     ckpt_info["git_commit"] = _safe_git_commit(repo_root)["value"]
     ckpt_info["device"] = str(device)
-    ckpt_info["manifest_sha256"] = manifest_metadata["manifest_sha256"]
-    ckpt_info["manifest_sha_matches_expected"] = bool(
-        str(manifest_metadata["manifest_sha256"]) == str(EXPECTED_HOLDOUT_MANIFEST_SHA256)
+    ckpt_info["execution_manifest_sha256"] = manifest_metadata["execution_manifest_sha256"]
+    ckpt_info["legacy_expected_manifest_sha256"] = EXPECTED_HOLDOUT_MANIFEST_SHA256
+    ckpt_info["legacy_execution_manifest_sha_matches_expected"] = bool(
+        str(manifest_metadata["execution_manifest_sha256"]) == str(EXPECTED_HOLDOUT_MANIFEST_SHA256)
     )
-    ckpt_info["status"] = "ok" if bool(ckpt_info["authoritative_checkpoint_match"]) else "checkpoint_identity_mismatch"
+    ckpt_info["manifest_identity_sha256"] = manifest_metadata["canonical_identity_sha256"]
+    ckpt_info["expected_manifest_identity_sha256"] = _expected_manifest_identity_sha(args.expected_manifest_identity_sha)
+    ckpt_info["manifest_identity_status"] = _manifest_identity_status(
+        actual_sha=str(manifest_metadata["canonical_identity_sha256"]),
+        expected_sha=ckpt_info["expected_manifest_identity_sha256"],
+        unique_sample_count=int(manifest_metadata["unique_sample_count"]),
+        row_count=int(manifest_metadata["manifest_row_count"]),
+    )
+    ckpt_info["overall_authoritative_status"] = _overall_authoritative_status(
+        checkpoint_identity_status=ckpt_info["checkpoint_identity_status"],
+        semantic_checkpoint_identity_status=ckpt_info["semantic_checkpoint_identity_status"],
+        manifest_identity_status=ckpt_info["manifest_identity_status"],
+    )
+    ckpt_info["diagnosis_execution_status"] = (
+        "running_diagnostics"
+        if ckpt_info["overall_authoritative_status"] == "exact_match"
+        else "diagnostics_completed_but_authoritative_identity_failed"
+    )
     checkpoint_identity_json = {key: value for key, value in ckpt_info.items() if key != "state_dict"}
     _write_json_atomic((out_dir / "checkpoint_identity.json").resolve(), checkpoint_identity_json)
 
@@ -702,9 +736,13 @@ def main() -> None:
     oracle_summary_payload = {
         "checkpoint_identity": checkpoint_identity_json,
         "holdout_manifest": str(manifest_path),
+        "holdout_manifest_identity": str(identity_manifest_path),
         "holdout_manifest_metadata": str(manifest_meta_path),
-        "manifest_sha256": manifest_metadata["manifest_sha256"],
-        "manifest_sha_matches_expected": bool(str(manifest_metadata["manifest_sha256"]) == str(EXPECTED_HOLDOUT_MANIFEST_SHA256)),
+        "execution_manifest_sha256": manifest_metadata["execution_manifest_sha256"],
+        "canonical_identity_sha256": manifest_metadata["canonical_identity_sha256"],
+        "manifest_identity_status": ckpt_info["manifest_identity_status"],
+        "overall_authoritative_status": ckpt_info["overall_authoritative_status"],
+        "diagnosis_execution_status": ckpt_info["diagnosis_execution_status"],
         **scope_summary,
         "end_to_end_vs_center_oracle": {
             policy: _aggregate_rows([row for row in scope_rows if row["scope"] == "center_oracle" and row["policy"] == policy])
@@ -731,14 +769,21 @@ def main() -> None:
                 "output_dir": str(out_dir),
                 "host": ckpt_info["hostname"],
                 "device": ckpt_info["device"],
-                "manifest_sha": manifest_metadata["manifest_sha256"],
-                "checkpoint_identity_status": ckpt_info["status"],
+                "manifest_sha": manifest_metadata["canonical_identity_sha256"],
+                "checkpoint_identity_status": ckpt_info["checkpoint_identity_status"],
+                "semantic_checkpoint_identity_status": ckpt_info["semantic_checkpoint_identity_status"],
+                "manifest_identity_status": ckpt_info["manifest_identity_status"],
+                "overall_authoritative_status": ckpt_info["overall_authoritative_status"],
+                "diagnosis_execution_status": ckpt_info["diagnosis_execution_status"],
                 "bottleneck_status": bottleneck["status"],
             },
             ensure_ascii=False,
             indent=2,
         )
     )
+
+    if ckpt_info["overall_authoritative_status"] != "exact_match" and not bool(args.allow_manifest_mismatch_for_diagnostics):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -52,7 +53,9 @@ from validate_centerhead import _extract_metadata_centers
 
 DEFAULT_OUTPUT_DIR = "training/analysis/centerhead_spatial_x2_2_reconstruction_policy_holdout"
 AUTHORITATIVE_BEST_CHECKPOINT_SHA256 = "d582743fc28d39b10fb412443638404fe86bb2c2d1b7125f8287feae2766540b"
+AUTHORITATIVE_SEMANTIC_CHECKPOINT_SHA256 = "ea19846a35da02cc0cb6041d814f206719eb1926f3b02cfd6fbf448d39834c48"
 EXPECTED_HOLDOUT_MANIFEST_SHA256 = "8ad12101e4ff4883919d97fe6c1eae0ed268c798c2b1306ed2496d929fa2f88c"
+EXPECTED_HOLDOUT_IDENTITY_SHA256: str | None = None
 EXCLUDED_MICROSET_IDS = (
     "m01_p02_s00",
     "m01_p02_s04",
@@ -147,6 +150,93 @@ def _manifest_sha256(entries: list[dict]) -> str:
     return hashlib.sha256(_manifest_text(entries).encode("utf-8")).hexdigest()
 
 
+def _path_to_posix_relative(path_text: str, root_text: str) -> str:
+    path = Path(path_text).resolve()
+    root = Path(root_text).resolve()
+    return path.relative_to(root).as_posix()
+
+
+def _stable_json_dumps(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _identity_hash(path_text: str) -> str:
+    return _sha256_file(Path(path_text).resolve())
+
+
+def _canonical_identity_entries(inventory: dict) -> list[dict]:
+    dataset_root = str(inventory["dataset_root"])
+    instance_root = str(inventory["instance_root"])
+    canonical = []
+    for entry in inventory["eligible"]:
+        canonical.append(
+            {
+                "sample": str(entry["sample"]),
+                "split": str(entry["split"]),
+                "gt_instance_count": int(entry["gt_instance_count"]),
+                "image_relative_path": _path_to_posix_relative(entry["image_path"], dataset_root),
+                "semantic_gt_relative_path": _path_to_posix_relative(entry["gt_semantic_path"], dataset_root),
+                "instance_gt_relative_path": _path_to_posix_relative(entry["gt_instance_path"], instance_root),
+                "center_gt_relative_path": _path_to_posix_relative(entry["center_path"], dataset_root),
+                "image_sha256": _identity_hash(entry["image_path"]),
+                "semantic_gt_sha256": _identity_hash(entry["gt_semantic_path"]),
+                "instance_gt_sha256": _identity_hash(entry["gt_instance_path"]),
+                "center_gt_sha256": _identity_hash(entry["center_path"]),
+            }
+        )
+    canonical.sort(
+        key=lambda item: (
+            str(item["split"]),
+            str(item["sample"]),
+            str(item["image_relative_path"]),
+            str(item["semantic_gt_relative_path"]),
+            str(item["instance_gt_relative_path"]),
+            str(item["center_gt_relative_path"]),
+        )
+    )
+    out = []
+    for idx, item in enumerate(canonical):
+        enriched = dict(item)
+        enriched["sample_index"] = int(idx)
+        out.append(enriched)
+    return out
+
+
+def _identity_manifest_text(canonical_entries: list[dict]) -> str:
+    return "".join(_stable_json_dumps(entry) + "\n" for entry in canonical_entries)
+
+
+def _identity_manifest_sha256(canonical_entries: list[dict]) -> str:
+    return hashlib.sha256(_identity_manifest_text(canonical_entries).encode("utf-8")).hexdigest()
+
+
+def _manifest_split_counts(entries: list[dict]) -> dict[str, int]:
+    return {str(k): int(v) for k, v in sorted(Counter(str(entry["split"]) for entry in entries).items())}
+
+
+def _manifest_identity_preview(canonical_entries: list[dict], n: int = 5) -> dict:
+    first = canonical_entries[:n]
+    last = canonical_entries[-n:] if len(canonical_entries) > n else canonical_entries[:]
+    return {
+        "first_five_canonical_identities": first,
+        "last_five_canonical_identities": last,
+    }
+
+
+def _manifest_execution_inspection(execution_manifest_text: str, canonical_entries: list[dict]) -> dict:
+    preview = _manifest_identity_preview(canonical_entries)
+    return {
+        "manifest_row_count": int(len(canonical_entries)),
+        "unique_sample_count": int(len({str(entry["sample"]) for entry in canonical_entries})),
+        "split_counts": _manifest_split_counts(canonical_entries),
+        "execution_manifest_bytes_length": int(len(execution_manifest_text.encode("utf-8"))),
+        "identity_manifest_bytes_length": int(len(_identity_manifest_text(canonical_entries).encode("utf-8"))),
+        "line_ending": "LF",
+        "sorting_key": ["split", "sample", "image_relative_path", "semantic_gt_relative_path", "instance_gt_relative_path", "center_gt_relative_path"],
+        **preview,
+    }
+
+
 def _inventory_holdout_samples(cfg: dict, repo_root: Path) -> dict:
     dataset_root = _resolve_path(repo_root, cfg["dataset"]["root"])
     instance_root = _resolve_path(repo_root, cfg["dataset"]["instance_root"])
@@ -194,6 +284,7 @@ def _inventory_holdout_samples(cfg: dict, repo_root: Path) -> dict:
                     "image_path": str(entry["image_path"]),
                     "gt_semantic_path": str(entry["gt_semantic_path"]),
                     "gt_instance_path": str(gt_instance_path),
+                    "center_path": str(entry["center_path"]),
                     "metadata_path": str(entry["metadata_path"]),
                     "source_dataset": "converted_leaflet_distance",
                     "gt_instance_count": gt_count,
@@ -215,13 +306,21 @@ def _inventory_holdout_samples(cfg: dict, repo_root: Path) -> dict:
     }
 
 
-def _write_holdout_manifest(out_dir: Path, inventory: dict) -> tuple[Path, Path]:
+def _write_holdout_manifest(out_dir: Path, inventory: dict) -> tuple[Path, Path, Path]:
     manifest_path = (out_dir / "holdout_manifest.txt").resolve()
     manifest_text = _manifest_text(inventory["eligible"])
     _write_text_atomic(manifest_path, manifest_text, encoding="utf-8")
     manifest_sha = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+    canonical_entries = _canonical_identity_entries(inventory)
+    identity_path = (out_dir / "holdout_manifest_identity.jsonl").resolve()
+    identity_text = _identity_manifest_text(canonical_entries)
+    _write_text_atomic(identity_path, identity_text, encoding="utf-8")
+    canonical_sha = hashlib.sha256(identity_text.encode("utf-8")).hexdigest()
+    inspection = _manifest_execution_inspection(manifest_text, canonical_entries)
     metadata = {
         "manifest_sha256": manifest_sha,
+        "execution_manifest_sha256": manifest_sha,
+        "canonical_identity_sha256": canonical_sha,
         "eligible_count": len(inventory["eligible"]),
         "excluded_microset_count": len(inventory["excluded_microset"]),
         "missing_count": len(inventory["missing"]),
@@ -232,10 +331,13 @@ def _write_holdout_manifest(out_dir: Path, inventory: dict) -> tuple[Path, Path]
         "dataset_root": inventory["dataset_root"],
         "instance_root": inventory["instance_root"],
         "missing": inventory["missing"],
+        "execution_manifest_path": str(manifest_path),
+        "identity_manifest_path": str(identity_path),
+        **inspection,
     }
     metadata_path = (out_dir / "holdout_manifest_metadata.json").resolve()
     _write_json_atomic(metadata_path, metadata)
-    return manifest_path, metadata_path
+    return manifest_path, identity_path, metadata_path
 
 
 def _build_loader_split_file(out_dir: Path, eligible_entries: list[dict]) -> Path:
@@ -290,6 +392,49 @@ def _safe_git_commit(repo_root: Path) -> dict:
         return {"value": result.stdout.strip(), "status": "ok"}
     except Exception as exc:
         return {"value": None, "status": f"unavailable: {exc}"}
+
+
+def _expected_manifest_identity_sha(args_value: str | None) -> str | None:
+    cli_value = str(args_value or "").strip()
+    if cli_value:
+        return cli_value
+    if EXPECTED_HOLDOUT_IDENTITY_SHA256 is None:
+        return None
+    expected = str(EXPECTED_HOLDOUT_IDENTITY_SHA256).strip()
+    return expected or None
+
+
+def _manifest_identity_status(*, actual_sha: str, expected_sha: str | None, unique_sample_count: int, row_count: int) -> str:
+    if int(unique_sample_count) != int(row_count):
+        return "manifest_identity_duplicate_samples"
+    if expected_sha is None:
+        return "expected_manifest_identity_sha_unset"
+    if str(actual_sha) != str(expected_sha):
+        return "manifest_identity_mismatch"
+    return "exact_match"
+
+
+def _overall_authoritative_status(*, checkpoint_identity_status: str, semantic_checkpoint_identity_status: str, manifest_identity_status: str) -> str:
+    if checkpoint_identity_status != "exact_match":
+        return checkpoint_identity_status
+    if semantic_checkpoint_identity_status != "exact_match":
+        return semantic_checkpoint_identity_status
+    if manifest_identity_status != "exact_match":
+        return manifest_identity_status
+    return "exact_match"
+
+
+def _canonical_manifest_stdout_payload(manifest_metadata: dict, canonical_entries: list[dict]) -> dict:
+    return {
+        "manifest_row_count": int(manifest_metadata["manifest_row_count"]),
+        "unique_sample_count": int(manifest_metadata["unique_sample_count"]),
+        "split_counts": dict(manifest_metadata["split_counts"]),
+        "first_five_canonical_identities": canonical_entries[:5],
+        "last_five_canonical_identities": canonical_entries[-5:] if len(canonical_entries) > 5 else canonical_entries[:],
+        "exact_bytes_length_before_sha": int(manifest_metadata["identity_manifest_bytes_length"]),
+        "line_ending": str(manifest_metadata["line_ending"]),
+        "sorting_key": list(manifest_metadata["sorting_key"]),
+    }
 
 
 def _row_from_metrics(*, sample_entry: dict, threshold: float, policy: str, marker_contract: dict, center_metrics: dict, policy_metrics: dict, p3_cfg: dict | None) -> dict:
@@ -494,8 +639,12 @@ def _production_reasons(
     end_to_end_primary_by_policy: dict,
 ) -> list[str]:
     reasons = []
-    if not bool(checkpoint_identity["authoritative_checkpoint_match"]):
+    if str(checkpoint_identity.get("checkpoint_identity_status")) != "exact_match":
         reasons.append("checkpoint identity mismatch")
+    if str(checkpoint_identity.get("semantic_checkpoint_identity_status")) != "exact_match":
+        reasons.append("semantic checkpoint identity mismatch")
+    if str(checkpoint_identity.get("manifest_identity_status")) != "exact_match":
+        reasons.append("manifest identity mismatch")
     if not bool(evidence["conditioned_meets_minimum"]):
         reasons.append("insufficient conditioned reconstruction evidence")
     failed_center = int(evidence["total_holdout_sample_count"]) - int(evidence["marker_contract_pass_sample_count"])
@@ -556,7 +705,7 @@ def _promotion_decision(
     }
     if not bool(evidence["conditioned_meets_minimum"]):
         corrected_status = "insufficient_conditioned_evidence"
-    elif not failed and bool(checkpoint_identity["authoritative_checkpoint_match"]):
+    elif not failed and str(checkpoint_identity.get("overall_authoritative_status")) == "exact_match":
         corrected_status = "candidate_for_production_patch"
     else:
         corrected_status = "reject"
@@ -656,6 +805,8 @@ def main() -> None:
     ap.add_argument("--run-dir", type=str, default="training/runs/unetpp_effb3_centerhead_spatial_x2_2_adapter_legacy_fp32_micro")
     ap.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     ap.add_argument("--device", type=str, default="")
+    ap.add_argument("--expected-manifest-identity-sha", type=str, default="")
+    ap.add_argument("--allow-manifest-mismatch-for-diagnostics", action="store_true")
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -669,8 +820,10 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     inventory = _inventory_holdout_samples(cfg, repo_root)
-    manifest_path, manifest_meta_path = _write_holdout_manifest(out_dir, inventory)
+    manifest_path, identity_manifest_path, manifest_meta_path = _write_holdout_manifest(out_dir, inventory)
     manifest_metadata = json.loads(manifest_meta_path.read_text(encoding="utf-8"))
+    identity_entries = [json.loads(line) for line in identity_manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    print(json.dumps({"manifest_inspection": _canonical_manifest_stdout_payload(manifest_metadata, identity_entries)}, ensure_ascii=False, indent=2))
     eligible_entries = list(inventory["eligible"])
     if not eligible_entries:
         payload = {"status": "insufficient_holdout_data", "inventory": inventory}
@@ -693,21 +846,41 @@ def main() -> None:
         str(ckpt_info["checkpoint_sha256"]) == str(AUTHORITATIVE_BEST_CHECKPOINT_SHA256)
         and int(ckpt_info["checkpoint_iteration"]) == 75
     )
+    ckpt_info["checkpoint_identity_status"] = "exact_match" if bool(ckpt_info["authoritative_checkpoint_match"]) else "checkpoint_identity_mismatch"
     ckpt_info["iteration_matches_authoritative"] = bool(int(ckpt_info["checkpoint_iteration"]) == 75)
+    ckpt_info["semantic_checkpoint_expected_sha256"] = AUTHORITATIVE_SEMANTIC_CHECKPOINT_SHA256
+    ckpt_info["semantic_checkpoint_identity_status"] = (
+        "exact_match"
+        if str(ckpt_info["semantic_checkpoint_sha256"]) == str(AUTHORITATIVE_SEMANTIC_CHECKPOINT_SHA256)
+        else "semantic_checkpoint_identity_mismatch"
+    )
     ckpt_info["hostname"] = hostname_info["value"]
     ckpt_info["hostname_status"] = hostname_info["status"]
     ckpt_info["git_commit"] = git_commit_info["value"]
     ckpt_info["git_commit_status"] = git_commit_info["status"]
     ckpt_info["device"] = str(device)
-    ckpt_info["manifest_sha256"] = manifest_metadata["manifest_sha256"]
-    ckpt_info["expected_manifest_sha256"] = EXPECTED_HOLDOUT_MANIFEST_SHA256
-    ckpt_info["manifest_sha_matches_expected"] = bool(
-        str(manifest_metadata["manifest_sha256"]) == str(EXPECTED_HOLDOUT_MANIFEST_SHA256)
+    ckpt_info["execution_manifest_sha256"] = manifest_metadata["execution_manifest_sha256"]
+    ckpt_info["legacy_expected_manifest_sha256"] = EXPECTED_HOLDOUT_MANIFEST_SHA256
+    ckpt_info["legacy_execution_manifest_sha_matches_expected"] = bool(
+        str(manifest_metadata["execution_manifest_sha256"]) == str(EXPECTED_HOLDOUT_MANIFEST_SHA256)
     )
-    ckpt_info["status"] = (
-        "ok"
-        if bool(ckpt_info["authoritative_checkpoint_match"])
-        else "checkpoint_identity_mismatch"
+    ckpt_info["manifest_identity_sha256"] = manifest_metadata["canonical_identity_sha256"]
+    ckpt_info["expected_manifest_identity_sha256"] = _expected_manifest_identity_sha(args.expected_manifest_identity_sha)
+    ckpt_info["manifest_identity_status"] = _manifest_identity_status(
+        actual_sha=str(manifest_metadata["canonical_identity_sha256"]),
+        expected_sha=ckpt_info["expected_manifest_identity_sha256"],
+        unique_sample_count=int(manifest_metadata["unique_sample_count"]),
+        row_count=int(manifest_metadata["manifest_row_count"]),
+    )
+    ckpt_info["overall_authoritative_status"] = _overall_authoritative_status(
+        checkpoint_identity_status=ckpt_info["checkpoint_identity_status"],
+        semantic_checkpoint_identity_status=ckpt_info["semantic_checkpoint_identity_status"],
+        manifest_identity_status=ckpt_info["manifest_identity_status"],
+    )
+    ckpt_info["diagnosis_execution_status"] = (
+        "running_diagnostics"
+        if ckpt_info["overall_authoritative_status"] == "exact_match"
+        else "diagnostics_completed_but_authoritative_identity_failed"
     )
     checkpoint_identity_json = {key: value for key, value in ckpt_info.items() if key != "state_dict"}
     _write_json_atomic((out_dir / "checkpoint_identity.json").resolve(), checkpoint_identity_json)
@@ -831,8 +1004,11 @@ def main() -> None:
         "secondary_thresholds": list(SECONDARY_THRESHOLDS),
         "fixed_p3_cfg": dict(FIXED_P3_CFG),
         "component_artifact_unique_samples": len(per_component_assignments["samples"]) == len({(s["sample"], s["sample_index"]) for s in per_component_assignments["samples"]}),
-        "checkpoint_identity_status": ckpt_info["status"],
-        "manifest_sha_matches_expected": ckpt_info["manifest_sha_matches_expected"],
+        "checkpoint_identity_status": ckpt_info["checkpoint_identity_status"],
+        "semantic_checkpoint_identity_status": ckpt_info["semantic_checkpoint_identity_status"],
+        "manifest_identity_status": ckpt_info["manifest_identity_status"],
+        "overall_authoritative_status": ckpt_info["overall_authoritative_status"],
+        "legacy_execution_manifest_sha_matches_expected": ckpt_info["legacy_execution_manifest_sha_matches_expected"],
     }
 
     summary = {
@@ -848,7 +1024,11 @@ def main() -> None:
             "missing": len(inventory["missing"]),
             "evidence_level": inventory["evidence_level"],
             "gt_instance_distribution": inventory["gt_instance_distribution"],
-            "manifest_sha256": manifest_metadata["manifest_sha256"],
+            "execution_manifest_sha256": manifest_metadata["execution_manifest_sha256"],
+            "canonical_identity_sha256": manifest_metadata["canonical_identity_sha256"],
+            "manifest_row_count": manifest_metadata["manifest_row_count"],
+            "unique_sample_count": manifest_metadata["unique_sample_count"],
+            "split_counts": manifest_metadata["split_counts"],
         },
         "locked_operating_point": {
             "checkpoint": ckpt_info["checkpoint_path"],
@@ -861,9 +1041,14 @@ def main() -> None:
             "authoritative_checkpoint_match": ckpt_info["authoritative_checkpoint_match"],
             "semantic_checkpoint_path": ckpt_info["semantic_checkpoint_path"],
             "semantic_checkpoint_sha256": ckpt_info["semantic_checkpoint_sha256"],
+            "semantic_checkpoint_identity_status": ckpt_info["semantic_checkpoint_identity_status"],
             "hostname": ckpt_info["hostname"],
             "device": ckpt_info["device"],
             "git_commit": ckpt_info["git_commit"],
+            "manifest_identity_sha256": ckpt_info["manifest_identity_sha256"],
+            "expected_manifest_identity_sha256": ckpt_info["expected_manifest_identity_sha256"],
+            "manifest_identity_status": ckpt_info["manifest_identity_status"],
+            "overall_authoritative_status": ckpt_info["overall_authoritative_status"],
         },
         "end_to_end_results": end_to_end_results,
         "marker_conditioned_results": conditioned_results,
@@ -874,6 +1059,7 @@ def main() -> None:
         },
         "checkpoint_identity": checkpoint_identity_json,
         "promotion_decision": promotion,
+        "execution_status": ckpt_info["diagnosis_execution_status"],
     }
 
     _write_csv_atomic((out_dir / "per_sample_policy_metrics.csv").resolve(), per_sample_rows)
@@ -926,15 +1112,23 @@ def main() -> None:
                 "status": "done",
                 "output_dir": str(out_dir),
                 "holdout_manifest": str(manifest_path),
+                "holdout_manifest_identity": str(identity_manifest_path),
                 "holdout_manifest_metadata": str(manifest_meta_path),
                 "eligible": len(eligible_entries),
                 "promotion_status": promotion["status"],
-                "checkpoint_identity_status": ckpt_info["status"],
+                "checkpoint_identity_status": ckpt_info["checkpoint_identity_status"],
+                "semantic_checkpoint_identity_status": ckpt_info["semantic_checkpoint_identity_status"],
+                "manifest_identity_status": ckpt_info["manifest_identity_status"],
+                "overall_authoritative_status": ckpt_info["overall_authoritative_status"],
+                "diagnosis_execution_status": ckpt_info["diagnosis_execution_status"],
             },
             ensure_ascii=False,
             indent=2,
         )
     )
+
+    if ckpt_info["overall_authoritative_status"] != "exact_match" and not bool(args.allow_manifest_mismatch_for_diagnostics):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
