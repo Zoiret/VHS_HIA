@@ -15,6 +15,28 @@ def _marker(marker_id: int, y: int, x: int, score: float = 1.0) -> dict:
     return {"marker_id": int(marker_id), "y": int(y), "x": int(x), "score": float(score)}
 
 
+def _primary_expected_rows():
+    return [
+        {"checkpoint_tag": "best", "checkpoint_iteration": 75, "threshold": 0.03, "sample": "m01_p02_s00", "sample_index": 0, "markers": 1, "marker_contract": True, "semantic_cc": 1, "raw_reconstructed": 1, "final_reconstructed": 1},
+        {"checkpoint_tag": "best", "checkpoint_iteration": 75, "threshold": 0.03, "sample": "m01_p02_s04", "sample_index": 1, "markers": 1, "marker_contract": True, "semantic_cc": 5, "raw_reconstructed": 5, "final_reconstructed": 3},
+        {"checkpoint_tag": "best", "checkpoint_iteration": 75, "threshold": 0.03, "sample": "m01_p01_s00", "sample_index": 2, "markers": 2, "marker_contract": True, "semantic_cc": 4, "raw_reconstructed": 4, "final_reconstructed": 3},
+        {"checkpoint_tag": "best", "checkpoint_iteration": 75, "threshold": 0.03, "sample": "m01_p01_s01", "sample_index": 3, "markers": 2, "marker_contract": True, "semantic_cc": 11, "raw_reconstructed": 11, "final_reconstructed": 3},
+        {"checkpoint_tag": "best", "checkpoint_iteration": 75, "threshold": 0.03, "sample": "m01_p01_s02", "sample_index": 4, "markers": 3, "marker_contract": True, "semantic_cc": 4, "raw_reconstructed": 5, "final_reconstructed": 3},
+        {"checkpoint_tag": "best", "checkpoint_iteration": 75, "threshold": 0.03, "sample": "m01_p01_s03", "sample_index": 5, "markers": 3, "marker_contract": True, "semantic_cc": 5, "raw_reconstructed": 7, "final_reconstructed": 3},
+    ]
+
+
+def _actual_primary_rows():
+    return [
+        {"sample": "m01_p02_s00", "sample_index": 0, "markers": 1, "marker_contract": True, "semantic_cc": 1, "raw_reconstructed": 1, "final_reconstructed": 1, "exact_count": True, "first_failing_invariant": None},
+        {"sample": "m01_p02_s04", "sample_index": 1, "markers": 1, "marker_contract": True, "semantic_cc": 5, "raw_reconstructed": 5, "final_reconstructed": 3, "exact_count": False, "first_failing_invariant": {"sample": "m01_p02_s04", "stage": "raw reconstruction/watershed", "before": 1, "after": 5, "function": "_fallback_marker"}},
+        {"sample": "m01_p01_s00", "sample_index": 2, "markers": 2, "marker_contract": True, "semantic_cc": 4, "raw_reconstructed": 4, "final_reconstructed": 3, "exact_count": False, "first_failing_invariant": {"sample": "m01_p01_s00", "stage": "raw reconstruction/watershed", "before": 2, "after": 4, "function": "_fallback_marker"}},
+        {"sample": "m01_p01_s01", "sample_index": 3, "markers": 2, "marker_contract": True, "semantic_cc": 11, "raw_reconstructed": 11, "final_reconstructed": 3, "exact_count": False, "first_failing_invariant": {"sample": "m01_p01_s01", "stage": "raw reconstruction/watershed", "before": 2, "after": 11, "function": "_fallback_marker"}},
+        {"sample": "m01_p01_s02", "sample_index": 4, "markers": 3, "marker_contract": True, "semantic_cc": 4, "raw_reconstructed": 5, "final_reconstructed": 3, "exact_count": True, "first_failing_invariant": {"sample": "m01_p01_s02", "stage": "raw reconstruction/watershed", "before": 3, "after": 5, "function": "_fallback_marker"}},
+        {"sample": "m01_p01_s03", "sample_index": 5, "markers": 3, "marker_contract": True, "semantic_cc": 5, "raw_reconstructed": 7, "final_reconstructed": 3, "exact_count": True, "first_failing_invariant": {"sample": "m01_p01_s03", "stage": "raw reconstruction/watershed", "before": 3, "after": 7, "function": "_fallback_marker"}},
+    ]
+
+
 class TestReconstructionPolicyAblation(unittest.TestCase):
     @staticmethod
     def _mod():
@@ -26,71 +48,127 @@ class TestReconstructionPolicyAblation(unittest.TestCase):
 
         return mod
 
-    def test_authoritative_p0_baseline_fixture_pass(self):
+    def test_global_first_failure_differs_from_primary_while_primary_baseline_passes(self):
         mod = self._mod()
-        expected_rows = [
-            {"sample": "m01_p02_s00", "markers": 1, "semantic_cc": 1, "raw_reconstructed": 1, "final_reconstructed": 1},
-            {"sample": "m01_p02_s04", "markers": 1, "semantic_cc": 5, "raw_reconstructed": 5, "final_reconstructed": 3},
-            {"sample": "m01_p01_s00", "markers": 2, "semantic_cc": 4, "raw_reconstructed": 4, "final_reconstructed": 3},
-            {"sample": "m01_p01_s01", "markers": 2, "semantic_cc": 11, "raw_reconstructed": 11, "final_reconstructed": 3},
-            {"sample": "m01_p01_s02", "markers": 3, "semantic_cc": 4, "raw_reconstructed": 5, "final_reconstructed": 3},
-            {"sample": "m01_p01_s03", "markers": 3, "semantic_cc": 5, "raw_reconstructed": 7, "final_reconstructed": 3},
-        ]
-        authoritative_first = {
-            "sample": "m01_p01_s02",
-            "stage": "raw reconstruction/watershed",
-            "before": 3,
-            "after": 5,
-            "function": "_fallback_marker",
-        }
-        actual_rows = []
-        for idx, row in enumerate(expected_rows):
-            actual_rows.append(
-                {
-                    "sample": row["sample"],
-                    "sample_index": idx,
-                    "markers": row["markers"],
-                    "marker_contract": True,
-                    "semantic_cc": row["semantic_cc"],
-                    "raw_reconstructed": row["raw_reconstructed"],
-                    "final_reconstructed": row["final_reconstructed"],
-                    "exact_count": row["sample"] in {"m01_p02_s00", "m01_p01_s02", "m01_p01_s03"},
-                    "first_failing_invariant": authoritative_first if row["sample"] == "m01_p01_s02" else None,
-                }
-            )
+        expected = _primary_expected_rows()
+        actual = _actual_primary_rows()
+        primary_first = mod._expected_primary_first_failure_from_rows(expected)
+        global_first = {"checkpoint_tag": "best", "checkpoint_iteration": 75, "threshold": 0.02, "sample": "m01_p01_s02", "stage": "raw reconstruction/watershed", "before": 3, "after": 5, "function": "_fallback_marker", "labels": "unrecoverable"}
+        self.assertNotEqual(global_first["sample"], primary_first["sample"])
         self.assertTrue(
             mod._authoritative_baseline_matches(
-                expected_rows=expected_rows,
-                actual_rows=actual_rows,
+                expected_rows=expected,
+                actual_rows=actual,
                 p0_summary={"exact_count_accuracy": 0.5},
-                authoritative_invariants={"first_failing_stage": authoritative_first},
+                authoritative_primary_first_failure=primary_first,
             )
         )
 
-    def test_one_changed_p0_count_causes_hard_failure(self):
+    def test_authoritative_primary_first_failure_is_m01_p02_s04(self):
         mod = self._mod()
-        expected_rows = [{"sample": "m01_p02_s00", "markers": 1, "semantic_cc": 1, "raw_reconstructed": 1, "final_reconstructed": 1}]
-        actual_rows = [
+        primary_first = mod._expected_primary_first_failure_from_rows(_primary_expected_rows())
+        self.assertEqual(
+            primary_first,
             {
-                "sample": "m01_p02_s00",
-                "sample_index": 0,
-                "markers": 1,
-                "marker_contract": True,
-                "semantic_cc": 1,
-                "raw_reconstructed": 1,
-                "final_reconstructed": 3,
-                "exact_count": False,
-                "first_failing_invariant": None,
-            }
-        ]
+                "checkpoint_tag": "best",
+                "checkpoint_iteration": 75,
+                "threshold": 0.03,
+                "sample": "m01_p02_s04",
+                "stage": "raw reconstruction/watershed",
+                "before": 1,
+                "after": 5,
+                "function": "_fallback_marker",
+                "labels": "unrecoverable",
+            },
+        )
+
+    def test_one_changed_primary_raw_count_hard_fails_and_sets_first_differing_sample(self):
+        mod = self._mod()
+        expected = _primary_expected_rows()
+        actual = _actual_primary_rows()
+        actual[1] = dict(actual[1], raw_reconstructed=4)
         self.assertFalse(
             mod._authoritative_baseline_matches(
-                expected_rows=expected_rows,
-                actual_rows=actual_rows,
+                expected_rows=expected,
+                actual_rows=actual,
                 p0_summary={"exact_count_accuracy": 0.5},
-                authoritative_invariants={"first_failing_stage": None},
+                authoritative_primary_first_failure=mod._expected_primary_first_failure_from_rows(expected),
             )
         )
+        report = mod._baseline_mismatch_payload(
+            expected_rows=expected,
+            actual_rows=actual,
+            checkpoint_identity={"checkpoint_sha256": "abc", "semantic_checkpoint_sha256": "def", "center_fp32": True, "device": "cuda", "path_matches_authoritative_metadata": True},
+            microset_precheck={"errors": []},
+            authoritative_summary={},
+            authoritative_global_first_failure={"sample": "m01_p01_s02"},
+            authoritative_primary_first_failure=mod._expected_primary_first_failure_from_rows(expected),
+            source_commit="commit",
+        )
+        self.assertEqual(report["first_differing_sample"], "m01_p02_s04")
+
+    def test_one_changed_primary_marker_count_hard_fails(self):
+        mod = self._mod()
+        expected = _primary_expected_rows()
+        actual = _actual_primary_rows()
+        actual[2] = dict(actual[2], markers=1)
+        self.assertFalse(
+            mod._authoritative_baseline_matches(
+                expected_rows=expected,
+                actual_rows=actual,
+                p0_summary={"exact_count_accuracy": 0.5},
+                authoritative_primary_first_failure=mod._expected_primary_first_failure_from_rows(expected),
+            )
+        )
+
+    def test_same_aggregates_but_changed_per_sample_row_hard_fails(self):
+        mod = self._mod()
+        expected = _primary_expected_rows()
+        actual = _actual_primary_rows()
+        actual[0] = dict(actual[0], raw_reconstructed=2, exact_count=False)
+        actual[5] = dict(actual[5], raw_reconstructed=6, exact_count=True)
+        self.assertAlmostEqual(0.5, 0.5)
+        self.assertFalse(
+            mod._authoritative_baseline_matches(
+                expected_rows=expected,
+                actual_rows=actual,
+                p0_summary={"exact_count_accuracy": 0.5},
+                authoritative_primary_first_failure=mod._expected_primary_first_failure_from_rows(expected),
+            )
+        )
+
+    def test_all_primary_rows_match_and_global_first_failure_differs_no_mismatch_file_written(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            mismatch = out_dir / "baseline_mismatch.json"
+            mismatch.write_text("stale", encoding="utf-8")
+            mod._clear_baseline_mismatch_if_present(out_dir)
+            self.assertFalse(mismatch.exists())
+            written = mod._write_recommended_policy_if_allowed(out_dir, {"policy": "P1_DROP_UNMARKED"}, baseline_exact_match=True)
+            self.assertTrue(written)
+            self.assertTrue((out_dir / "recommended_policy.json").exists())
+
+    def test_float_threshold_matching_uses_strict_tolerance(self):
+        mod = self._mod()
+        self.assertTrue(mod._threshold_matches("0.0300000000", 0.03))
+        self.assertTrue(mod._threshold_matches(0.0300000005, 0.03, tol=1e-8))
+        self.assertFalse(mod._threshold_matches(0.0301, 0.03, tol=1e-8))
+
+    def test_hashes_unavailable_in_authoritative_metadata_do_not_fail_solely(self):
+        mod = self._mod()
+        self.assertEqual(mod._hash_match_status("abc", None), "unavailable_in_authoritative_audit")
+        self.assertEqual(mod._hash_match_status(None, "abc"), "unavailable_locally")
+        self.assertTrue(mod._authoritative_baseline_matches(expected_rows=_primary_expected_rows(), actual_rows=_actual_primary_rows(), p0_summary={"exact_count_accuracy": 0.5}, authoritative_primary_first_failure=mod._expected_primary_first_failure_from_rows(_primary_expected_rows())))
+
+    def test_hostname_git_reporting_returns_value_or_reason(self):
+        mod = self._mod()
+        host = mod._safe_hostname()
+        git = mod._safe_git_commit(Path("e:/3d_visual/ml"))
+        self.assertIn("status", host)
+        self.assertTrue(host["value"] or host["status"].startswith("unavailable"))
+        self.assertIn("status", git)
+        self.assertTrue(git["value"] or git["status"].startswith("unavailable"))
 
     def test_checkpoint_iteration_mismatch_1_vs_75_causes_hard_failure(self):
         mod = self._mod()

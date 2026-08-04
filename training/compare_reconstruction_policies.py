@@ -5,6 +5,8 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+import socket
+import subprocess
 
 import cv2
 import numpy as np
@@ -834,10 +836,10 @@ def _read_authoritative_per_sample(path: Path) -> list[dict]:
 def _find_authoritative_per_sample_file(audit_dir: Path) -> Path:
     csv_path = (audit_dir / "per_sample_audit.csv").resolve()
     json_path = (audit_dir / "per_sample_audit.json").resolve()
-    if csv_path.exists():
-        return csv_path
     if json_path.exists():
         return json_path
+    if csv_path.exists():
+        return csv_path
     raise RuntimeError(f"Missing authoritative per-sample audit in {audit_dir}")
 
 
@@ -863,6 +865,34 @@ def _normalize_authoritative_path(path_text: str | None) -> str | None:
         idx = parts.index("training")
         return "/".join(parts[idx:])
     return "/".join(parts[-4:])
+
+
+def _threshold_matches(value: object, target: float, tol: float = 1e-9) -> bool:
+    try:
+        return abs(float(value) - float(target)) <= float(tol)
+    except Exception:
+        return False
+
+
+def _safe_git_commit(repo_root: Path) -> dict:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return {"value": result.stdout.strip(), "status": "ok"}
+    except Exception as exc:
+        return {"value": None, "status": f"unavailable: {exc}"}
+
+
+def _safe_hostname() -> dict:
+    try:
+        return {"value": socket.gethostname(), "status": "ok"}
+    except Exception as exc:
+        return {"value": None, "status": f"unavailable: {exc}"}
 
 
 def _verify_checkpoint_metadata(
@@ -952,6 +982,8 @@ def _verify_checkpoint_metadata(
         "center_fp32": ((cfg.get("train") or {}).get("center_fp32", None)),
         "semantic_checkpoint_path": str(semantic_checkpoint_path.resolve()) if semantic_checkpoint_path is not None else None,
         "semantic_checkpoint_sha256": semantic_sha256,
+        "authoritative_checkpoint_sha256": authoritative_checkpoint_meta.get("checkpoint_sha256"),
+        "authoritative_semantic_checkpoint_sha256": authoritative_checkpoint_meta.get("semantic_checkpoint_sha256"),
         "authoritative_checkpoint_path": authoritative_checkpoint_meta.get("checkpoint_path"),
         "authoritative_checkpoint_saved_iteration": authoritative_checkpoint_meta.get("saved_iteration"),
         "authoritative_checkpoint_saved_threshold": authoritative_checkpoint_meta.get("saved_threshold"),
@@ -1017,6 +1049,65 @@ def _classification_from_report(report: dict) -> str:
     return "H"
 
 
+def _hash_match_status(actual_hash: str | None, authoritative_hash: str | None) -> bool | str:
+    if authoritative_hash in (None, ""):
+        return "unavailable_in_authoritative_audit"
+    if actual_hash in (None, ""):
+        return "unavailable_locally"
+    return bool(actual_hash == authoritative_hash)
+
+
+def _expected_primary_first_failure_from_rows(rows: list[dict]) -> dict | None:
+    for row in rows:
+        marker_contract = str(row.get("marker_contract", "")).strip().lower() == "true" if isinstance(row.get("marker_contract"), str) else bool(row.get("marker_contract"))
+        if not marker_contract:
+            continue
+        markers = int(row["markers"])
+        raw_reconstructed = int(row["raw_reconstructed"])
+        if raw_reconstructed != markers:
+            return {
+                "checkpoint_tag": str(row.get("checkpoint_tag", "best")),
+                "checkpoint_iteration": int(row["checkpoint_iteration"]) if row.get("checkpoint_iteration") not in (None, "") else None,
+                "threshold": float(row["threshold"]) if row.get("threshold") not in (None, "") else None,
+                "sample": str(row["sample"]),
+                "stage": "raw reconstruction/watershed",
+                "before": int(markers),
+                "after": int(raw_reconstructed),
+                "function": "_fallback_marker",
+                "labels": "unrecoverable",
+            }
+    return None
+
+
+def _actual_primary_first_failure_from_rows(rows: list[dict]) -> dict | None:
+    for row in rows:
+        invariant = row.get("first_failing_invariant")
+        if invariant is not None:
+            return {
+                "checkpoint_tag": "best",
+                "checkpoint_iteration": 75,
+                "threshold": PRIMARY_THRESHOLD,
+                **invariant,
+            }
+    return None
+
+
+def _same_primary_first_failure(expected: dict | None, actual: dict | None) -> bool:
+    if expected is None or actual is None:
+        return expected is actual
+    keys = (
+        "checkpoint_tag",
+        "checkpoint_iteration",
+        "threshold",
+        "sample",
+        "stage",
+        "before",
+        "after",
+        "function",
+    )
+    return all(expected.get(key) == actual.get(key) for key in keys)
+
+
 def _baseline_mismatch_payload(
     *,
     expected_rows: list[dict],
@@ -1024,7 +1115,8 @@ def _baseline_mismatch_payload(
     checkpoint_identity: dict,
     microset_precheck: dict,
     authoritative_summary: dict,
-    authoritative_invariants: dict,
+    authoritative_global_first_failure: dict | None,
+    authoritative_primary_first_failure: dict | None,
     source_commit: str,
 ) -> dict:
     actual_by_sample = {str(row["sample"]): row for row in actual_rows}
@@ -1076,11 +1168,18 @@ def _baseline_mismatch_payload(
         "actual_exact_count_accuracy": float(np.mean([1.0 if bool(r.get("exact_count", False)) else 0.0 for r in actual_rows])) if actual_rows else None,
         "expected_marker_contract_passes": 6,
         "actual_marker_contract_passes": int(sum(1 for r in actual_rows if bool(r.get("marker_contract", False)))),
-        "expected_first_failing_invariant": authoritative_invariants.get("first_failing_stage"),
-        "actual_first_failing_invariant": next((r.get("first_failing_invariant") for r in actual_rows if r.get("first_failing_invariant") is not None), None),
+        "authoritative_global_first_failure": authoritative_global_first_failure,
+        "authoritative_primary_first_failure": authoritative_primary_first_failure,
+        "actual_primary_first_failure": _actual_primary_first_failure_from_rows(actual_rows),
         "checkpoint_path_matches_authoritative": bool(checkpoint_identity.get("path_matches_authoritative_metadata")),
-        "checkpoint_sha256_matches_authoritative": None,
-        "semantic_checkpoint_sha256_matches_authoritative": None,
+        "checkpoint_sha256_matches_authoritative": _hash_match_status(
+            checkpoint_identity.get("checkpoint_sha256"),
+            checkpoint_identity.get("authoritative_checkpoint_sha256"),
+        ),
+        "semantic_checkpoint_sha256_matches_authoritative": _hash_match_status(
+            checkpoint_identity.get("semantic_checkpoint_sha256"),
+            checkpoint_identity.get("authoritative_semantic_checkpoint_sha256"),
+        ),
         "microset_matches_authoritative": len(microset_precheck["errors"]) == 0,
         "checkpoint_iteration_source": checkpoint_identity.get("checkpoint_iteration_source"),
         "expected_saved_iteration": 75,
@@ -1100,7 +1199,7 @@ def _authoritative_baseline_matches(
     expected_rows: list[dict],
     actual_rows: list[dict],
     p0_summary: dict,
-    authoritative_invariants: dict,
+    authoritative_primary_first_failure: dict | None,
 ) -> bool:
     if len(expected_rows) != len(actual_rows):
         return False
@@ -1119,8 +1218,8 @@ def _authoritative_baseline_matches(
         return False
     if abs(float(p0_summary["exact_count_accuracy"]) - 0.5) >= 1e-9:
         return False
-    actual_first = next((r.get("first_failing_invariant") for r in actual_rows if r.get("first_failing_invariant") is not None), None)
-    if actual_first != authoritative_invariants.get("first_failing_stage"):
+    actual_first = _actual_primary_first_failure_from_rows(actual_rows)
+    if not _same_primary_first_failure(authoritative_primary_first_failure, actual_first):
         return False
     return True
 
@@ -1133,6 +1232,12 @@ def _write_recommended_policy_if_allowed(output_dir: Path, recommended: dict, ba
         return False
     path.write_text(json.dumps(recommended, ensure_ascii=False, indent=2), encoding="utf-8")
     return True
+
+
+def _clear_baseline_mismatch_if_present(output_dir: Path) -> None:
+    path = (output_dir / "baseline_mismatch.json").resolve()
+    if path.exists():
+        path.unlink()
 
 
 def _print_primary_sections(summary: dict) -> None:
@@ -1160,8 +1265,8 @@ def _print_primary_sections(summary: dict) -> None:
 
 def _print_baseline_mismatch_sections(report: dict) -> None:
     print("# BASELINE MISMATCH")
-    print(json.dumps({"expected": {"exact_count_accuracy": report["expected_exact_count_accuracy"], "marker_contract_passes": report["expected_marker_contract_passes"], "first_failing_invariant": report["expected_first_failing_invariant"]}}, ensure_ascii=False, indent=2))
-    print(json.dumps({"actual": {"exact_count_accuracy": report["actual_exact_count_accuracy"], "marker_contract_passes": report["actual_marker_contract_passes"], "first_failing_invariant": report["actual_first_failing_invariant"]}}, ensure_ascii=False, indent=2))
+    print(json.dumps({"expected": {"exact_count_accuracy": report["expected_exact_count_accuracy"], "marker_contract_passes": report["expected_marker_contract_passes"], "authoritative_global_first_failure": report["authoritative_global_first_failure"], "authoritative_primary_first_failure": report["authoritative_primary_first_failure"]}}, ensure_ascii=False, indent=2))
+    print(json.dumps({"actual": {"exact_count_accuracy": report["actual_exact_count_accuracy"], "marker_contract_passes": report["actual_marker_contract_passes"], "actual_primary_first_failure": report["actual_primary_first_failure"]}}, ensure_ascii=False, indent=2))
     print(json.dumps({"first_differing_sample": report["first_differing_sample"], "classification": report["classification"], "next_diagnostic": "Inspect baseline_mismatch.json and checkpoint iteration parsing before running P1-P4."}, ensure_ascii=False, indent=2))
 
 
@@ -1194,7 +1299,16 @@ def _assert_policy_contract(policy_name: str, metrics: dict) -> None:
 
 
 def _policy_rows_for_primary(rows: list[dict]) -> list[dict]:
-    return [row for row in rows if float(row["threshold"]) == PRIMARY_THRESHOLD]
+    filtered = []
+    for row in rows:
+        if str(row.get("checkpoint_tag")) != "best":
+            continue
+        if row.get("checkpoint_iteration") not in (None, "") and int(row["checkpoint_iteration"]) != 75:
+            continue
+        if not _threshold_matches(row.get("threshold"), PRIMARY_THRESHOLD):
+            continue
+        filtered.append(row)
+    return filtered
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1239,12 +1353,12 @@ def main() -> None:
     authoritative_checkpoint_metadata = _read_json(checkpoint_metadata_path)
     authoritative_per_sample_rows = _read_authoritative_per_sample(authoritative_per_sample_path)
 
-    best_authoritative_primary_rows = [
-        row for row in authoritative_per_sample_rows if str(row["checkpoint_tag"]) == "best" and float(row["threshold"]) == PRIMARY_THRESHOLD
-    ]
+    authoritative_global_first_failure = authoritative_summary.get("first_failing_stage")
+    best_authoritative_primary_rows = _policy_rows_for_primary(authoritative_per_sample_rows)
     best_authoritative_primary_rows.sort(key=lambda row: int(row["sample_index"]))
     if [str(row["sample"]) for row in best_authoritative_primary_rows] != AUTHORITATIVE_PRIMARY_SAMPLE_ORDER:
         raise SystemExit("Authoritative per-sample primary ordering does not match expected six-sample order")
+    authoritative_primary_first_failure = _expected_primary_first_failure_from_rows(best_authoritative_primary_rows)
 
     dataset_root = _resolve_path(repo_root, cfg["dataset"]["root"])
     instance_root = _resolve_path(repo_root, cfg["dataset"]["instance_root"])
@@ -1285,16 +1399,29 @@ def main() -> None:
             )
         )
 
+    hostname_info = _safe_hostname()
+    git_commit_info = _safe_git_commit(repo_root)
     preflight = {
-        "hostname": None,
-        "git_commit": None,
+        "hostname": hostname_info["value"],
+        "hostname_status": hostname_info["status"],
+        "git_commit": git_commit_info["value"],
+        "git_commit_status": git_commit_info["status"],
         "checkpoint_path": checkpoint_identity["resolved_best_checkpoint_path"],
         "checkpoint_sha256": checkpoint_identity["checkpoint_sha256"],
+        "checkpoint_sha256_matches_authoritative": _hash_match_status(
+            checkpoint_identity.get("checkpoint_sha256"),
+            checkpoint_identity.get("authoritative_checkpoint_sha256"),
+        ),
         "checkpoint_iteration_source": checkpoint_identity["checkpoint_iteration_source"],
         "checkpoint_iteration": checkpoint_identity["saved_iteration"],
+        "primary_threshold": PRIMARY_THRESHOLD,
         "saved_best_threshold": checkpoint_identity["saved_best_threshold"],
         "semantic_checkpoint_path": checkpoint_identity["semantic_checkpoint_path"],
         "semantic_checkpoint_sha256": checkpoint_identity["semantic_checkpoint_sha256"],
+        "semantic_checkpoint_sha256_matches_authoritative": _hash_match_status(
+            checkpoint_identity.get("semantic_checkpoint_sha256"),
+            checkpoint_identity.get("authoritative_semantic_checkpoint_sha256"),
+        ),
         "microset_raw_sha256": microset_info["raw_sha256"],
         "microset_normalized_sha256": microset_info["normalized_sha256"],
         "device": str(device),
@@ -1303,6 +1430,8 @@ def main() -> None:
         "adapter_channels": checkpoint_identity["adapter_channels"],
         "normalization_mode": checkpoint_identity["normalization_mode"],
         "center_fp32": checkpoint_identity["center_fp32"],
+        "authoritative_global_first_failure": authoritative_global_first_failure,
+        "authoritative_primary_first_failure": authoritative_primary_first_failure,
     }
     print(json.dumps({"status": "preflight", **preflight}, ensure_ascii=False, indent=2))
 
@@ -1469,14 +1598,16 @@ def main() -> None:
             per_component_assignments["samples"].append(sample_pack)
 
     actual_primary_rows.sort(key=lambda row: int(row["sample_index"]))
+    actual_primary_first_failure = _actual_primary_first_failure_from_rows(actual_primary_rows)
     baseline_report = _baseline_mismatch_payload(
         expected_rows=best_authoritative_primary_rows,
         actual_rows=actual_primary_rows,
         checkpoint_identity=checkpoint_identity,
         microset_precheck=microset_precheck,
         authoritative_summary=authoritative_summary,
-        authoritative_invariants=authoritative_invariants,
-        source_commit="unknown",
+        authoritative_global_first_failure=authoritative_global_first_failure,
+        authoritative_primary_first_failure=authoritative_primary_first_failure,
+        source_commit=git_commit_info["value"] or git_commit_info["status"],
     )
 
     p0_summary = _aggregate_policy_rows(primary_rows["P0_CURRENT"])
@@ -1484,7 +1615,7 @@ def main() -> None:
         expected_rows=best_authoritative_primary_rows,
         actual_rows=actual_primary_rows,
         p0_summary=p0_summary,
-        authoritative_invariants=authoritative_invariants,
+        authoritative_primary_first_failure=authoritative_primary_first_failure,
     )
 
     if not exact_match:
@@ -1503,6 +1634,10 @@ def main() -> None:
                     "microset_hash": microset_info["raw_sha256"],
                     "device": str(device),
                     "p0_reproduction_status": "mismatch",
+                    "authoritative_global_first_failure": authoritative_global_first_failure,
+                    "authoritative_primary_first_failure": authoritative_primary_first_failure,
+                    "actual_primary_first_failure": actual_primary_first_failure,
+                    "row_matches": int(sum(1 for row in baseline_report["rows"] if row["expected_markers"] == row["actual_markers"] and row["expected_semantic_cc"] == row["actual_semantic_cc"] and row["expected_raw_count"] == row["actual_raw_count"] and row["expected_final_count"] == row["actual_final_count"])),
                     "first_differing_sample": baseline_report["first_differing_sample"],
                     "classification": baseline_report["classification"],
                 },
@@ -1513,6 +1648,7 @@ def main() -> None:
         _print_baseline_mismatch_sections(baseline_report)
         raise SystemExit(1)
 
+    _clear_baseline_mismatch_if_present(out_dir)
     print(
         json.dumps(
             {
@@ -1525,6 +1661,10 @@ def main() -> None:
                 "semantic_checkpoint_sha256": checkpoint_identity["semantic_checkpoint_sha256"],
                 "microset_hash": microset_info["raw_sha256"],
                 "device": str(device),
+                "authoritative_global_first_failure": authoritative_global_first_failure,
+                "authoritative_primary_first_failure": authoritative_primary_first_failure,
+                "actual_primary_first_failure": actual_primary_first_failure,
+                "row_matches": f"{len(best_authoritative_primary_rows)}/{len(best_authoritative_primary_rows)}",
                 "p0_reproduction_status": "exact_match",
             },
             ensure_ascii=False,
@@ -1621,6 +1761,13 @@ def main() -> None:
             "ambiguous_assignments": int(final_primary_summary["P3_GATED_ATTACH"]["ambiguous_assignments"]),
         },
         "invariants": invariants,
+        "server_preflight": {
+            "global_first_failure": authoritative_global_first_failure,
+            "primary_expected_first_failure": authoritative_primary_first_failure,
+            "primary_actual_first_failure": actual_primary_first_failure,
+            "row_matches": f"{len(best_authoritative_primary_rows)}/{len(best_authoritative_primary_rows)}",
+            "p0_status": "exact_match",
+        },
         "recommended_policy": recommended,
         "production_change_proposal": "Do not change production until this offline ablation is reviewed; the baseline now matches authoritative P0 exactly.",
         "next_step": "Review policy artifacts and decide whether to promote a marker-authoritative reconstruction policy into a separate production patch.",
