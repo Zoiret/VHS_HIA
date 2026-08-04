@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import inspect
 import json
-import math
-import shutil
 from pathlib import Path
 
 import cv2
@@ -31,6 +30,15 @@ from validate_centerhead import (
 )
 
 
+EXPECTED_MICROSET_SIZE = 6
+REQUIRED_SWEEP_ITERS = (75, 100, 500, 525, 1000)
+DEFAULT_OUTPUT_DIR = "training/analysis/centerhead_spatial_x2_2_adapter_reconstruction_audit"
+
+
+class ArtifactResolutionError(RuntimeError):
+    pass
+
+
 def _read_yaml(path: Path) -> dict:
     try:
         import yaml
@@ -44,6 +52,109 @@ def _read_yaml(path: Path) -> dict:
 
 def _simple_preprocess_uint8_rgb(img_rgb_u8: np.ndarray) -> np.ndarray:
     return (img_rgb_u8.astype(np.float32) / 255.0).astype(np.float32)
+
+
+def _resolve_path(repo_root: Path, value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path.resolve()
+    return (repo_root / path).resolve()
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _normalized_microset_bytes(path: Path) -> bytes:
+    text = path.read_text(encoding="utf-8-sig")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in text.split("\n")]
+    lines = [line for line in lines if line]
+    normalized = "\n".join(lines) + "\n"
+    return normalized.encode("utf-8")
+
+
+def _normalized_microset_sha256(path: Path) -> str:
+    return hashlib.sha256(_normalized_microset_bytes(path)).hexdigest()
+
+
+def _read_json(path: Path) -> dict | list:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _safe_repo_rel(repo_root: Path, path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(repo_root.resolve()))
+    except Exception:
+        return str(path.resolve())
+
+
+def _parse_microset_file(microset_path: Path, dataset_root: Path) -> dict:
+    lines = _normalized_microset_bytes(microset_path).decode("utf-8").splitlines()
+    entries = []
+    for idx, ln in enumerate(lines, start=1):
+        parts = [part.strip() for part in ln.split("\t") if part.strip()]
+        image_rel = parts[0] if parts else ""
+        mask_rel = parts[1] if len(parts) > 1 else None
+        image_path = (dataset_root / image_rel).resolve()
+        mask_path = (dataset_root / mask_rel).resolve() if mask_rel else None
+        entries.append(
+            {
+                "index": int(idx),
+                "line": ln,
+                "image_rel": image_rel,
+                "mask_rel": mask_rel,
+                "sample_id": Path(image_rel).stem,
+                "image_path": str(image_path),
+                "mask_path": str(mask_path) if mask_path is not None else None,
+                "image_exists": bool(image_path.exists()),
+                "mask_exists": bool(mask_path.exists()) if mask_path is not None else None,
+            }
+        )
+    return {
+        "path": str(microset_path.resolve()),
+        "raw_sha256": _sha256_file(microset_path),
+        "normalized_sha256": _normalized_microset_sha256(microset_path),
+        "nonempty_lines": int(len(lines)),
+        "entries": entries,
+        "sample_ids": [str(entry["sample_id"]) for entry in entries],
+        "all_samples_exist": bool(all(bool(entry["image_exists"]) and bool(entry["mask_exists"]) for entry in entries)),
+    }
+
+
+def _resolve_microset_path(run_dir: Path, explicit_microset: Path | None) -> tuple[Path, list[dict]]:
+    if explicit_microset is not None:
+        path = explicit_microset.resolve()
+        if not path.exists():
+            raise ArtifactResolutionError(f"Explicit microset file not found: {path}")
+        return path, [{"source": "explicit --microset-file", "path": path, "exists": True}]
+    if not run_dir.exists():
+        raise ArtifactResolutionError(f"Run directory not found: {run_dir.resolve()}")
+    path = (run_dir / "microset.txt").resolve()
+    if not path.exists():
+        raise ArtifactResolutionError(f"Microset file not found: {path}")
+    return path, [{"source": "<run-dir>/microset.txt", "path": path, "exists": True}]
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", type=str, default="training/configs/unetpp_effb3_centerhead_spatial_x2_2_adapter_legacy_fp32_micro.yaml")
+    ap.add_argument("--run-dir", type=str, default="training/runs/unetpp_effb3_centerhead_spatial_x2_2_adapter_legacy_fp32_micro")
+    ap.add_argument("--output-dir", dest="output_dir", type=str, default=None)
+    ap.add_argument("--out-dir", dest="out_dir", type=str, default=None)
+    ap.add_argument("--microset-file", type=str, default="")
+    ap.add_argument("--device", type=str, default="")
+    return ap
+
+
+def _resolve_output_dir_arg(output_dir: str | None, out_dir: str | None) -> str:
+    if output_dir and out_dir and Path(output_dir) != Path(out_dir):
+        raise ArtifactResolutionError(
+            f"Conflicting output directory arguments: --output-dir={output_dir} vs --out-dir={out_dir}"
+        )
+    return out_dir or output_dir or DEFAULT_OUTPUT_DIR
 
 
 def _seed_all(seed: int) -> None:
@@ -67,7 +178,7 @@ def _center_feature_cfg_from_cfg(cfg: dict) -> dict | None:
     return dict(center_feature) if isinstance(center_feature, dict) else None
 
 
-def _build_model_from_cfg(cfg: dict) -> UnetPlusPlusSemanticCenterHead:
+def _build_model_from_cfg(cfg: dict, repo_root: Path) -> UnetPlusPlusSemanticCenterHead:
     encoder = cfg["model"].get("encoder") or cfg["model"].get("encoder_name")
     if not encoder:
         raise SystemExit("Config: model.encoder_name is required")
@@ -80,14 +191,16 @@ def _build_model_from_cfg(cfg: dict) -> UnetPlusPlusSemanticCenterHead:
         center_head_type=center_head_type,
         center_feature=_center_feature_cfg_from_cfg(cfg),
     )
-    init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
+    init_path = _resolve_path(repo_root, (cfg.get("train") or {}).get("init_checkpoint", None))
     if init_path:
-        load_semantic_checkpoint_non_strict(model, str(Path(init_path).resolve()))
+        load_semantic_checkpoint_non_strict(model, str(init_path.resolve()))
     return model
 
 
-def _build_loader(cfg: dict, split_txt: Path, device: torch.device) -> DataLoader:
-    ds_root = Path(cfg["dataset"]["root"]).resolve()
+def _build_loader(cfg: dict, repo_root: Path, split_txt: Path, device: torch.device) -> DataLoader:
+    ds_root = _resolve_path(repo_root, cfg["dataset"]["root"])
+    if ds_root is None:
+        raise SystemExit("Config: dataset.root is required")
     num_classes = int(cfg["model"]["classes"])
     input_size = int(cfg["model"]["input_size"])
 
@@ -573,6 +686,15 @@ def _reconstruction_contract_answers() -> dict:
     }
 
 
+def _load_manifest_sample_ids(manifest_path: Path) -> list[str]:
+    if not manifest_path.exists():
+        return []
+    obj = _read_json(manifest_path)
+    if isinstance(obj, dict) and isinstance(obj.get("samples"), list):
+        return [str(v) for v in obj["samples"]]
+    return []
+
+
 def _checkpoint_metadata_entry(cfg: dict, checkpoint_path: Path) -> dict:
     ckpt = _load_checkpoint(checkpoint_path)
     extra = ckpt.get("extra", {}) if isinstance(ckpt.get("extra", {}), dict) else {}
@@ -582,6 +704,7 @@ def _checkpoint_metadata_entry(cfg: dict, checkpoint_path: Path) -> dict:
         "saved_threshold": extra.get("best_threshold", None),
         "saved_f1": extra.get("best_center_f1", None),
         "best_step_in_extra": extra.get("best_step", None),
+        "extra_keys": sorted(extra.keys()),
         "center_feature_path": ((cfg.get("model") or {}).get("center_feature") or {}).get("module_path", None),
         "adapter_configuration": {
             "expected_channels": ((cfg.get("model") or {}).get("center_feature") or {}).get("expected_channels", None),
@@ -594,9 +717,69 @@ def _checkpoint_metadata_entry(cfg: dict, checkpoint_path: Path) -> dict:
     }
 
 
+def _verify_artifacts(
+    *,
+    cfg: dict,
+    resolved_paths: dict,
+    microset_info: dict,
+    checkpoint_metadata: dict,
+) -> list[str]:
+    missing = []
+    run_dir = Path(resolved_paths["run_dir"])
+    if not run_dir.exists():
+        missing.append(f"run-dir missing: {run_dir}")
+    if not Path(resolved_paths["microset"]).exists():
+        missing.append(f"microset file missing: {resolved_paths['microset']}")
+    if int(microset_info["nonempty_lines"]) != EXPECTED_MICROSET_SIZE:
+        missing.append(
+            f"microset must contain exactly {EXPECTED_MICROSET_SIZE} non-empty lines, got {microset_info['nonempty_lines']}: {resolved_paths['microset']}"
+        )
+    for entry in microset_info["entries"]:
+        if not bool(entry["image_exists"]):
+            missing.append(f"missing microset image: {entry['image_path']}")
+        if entry["mask_path"] is not None and not bool(entry["mask_exists"]):
+            missing.append(f"missing microset mask: {entry['mask_path']}")
+
+    for key in ("best_checkpoint", "last_checkpoint", "metrics_csv", "summary_json"):
+        path = Path(resolved_paths[key])
+        if not path.exists():
+            missing.append(f"missing required artifact: {path}")
+
+    sweep_dir = Path(resolved_paths["threshold_sweep_dir"])
+    if not sweep_dir.exists():
+        missing.append(f"missing threshold sweep directory: {sweep_dir}")
+    else:
+        for it in REQUIRED_SWEEP_ITERS:
+            sweep_path = (sweep_dir / f"iter_{it:04d}.json").resolve()
+            if not sweep_path.exists():
+                missing.append(f"missing threshold sweep: {sweep_path}")
+
+    center_feature = ((cfg.get("model") or {}).get("center_feature") or {})
+    if str(center_feature.get("module_path", "")) != "base.decoder.blocks.x_2_2":
+        missing.append(f"center_feature path must be base.decoder.blocks.x_2_2, got {center_feature.get('module_path')}")
+    if int(center_feature.get("expected_channels", -1)) != 32:
+        missing.append(f"center_feature expected_channels must be 32, got {center_feature.get('expected_channels')}")
+    if int(center_feature.get("adapter_out_channels", -1)) != 16:
+        missing.append(f"center_feature adapter_out_channels must be 16, got {center_feature.get('adapter_out_channels')}")
+
+    manifest_samples = _load_manifest_sample_ids(Path(resolved_paths["microset_manifest"]))
+    if manifest_samples and list(microset_info["sample_ids"]) != manifest_samples:
+        missing.append(f"microset sample IDs do not match run manifest: {microset_info['sample_ids']} != {manifest_samples}")
+
+    for ckpt_tag in ("best", "last"):
+        ckpt_path = Path(checkpoint_metadata[ckpt_tag]["checkpoint_path"])
+        try:
+            _load_checkpoint(ckpt_path)
+        except Exception as exc:
+            missing.append(f"checkpoint not loadable: {ckpt_path} ({exc})")
+
+    return missing
+
+
 def _evaluate_combo(
     *,
     cfg: dict,
+    repo_root: Path,
     device: torch.device,
     loader,
     checkpoint_tag: str,
@@ -606,7 +789,7 @@ def _evaluate_combo(
     output_root: Path,
     instance_root: Path,
 ) -> dict:
-    model = _build_model_from_cfg(cfg)
+    model = _build_model_from_cfg(cfg, repo_root=repo_root)
     ckpt = _load_checkpoint(checkpoint_path)
     state = ckpt.get("model", ckpt)
     incompat = model.load_state_dict(state, strict=False)
@@ -777,40 +960,124 @@ def _evaluate_combo(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", type=str, default="training/configs/unetpp_effb3_centerhead_spatial_x2_2_adapter_legacy_fp32_micro.yaml")
-    ap.add_argument("--run-dir", type=str, default="training/runs/unetpp_effb3_centerhead_spatial_x2_2_adapter_legacy_fp32_micro")
-    ap.add_argument("--output-dir", type=str, default="training/analysis/centerhead_spatial_x2_2_adapter_reconstruction_audit")
-    ap.add_argument("--device", type=str, default="")
+    ap = build_arg_parser()
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
-    cfg = _read_yaml((repo_root / args.config).resolve() if not Path(args.config).is_absolute() else Path(args.config))
+    cfg_path = _resolve_path(repo_root, args.config)
+    if cfg_path is None or not cfg_path.exists():
+        raise SystemExit(f"Config not found: {args.config}")
+    cfg = _read_yaml(cfg_path)
     _seed_all(int(cfg.get("seed", 1337)))
     device = _make_device(cfg, device_arg=str(args.device))
-    run_dir = (repo_root / args.run_dir).resolve() if not Path(args.run_dir).is_absolute() else Path(args.run_dir).resolve()
-    out_dir = (repo_root / args.output_dir).resolve() if not Path(args.output_dir).is_absolute() else Path(args.output_dir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    microset_txt = (run_dir / "microset.txt").resolve()
-    if not microset_txt.exists():
-        raise SystemExit(f"Microset file not found: {microset_txt}")
-
-    loader = _build_loader(cfg, microset_txt, device=device)
-    instance_root = Path(cfg["dataset"]["instance_root"]).resolve()
+    run_dir = _resolve_path(repo_root, args.run_dir)
+    try:
+        output_dir_value = _resolve_output_dir_arg(args.output_dir, args.out_dir)
+    except ArtifactResolutionError as exc:
+        print(json.dumps({"status": "cli_error", "message": str(exc)}, ensure_ascii=False, indent=2))
+        raise SystemExit(2)
+    out_dir = _resolve_path(repo_root, output_dir_value)
+    explicit_microset = _resolve_path(repo_root, args.microset_file) if str(args.microset_file).strip() else None
+    if run_dir is None or out_dir is None:
+        raise SystemExit("Failed to resolve run-dir or out-dir")
 
     checkpoint_specs = [
         ("best", (run_dir / "best_micro_overfit.pth").resolve()),
         ("last", (run_dir / "last.pth").resolve()),
     ]
+    metrics_csv = (run_dir / "micro_overfit_metrics.csv").resolve()
+    summary_json = (run_dir / "summary.json").resolve()
+    threshold_sweep_dir = (run_dir / "threshold_sweeps").resolve()
+    manifest_path = (run_dir / "microset_manifest.json").resolve()
+
+    try:
+        microset_txt, microset_candidates = _resolve_microset_path(run_dir=run_dir, explicit_microset=explicit_microset)
+    except ArtifactResolutionError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "artifact_resolution_error",
+                    "config": str(cfg_path),
+                    "run_dir": str(run_dir),
+                    "message": str(exc),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        raise SystemExit(2)
+
+    dataset_root = _resolve_path(repo_root, cfg["dataset"]["root"])
+    if dataset_root is None:
+        raise SystemExit("Config: dataset.root is required")
+    microset_info = _parse_microset_file(microset_txt, dataset_root=dataset_root)
+
     checkpoint_metadata = {}
     for tag, path in checkpoint_specs:
-        if not path.exists():
-            raise SystemExit(f"Checkpoint not found: {path}")
-        checkpoint_metadata[tag] = _checkpoint_metadata_entry(cfg, path)
+        if path.exists():
+            checkpoint_metadata[tag] = _checkpoint_metadata_entry(cfg, path)
+        else:
+            checkpoint_metadata[tag] = {
+                "checkpoint_path": str(path),
+                "saved_iteration": None,
+                "saved_threshold": None,
+                "saved_f1": None,
+                "best_step_in_extra": None,
+                "extra_keys": [],
+                "center_feature_path": ((cfg.get("model") or {}).get("center_feature") or {}).get("module_path", None),
+                "adapter_configuration": {
+                    "expected_channels": ((cfg.get("model") or {}).get("center_feature") or {}).get("expected_channels", None),
+                    "adapter_out_channels": ((cfg.get("model") or {}).get("center_feature") or {}).get("adapter_out_channels", None),
+                    "native_stride": ((cfg.get("model") or {}).get("center_feature") or {}).get("native_stride", None),
+                    "upsample_logits_to_target": ((cfg.get("model") or {}).get("center_feature") or {}).get("upsample_logits_to_target", None),
+                },
+                "normalization_mode": ((cfg.get("center_loss") or {}).get("normalization_mode", None)),
+                "center_fp32": ((cfg.get("train") or {}).get("center_fp32", None)),
+            }
 
-    metadata_path = (out_dir / "checkpoint_metadata.json").resolve()
-    metadata_path.write_text(json.dumps(checkpoint_metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    resolved_paths = {
+        "config": str(cfg_path.resolve()),
+        "run_dir": str(run_dir.resolve()),
+        "microset": str(microset_txt.resolve()),
+        "best_checkpoint": str(checkpoint_specs[0][1]),
+        "last_checkpoint": str(checkpoint_specs[1][1]),
+        "metrics_csv": str(metrics_csv),
+        "summary_json": str(summary_json),
+        "threshold_sweep_dir": str(threshold_sweep_dir),
+        "microset_manifest": str(manifest_path),
+        "output_dir": str(out_dir.resolve()),
+    }
+    print(json.dumps({"status": "resolved_paths", **resolved_paths}, ensure_ascii=False, indent=2))
+
+    missing_artifacts = _verify_artifacts(
+        cfg=cfg,
+        resolved_paths=resolved_paths,
+        microset_info=microset_info,
+        checkpoint_metadata=checkpoint_metadata,
+    )
+    if missing_artifacts:
+        print(
+            json.dumps(
+                {
+                    "status": "artifact_precheck_failed",
+                    "resolved_paths": resolved_paths,
+                    "microset_candidates": [
+                        {"source": candidate["source"], "path": str(candidate["path"]), "exists": bool(candidate["path"].exists())}
+                        for candidate in microset_candidates
+                    ],
+                    "missing_artifacts": missing_artifacts,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        raise SystemExit(2)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    loader = _build_loader(cfg, repo_root=repo_root, split_txt=microset_txt, device=device)
+    instance_root = _resolve_path(repo_root, cfg["dataset"]["instance_root"])
+    if instance_root is None:
+        raise SystemExit("Config: dataset.instance_root is required")
 
     best_thr = checkpoint_metadata["best"].get("saved_threshold", None)
     last_thr = checkpoint_metadata["last"].get("saved_threshold", None)
@@ -825,6 +1092,7 @@ def main() -> None:
             combo_results.append(
                 _evaluate_combo(
                     cfg=cfg,
+                    repo_root=repo_root,
                     device=device,
                     loader=loader,
                     checkpoint_tag=tag,
@@ -932,9 +1200,34 @@ def main() -> None:
         "D": "Исправить marker diagnostic contract и повторно пересчитать только offline diagnostics.",
     }[decision]
 
+    checkpoint_metadata["resolved_source"] = {
+        "config": resolved_paths["config"],
+        "run_dir": resolved_paths["run_dir"],
+        "microset": resolved_paths["microset"],
+        "microset_raw_sha256": microset_info["raw_sha256"],
+        "microset_normalized_sha256": microset_info["normalized_sha256"],
+        "microset_nonempty_lines": microset_info["nonempty_lines"],
+        "microset_candidates": [
+            {
+                "source": candidate["source"],
+                "path": str(candidate["path"]),
+                "exists": bool(candidate["path"].exists()),
+                "raw_sha256": _sha256_file(candidate["path"]) if candidate["path"].exists() else None,
+                "normalized_sha256": _normalized_microset_sha256(candidate["path"]) if candidate["path"].exists() else None,
+            }
+            for candidate in microset_candidates
+        ],
+        "metrics_csv": resolved_paths["metrics_csv"],
+        "summary_json": resolved_paths["summary_json"],
+        "threshold_sweep_dir": resolved_paths["threshold_sweep_dir"],
+        "output_dir": resolved_paths["output_dir"],
+    }
+    metadata_path = (out_dir / "checkpoint_metadata.json").resolve()
+    metadata_path.write_text(json.dumps(checkpoint_metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
     summary_path = (out_dir / "audit_summary.json").resolve()
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"output_dir": str(out_dir), "summary": str(summary_path)}, ensure_ascii=False, indent=2))
+    print(json.dumps({"status": "done", "output_dir": str(out_dir), "summary": str(summary_path)}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
