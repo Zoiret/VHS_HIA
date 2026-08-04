@@ -641,6 +641,93 @@ class TestReconstructionPolicyAblation(unittest.TestCase):
             self.assertTrue((out_dir / "recommended_policy.json").exists())
             self.assertTrue((out_dir / "visualization_error.json").exists())
 
+    def test_policy_artifact_integrity_rejects_duplicate_sample_entries(self):
+        mod = self._mod()
+        rows = [
+            {"sample_index": 0, "sample": "a", "policy": "P0_CURRENT"},
+            {"sample_index": 0, "sample": "a", "policy": "P1_DROP_UNMARKED"},
+            {"sample_index": 1, "sample": "b", "policy": "P0_CURRENT"},
+            {"sample_index": 1, "sample": "b", "policy": "P1_DROP_UNMARKED"},
+        ]
+        samples = [
+            {"sample": "a", "sample_index": 0},
+            {"sample": "a", "sample_index": 0},
+        ]
+        with self.assertRaises(RuntimeError):
+            mod._validate_policy_artifact_integrity(
+                sample_entries=samples,
+                per_sample_csv_rows=rows,
+                thresholds=(0.03,),
+                required_policies=("P0_CURRENT", "P1_DROP_UNMARKED"),
+            )
+
+    def test_policy_artifact_integrity_accepts_complete_five_policy_grid(self):
+        mod = self._mod()
+        samples = [{"sample": f"s{i}", "sample_index": i} for i in range(2)]
+        rows = []
+        for sample in samples:
+            for threshold in (0.02, 0.03, 0.05):
+                for policy in ("P0_CURRENT", "P1_DROP_UNMARKED", "P2_ATTACH_TO_NEAREST_MARKER", "P3_GATED_ATTACH", "P4_GLOBAL_MARKER_CONTROLLED"):
+                    rows.append({"sample": sample["sample"], "sample_index": sample["sample_index"], "threshold": threshold, "policy": policy})
+        mod._validate_policy_artifact_integrity(
+            sample_entries=samples,
+            per_sample_csv_rows=rows,
+            thresholds=(0.03, 0.02, 0.05),
+            required_policies=("P0_CURRENT", "P1_DROP_UNMARKED", "P2_ATTACH_TO_NEAREST_MARKER", "P3_GATED_ATTACH", "P4_GLOBAL_MARKER_CONTROLLED"),
+        )
+
+    def test_aggregate_policy_rows_splits_raw_and_final_provenance(self):
+        mod = self._mod()
+        rows = [
+            {
+                "counts": {"exact_count": True},
+                "instance_metrics": {"matched_iou": 0.7, "fragmented": False, "merged": False},
+                "area_accounting": {"assigned_area_fraction": 1.0, "dropped_area": 0},
+                "contract": {
+                    "pass": True,
+                    "markers_preserved_count": 1,
+                    "fallback_marker_calls": 2,
+                    "keep_top3_call_count": 1,
+                    "raw_labels_without_marker_provenance": 4,
+                    "final_labels_without_marker_provenance": 0,
+                },
+                "component_assignment": {"ambiguous_assignments": None},
+            }
+        ]
+        summary = mod._aggregate_policy_rows(rows)
+        self.assertEqual(summary["raw_labels_without_marker_provenance"], 4)
+        self.assertEqual(summary["final_labels_without_marker_provenance"], 0)
+
+    def test_p0_component_assignment_semantics_can_be_unavailable(self):
+        mod = self._mod()
+        gt_inst = np.zeros((16, 16), dtype=np.uint8)
+        gt_inst[2:8, 2:8] = 1
+        pred_sem = np.zeros((16, 16), dtype=np.uint8)
+        pred_sem[2:8, 2:8] = 1
+        pred_inst = gt_inst.copy()
+        marker_points = [_marker(1, 4, 4)]
+        trace = {
+            "semantic_component_count": 1,
+            "raw_labels": pred_inst.copy(),
+            "raw_count": 1,
+            "final_labels": pred_inst.copy(),
+            "component_assignments": [{"component_id": 1, "marker_count_before_fallback": 1}],
+            "merged_markers": [],
+            "fallback_marker_calls": 0,
+            "keep_top3_call_count": 0,
+            "new_non_marker_label_count": 0,
+        }
+        metrics = mod._policy_metrics(
+            policy_name="P0_CURRENT",
+            gt_inst=gt_inst,
+            pred_sem=pred_sem,
+            pred_inst=pred_inst,
+            marker_points=marker_points,
+            trace=trace,
+        )
+        self.assertIsNone(metrics["component_assignment"]["marked_components"])
+        self.assertEqual(metrics["component_assignment"]["diagnostic_status"], "unavailable_for_p0")
+
 
 if __name__ == "__main__":
     unittest.main()

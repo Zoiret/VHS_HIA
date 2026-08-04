@@ -166,6 +166,11 @@ def _marker_ids_present(labels: np.ndarray, marker_points: list[dict]) -> list[i
     return ids
 
 
+def _labels_without_marker_provenance(labels: np.ndarray, marker_points: list[dict]) -> list[int]:
+    marker_ids = {int(mp["marker_id"]) for mp in marker_points}
+    return [int(v) for v in np.unique(labels) if int(v) > 0 and int(v) not in marker_ids]
+
+
 def _component_records(leaf_union: np.ndarray, marker_points: list[dict]) -> tuple[np.ndarray, list[dict]]:
     labels_cc, cc_k = _connected_components(leaf_union.astype(np.uint8))
     records = []
@@ -597,6 +602,7 @@ def _mean_matched_dice(gt_inst: np.ndarray, pred_inst: np.ndarray, metrics: dict
 
 def _policy_metrics(
     *,
+    policy_name: str,
     gt_inst: np.ndarray,
     pred_sem: np.ndarray,
     pred_inst: np.ndarray,
@@ -614,25 +620,42 @@ def _policy_metrics(
     total_leaf_area = int(np.sum(leaf_union))
     assigned_area = int(np.sum(pred_inst > 0))
     dropped_area = int(total_leaf_area - assigned_area)
-    unmarked_components = [comp for comp in trace["component_assignments"] if len(comp.get("marker_ids", [])) == 0]
-    attached_unmarked = [comp for comp in unmarked_components if bool(comp.get("assigned", False))]
-    rejected_unmarked = [comp for comp in unmarked_components if not bool(comp.get("assigned", False))]
+    raw_labels_without_marker_provenance = _labels_without_marker_provenance(trace["raw_labels"], marker_points)
+    final_labels_without_marker_provenance = _labels_without_marker_provenance(pred_inst, marker_points)
     marker_ids_present = _marker_ids_present(pred_inst, marker_points)
     markers_without_output = sorted([int(mp["marker_id"]) for mp in marker_points if int(mp["marker_id"]) not in marker_ids_present])
+    component_assignments = list(trace["component_assignments"])
 
-    ambiguous = 0
-    max_attach = 0.0
-    dists = []
-    for comp in attached_unmarked:
-        d = float(comp.get("nearest_distance", 0.0))
-        dists.append(d)
-        max_attach = max(max_attach, d)
-        if bool(comp.get("ambiguous", False)):
-            ambiguous += 1
+    if policy_name == "P0_CURRENT":
+        marked_components = None
+        unmarked_components = None
+        attached_unmarked = None
+        rejected_unmarked = None
+        unmarked_component_area = None
+        ambiguous = None
+        mean_attach = None
+        max_attach = None
+        component_diagnostic_status = "unavailable_for_p0"
+    else:
+        unmarked_component_list = [comp for comp in component_assignments if len(comp.get("marker_ids", [])) == 0]
+        marked_component_list = [comp for comp in component_assignments if len(comp.get("marker_ids", [])) > 0]
+        attached_unmarked_list = [comp for comp in unmarked_component_list if bool(comp.get("assigned", False))]
+        rejected_unmarked_list = [comp for comp in unmarked_component_list if not bool(comp.get("assigned", False))]
+        dists = [float(comp.get("nearest_distance", 0.0)) for comp in attached_unmarked_list if comp.get("nearest_distance") is not None]
+        marked_components = int(len(marked_component_list))
+        unmarked_components = int(len(unmarked_component_list))
+        attached_unmarked = int(len(attached_unmarked_list))
+        rejected_unmarked = int(len(rejected_unmarked_list))
+        unmarked_component_area = int(sum(int(comp["area"]) for comp in unmarked_component_list))
+        ambiguous = int(sum(1 for comp in attached_unmarked_list if bool(comp.get("ambiguous", False))))
+        mean_attach = float(np.mean(dists)) if dists else None
+        max_attach = float(max(dists)) if dists else None
+        component_diagnostic_status = "ok"
 
     invariant = {
         "output_label_count_le_marker_count": bool(int(pred_k) <= int(len(marker_points))),
-        "labels_without_marker_provenance": int(len(_positive_ids(pred_inst)) - len(marker_ids_present)),
+        "raw_labels_without_marker_provenance": int(len(raw_labels_without_marker_provenance)),
+        "final_labels_without_marker_provenance": int(len(final_labels_without_marker_provenance)),
         "markers_without_output_label": [int(v) for v in markers_without_output],
         "markers_preserved_count": int(len(marker_ids_present)),
         "marker_count_preservation": bool(int(pred_k) <= int(len(marker_points))),
@@ -649,7 +672,7 @@ def _policy_metrics(
     invariant["deterministic_repeat"] = bool(np.array_equal(pred_inst, rerun_same))
     invariant["pass"] = bool(
         invariant["output_label_count_le_marker_count"]
-        and invariant["labels_without_marker_provenance"] == 0
+        and invariant["final_labels_without_marker_provenance"] == 0
         and invariant["marker_labels_do_not_disappear"]
         and invariant["labels_do_not_merge_two_markers"]
         and invariant["no_nan_invalid_labels"]
@@ -681,17 +704,18 @@ def _policy_metrics(
             "assigned_area": int(assigned_area),
             "dropped_area": int(dropped_area),
             "assigned_area_fraction": float(assigned_area / max(total_leaf_area, 1)),
-            "unmarked_component_area": int(sum(int(comp["area"]) for comp in unmarked_components)),
-            "false_fragment_attachment_candidates": int(ambiguous),
+            "unmarked_component_area": unmarked_component_area,
+            "false_fragment_attachment_candidates": ambiguous,
         },
         "component_assignment": {
-            "marked_components": int(sum(1 for comp in trace["component_assignments"] if len(comp.get("marker_ids", [])) > 0)),
-            "unmarked_components": int(len(unmarked_components)),
-            "unmarked_components_attached": int(len(attached_unmarked)),
-            "unmarked_components_rejected": int(len(rejected_unmarked)),
-            "mean_attachment_distance": float(np.mean(dists)) if dists else None,
-            "max_attachment_distance": float(max_attach) if dists else None,
-            "ambiguous_assignments": int(ambiguous),
+            "marked_components": marked_components,
+            "unmarked_components": unmarked_components,
+            "unmarked_components_attached": attached_unmarked,
+            "unmarked_components_rejected": rejected_unmarked,
+            "mean_attachment_distance": mean_attach,
+            "max_attachment_distance": max_attach,
+            "ambiguous_assignments": ambiguous,
+            "diagnostic_status": component_diagnostic_status,
         },
         "contract": invariant,
         "raw_instance_metrics": inst_metrics,
@@ -708,10 +732,12 @@ def _aggregate_policy_rows(rows: list[dict]) -> dict:
     dropped = float(np.mean([float(r["area_accounting"]["dropped_area"]) for r in rows])) if rows else 0.0
     invariant_violations = int(sum(0 if bool(r["contract"]["pass"]) else 1 for r in rows))
     markers_preserved = int(sum(int(r["contract"]["markers_preserved_count"]) for r in rows))
-    ambiguous = int(sum(int(r["component_assignment"]["ambiguous_assignments"]) for r in rows))
+    ambiguous_vals = [r["component_assignment"]["ambiguous_assignments"] for r in rows if r["component_assignment"]["ambiguous_assignments"] is not None]
+    ambiguous = int(sum(int(v) for v in ambiguous_vals)) if ambiguous_vals else None
     fallback_calls = int(sum(int(r["contract"]["fallback_marker_calls"]) for r in rows))
     keep_top3_calls = int(sum(int(r["contract"]["keep_top3_call_count"]) for r in rows))
-    new_non_marker_labels = int(sum(int(r["contract"]["new_non_marker_label_count"]) for r in rows))
+    raw_non_marker_labels = int(sum(int(r["contract"]["raw_labels_without_marker_provenance"]) for r in rows))
+    final_non_marker_labels = int(sum(int(r["contract"]["final_labels_without_marker_provenance"]) for r in rows))
     return {
         "exact_count_accuracy": exact,
         "matched_iou": matched_iou,
@@ -724,7 +750,8 @@ def _aggregate_policy_rows(rows: list[dict]) -> dict:
         "ambiguous_assignments": ambiguous,
         "fallback_marker_calls": fallback_calls,
         "keep_top3_call_count": keep_top3_calls,
-        "labels_without_marker_provenance": new_non_marker_labels,
+        "raw_labels_without_marker_provenance": raw_non_marker_labels,
+        "final_labels_without_marker_provenance": final_non_marker_labels,
     }
 
 
@@ -737,7 +764,7 @@ def _policy_rank_key(summary: dict) -> tuple:
         float(summary["fragmented_rate"]),
         float(summary["merged_rate"]),
         -float(summary["assigned_area_fraction"]),
-        int(summary["ambiguous_assignments"]),
+        int(summary["ambiguous_assignments"] or 0),
     )
 
 
@@ -801,6 +828,14 @@ def _write_csv_atomic(path: Path, rows: list[dict]) -> None:
             writer.writeheader()
             writer.writerows(rows)
     tmp.replace(path)
+
+
+def _none_or_int(value):
+    return None if value is None else int(value)
+
+
+def _none_or_float(value):
+    return None if value is None else float(value)
 
 
 def _label_id_to_bgr(label_id: int) -> tuple[int, int, int]:
@@ -1749,6 +1784,51 @@ def _write_core_policy_artifacts(
     _write_recommended_policy_if_allowed(out_dir, recommended, baseline_exact_match=True)
 
 
+def _validate_policy_artifact_integrity(*, sample_entries: list[dict], per_sample_csv_rows: list[dict], thresholds: tuple[float, ...], required_policies: tuple[str, ...]) -> None:
+    sample_keys = [(entry.get("sample"), int(entry.get("sample_index"))) for entry in sample_entries]
+    unique_sample_keys = sorted(set(sample_keys), key=lambda item: item[1])
+    if len(sample_keys) != len(unique_sample_keys):
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "status": "artifact_integrity_error",
+                    "message": "per_component_assignments.json must contain exactly one entry per sample/sample_index",
+                    "sample_entries": len(sample_keys),
+                    "unique_sample_entries": len(unique_sample_keys),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    expected_rows = len(unique_sample_keys) * len(thresholds) * len(required_policies)
+    if len(per_sample_csv_rows) != int(expected_rows):
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "status": "artifact_integrity_error",
+                    "message": "per_sample_policy_metrics.csv row count does not match sample x threshold x policy formula",
+                    "actual_rows": len(per_sample_csv_rows),
+                    "expected_rows": int(expected_rows),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    missing_policies = sorted(set(required_policies) - {str(row.get("policy")) for row in per_sample_csv_rows})
+    if missing_policies:
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "status": "artifact_integrity_error",
+                    "message": "per_sample_policy_metrics.csv is missing required policies",
+                    "missing_policies": missing_policies,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+
+
 def _assert_policy_contract(policy_name: str, metrics: dict) -> None:
     contract = metrics["contract"]
     counts = metrics["counts"]
@@ -1757,23 +1837,25 @@ def _assert_policy_contract(policy_name: str, metrics: dict) -> None:
             raise BaselineMismatchError(f"{policy_name}: fallback marker calls must be 0")
         if int(contract["keep_top3_call_count"]) != 0:
             raise BaselineMismatchError(f"{policy_name}: keep_top3 call count must be 0")
-        if int(contract["new_non_marker_label_count"]) != 0:
-            raise BaselineMismatchError(f"{policy_name}: labels without marker provenance must be 0")
+        if int(contract["raw_labels_without_marker_provenance"]) != 0:
+            raise BaselineMismatchError(f"{policy_name}: raw labels without marker provenance must be 0")
+        if int(contract["final_labels_without_marker_provenance"]) != 0:
+            raise BaselineMismatchError(f"{policy_name}: final labels without marker provenance must be 0")
     if policy_name == "P1_DROP_UNMARKED":
         if int(counts["final_output_label_count"]) > int(counts["marker_count"]):
             raise BaselineMismatchError("P1_DROP_UNMARKED: output label count must be <= marker count")
         if int(counts["marker_count"]) == 1 and int(counts["final_output_label_count"]) == 3:
             raise BaselineMismatchError("P1_DROP_UNMARKED: one marker cannot produce three labels")
     if policy_name == "P2_ATTACH_TO_NEAREST_MARKER":
-        if int(contract["new_non_marker_label_count"]) != 0:
+        if int(contract["final_labels_without_marker_provenance"]) != 0:
             raise BaselineMismatchError("P2_ATTACH_TO_NEAREST_MARKER: new label IDs are forbidden")
     if policy_name == "P3_GATED_ATTACH":
-        if int(contract["new_non_marker_label_count"]) != 0:
+        if int(contract["final_labels_without_marker_provenance"]) != 0:
             raise BaselineMismatchError("P3_GATED_ATTACH: new label IDs are forbidden")
     if policy_name == "P4_GLOBAL_MARKER_CONTROLLED":
         if int(counts["marker_count"]) == 0 and int(counts["final_output_label_count"]) != 0:
             raise BaselineMismatchError("P4_GLOBAL_MARKER_CONTROLLED: zero markers must produce zero labels")
-        if int(contract["labels_without_marker_provenance"]) != 0:
+        if int(contract["final_labels_without_marker_provenance"]) != 0:
             raise BaselineMismatchError("P4_GLOBAL_MARKER_CONTROLLED: output IDs must be marker-derived only")
 
 
@@ -1946,6 +2028,7 @@ def main() -> None:
     per_sample_csv_rows = []
     per_component_assignments = {"primary_threshold": PRIMARY_THRESHOLD, "secondary_thresholds": list(SECONDARY_THRESHOLDS), "samples": []}
     cached_primary_outputs = {}
+    cached_primary_p3_outputs = {}
 
     for sample_idx, batch in enumerate(loader):
         images = batch["image"].to(device)
@@ -1971,7 +2054,7 @@ def main() -> None:
             for policy_name in ("P0_CURRENT", "P1_DROP_UNMARKED", "P2_ATTACH_TO_NEAREST_MARKER", "P4_GLOBAL_MARKER_CONTROLLED"):
                 pred_inst, marker_points, trace = run_policy(policy_name, pred_sem, center_prob, float(threshold))
                 c_metrics = _sample_center_metrics([(int(mp["y"]), int(mp["x"])) for mp in marker_points], gt_pts)
-                p_metrics = _policy_metrics(gt_inst=gt_inst, pred_sem=pred_sem, pred_inst=pred_inst, marker_points=marker_points, trace=trace)
+                p_metrics = _policy_metrics(policy_name=policy_name, gt_inst=gt_inst, pred_sem=pred_sem, pred_inst=pred_inst, marker_points=marker_points, trace=trace)
                 _assert_policy_contract(policy_name, p_metrics)
 
                 row = {
@@ -1994,14 +2077,18 @@ def main() -> None:
                     "instance_score": float(p_metrics["instance_metrics"]["instance_score"]),
                     "assigned_area_fraction": float(p_metrics["area_accounting"]["assigned_area_fraction"]),
                     "dropped_area": int(p_metrics["area_accounting"]["dropped_area"]),
-                    "unmarked_component_area": int(p_metrics["area_accounting"]["unmarked_component_area"]),
-                    "unmarked_components_attached": int(p_metrics["component_assignment"]["unmarked_components_attached"]),
-                    "unmarked_components_rejected": int(p_metrics["component_assignment"]["unmarked_components_rejected"]),
-                    "mean_attachment_distance": p_metrics["component_assignment"]["mean_attachment_distance"],
-                    "max_attachment_distance": p_metrics["component_assignment"]["max_attachment_distance"],
-                    "ambiguous_assignments": int(p_metrics["component_assignment"]["ambiguous_assignments"]),
+                    "unmarked_component_area": _none_or_int(p_metrics["area_accounting"]["unmarked_component_area"]),
+                    "unmarked_components_attached": _none_or_int(p_metrics["component_assignment"]["unmarked_components_attached"]),
+                    "unmarked_components_rejected": _none_or_int(p_metrics["component_assignment"]["unmarked_components_rejected"]),
+                    "marked_components": _none_or_int(p_metrics["component_assignment"]["marked_components"]),
+                    "unmarked_components": _none_or_int(p_metrics["component_assignment"]["unmarked_components"]),
+                    "component_diagnostic_status": p_metrics["component_assignment"]["diagnostic_status"],
+                    "mean_attachment_distance": _none_or_float(p_metrics["component_assignment"]["mean_attachment_distance"]),
+                    "max_attachment_distance": _none_or_float(p_metrics["component_assignment"]["max_attachment_distance"]),
+                    "ambiguous_assignments": _none_or_int(p_metrics["component_assignment"]["ambiguous_assignments"]),
                     "marker_count_preservation": bool(p_metrics["contract"]["marker_count_preservation"]),
-                    "labels_without_marker_provenance": int(p_metrics["contract"]["labels_without_marker_provenance"]),
+                    "raw_labels_without_marker_provenance": int(p_metrics["contract"]["raw_labels_without_marker_provenance"]),
+                    "final_labels_without_marker_provenance": int(p_metrics["contract"]["final_labels_without_marker_provenance"]),
                     "markers_without_output_label_count": int(len(p_metrics["contract"]["markers_without_output_label"])),
                     "invariant_pass": bool(p_metrics["contract"]["pass"]),
                     "center_precision": float(c_metrics["center_precision"]),
@@ -2009,7 +2096,8 @@ def main() -> None:
                     "center_f1": float(c_metrics["center_f1"]),
                     "fallback_marker_calls": int(p_metrics["contract"]["fallback_marker_calls"]),
                     "keep_top3_call_count": int(p_metrics["contract"]["keep_top3_call_count"]),
-                    "new_non_marker_label_count": int(p_metrics["contract"]["new_non_marker_label_count"]),
+                    "distance_gate_px": None,
+                    "relative_area_gate": None,
                 }
                 per_sample_csv_rows.append(row)
                 sample_pack["thresholds"][threshold_key][policy_name] = {"metrics": p_metrics, "trace": _json_safe_trace(trace)}
@@ -2072,11 +2160,16 @@ def main() -> None:
                 for area_gate in P3_AREA_GATES:
                     cfg_key = {"distance_gate_px": float(dist_gate), "relative_area_gate": None if area_gate is None else float(area_gate)}
                     pred_inst, marker_points, trace = run_policy("P3_GATED_ATTACH", pred_sem, center_prob, float(threshold), p3_cfg=cfg_key)
-                    p_metrics = _policy_metrics(gt_inst=gt_inst, pred_sem=pred_sem, pred_inst=pred_inst, marker_points=marker_points, trace=trace)
+                    c_metrics = _sample_center_metrics([(int(mp["y"]), int(mp["x"])) for mp in marker_points], gt_pts)
+                    p_metrics = _policy_metrics(policy_name="P3_GATED_ATTACH", gt_inst=gt_inst, pred_sem=pred_sem, pred_inst=pred_inst, marker_points=marker_points, trace=trace)
                     _assert_policy_contract("P3_GATED_ATTACH", p_metrics)
                     key = json.dumps(cfg_key, sort_keys=True)
                     if float(threshold) == PRIMARY_THRESHOLD:
                         p3_primary_rows.setdefault(key, []).append(p_metrics)
+                        cached_primary_p3_outputs.setdefault(sample_id, {})[key] = {
+                            "labels": pred_inst,
+                            "metrics": p_metrics,
+                        }
                         cached_primary_outputs.setdefault(
                             sample_id,
                             {
@@ -2087,9 +2180,51 @@ def main() -> None:
                                 "policy_outputs": {},
                                 "semantic_cc": trace["semantic_components"],
                             },
-                        )["policy_outputs"]["P3_GATED_ATTACH"] = {"labels": pred_inst, "metrics": p_metrics}
-                    sample_pack["thresholds"][threshold_key].setdefault("P3_GRID", {})[key] = {"metrics": p_metrics, "trace": _json_safe_trace(trace), "cfg": cfg_key}
-            per_component_assignments["samples"].append(sample_pack)
+                        )["semantic_cc"] = trace["semantic_components"]
+                    p3_row = {
+                        "sample": sample_id,
+                        "sample_index": int(sample_idx),
+                        "threshold": float(threshold),
+                        "policy": "P3_GATED_ATTACH",
+                        "gt_instance_count": int(p_metrics["counts"]["gt_instance_count"]),
+                        "marker_count": int(p_metrics["counts"]["marker_count"]),
+                        "semantic_cc_count": int(p_metrics["counts"]["semantic_connected_component_count"]),
+                        "raw_output_label_count": int(p_metrics["counts"]["raw_output_label_count"]),
+                        "final_output_label_count": int(p_metrics["counts"]["final_output_label_count"]),
+                        "exact_count": bool(p_metrics["counts"]["exact_count"]),
+                        "matched_iou": float(p_metrics["instance_metrics"]["matched_iou"]),
+                        "mean_matched_dice": p_metrics["instance_metrics"]["mean_matched_dice"],
+                        "merged": bool(p_metrics["instance_metrics"]["merged"]),
+                        "fragmented": bool(p_metrics["instance_metrics"]["fragmented"]),
+                        "mixed": bool(p_metrics["instance_metrics"]["mixed"]),
+                        "perfect_recovery": bool(p_metrics["instance_metrics"]["perfect_recovery"]),
+                        "instance_score": float(p_metrics["instance_metrics"]["instance_score"]),
+                        "assigned_area_fraction": float(p_metrics["area_accounting"]["assigned_area_fraction"]),
+                        "dropped_area": int(p_metrics["area_accounting"]["dropped_area"]),
+                        "unmarked_component_area": _none_or_int(p_metrics["area_accounting"]["unmarked_component_area"]),
+                        "unmarked_components_attached": _none_or_int(p_metrics["component_assignment"]["unmarked_components_attached"]),
+                        "unmarked_components_rejected": _none_or_int(p_metrics["component_assignment"]["unmarked_components_rejected"]),
+                        "marked_components": _none_or_int(p_metrics["component_assignment"]["marked_components"]),
+                        "unmarked_components": _none_or_int(p_metrics["component_assignment"]["unmarked_components"]),
+                        "component_diagnostic_status": p_metrics["component_assignment"]["diagnostic_status"],
+                        "mean_attachment_distance": _none_or_float(p_metrics["component_assignment"]["mean_attachment_distance"]),
+                        "max_attachment_distance": _none_or_float(p_metrics["component_assignment"]["max_attachment_distance"]),
+                        "ambiguous_assignments": _none_or_int(p_metrics["component_assignment"]["ambiguous_assignments"]),
+                        "marker_count_preservation": bool(p_metrics["contract"]["marker_count_preservation"]),
+                        "raw_labels_without_marker_provenance": int(p_metrics["contract"]["raw_labels_without_marker_provenance"]),
+                        "final_labels_without_marker_provenance": int(p_metrics["contract"]["final_labels_without_marker_provenance"]),
+                        "markers_without_output_label_count": int(len(p_metrics["contract"]["markers_without_output_label"])),
+                        "invariant_pass": bool(p_metrics["contract"]["pass"]),
+                        "center_precision": float(c_metrics["center_precision"]),
+                        "center_recall": float(c_metrics["center_recall"]),
+                        "center_f1": float(c_metrics["center_f1"]),
+                        "fallback_marker_calls": int(p_metrics["contract"]["fallback_marker_calls"]),
+                        "keep_top3_call_count": int(p_metrics["contract"]["keep_top3_call_count"]),
+                        "distance_gate_px": float(cfg_key["distance_gate_px"]),
+                        "relative_area_gate": None if cfg_key["relative_area_gate"] is None else float(cfg_key["relative_area_gate"]),
+                    }
+                    sample_pack["thresholds"][threshold_key].setdefault("P3_GRID", {})[key] = {"metrics": p_metrics, "trace": _json_safe_trace(trace), "cfg": cfg_key, "row": p3_row}
+        per_component_assignments["samples"].append(sample_pack)
 
     actual_primary_rows.sort(key=lambda row: int(row["sample_index"]))
     actual_primary_first_failure = _actual_primary_first_failure_from_rows(actual_primary_rows)
@@ -2181,9 +2316,23 @@ def main() -> None:
     recommended = _recommend_policy(final_primary_summary, final_primary_summary["P0_CURRENT"])
 
     for sample_pack in per_component_assignments["samples"]:
-        primary_key = f"{PRIMARY_THRESHOLD:.2f}"
-        p3_entry = sample_pack["thresholds"][primary_key]["P3_GRID"][best_p3_key]
-        sample_pack["thresholds"][primary_key]["P3_GATED_ATTACH"] = p3_entry
+        for threshold_key, threshold_payload in sample_pack["thresholds"].items():
+            p3_entry = threshold_payload["P3_GRID"][best_p3_key]
+            threshold_payload["P3_GATED_ATTACH"] = {
+                "metrics": p3_entry["metrics"],
+                "trace": p3_entry["trace"],
+                "cfg": p3_entry["cfg"],
+            }
+            per_sample_csv_rows.append(dict(p3_entry["row"]))
+        cached_primary_outputs[sample_pack["sample"]]["policy_outputs"]["P3_GATED_ATTACH"] = cached_primary_p3_outputs[sample_pack["sample"]][best_p3_key]
+
+    per_sample_csv_rows.sort(key=lambda row: (int(row["sample_index"]), float(row["threshold"]), str(row["policy"])))
+    _validate_policy_artifact_integrity(
+        sample_entries=per_component_assignments["samples"],
+        per_sample_csv_rows=per_sample_csv_rows,
+        thresholds=(PRIMARY_THRESHOLD,) + SECONDARY_THRESHOLDS,
+        required_policies=("P0_CURRENT", "P1_DROP_UNMARKED", "P2_ATTACH_TO_NEAREST_MARKER", "P3_GATED_ATTACH", "P4_GLOBAL_MARKER_CONTROLLED"),
+    )
 
     invariants = {
         "primary_threshold": PRIMARY_THRESHOLD,
@@ -2208,7 +2357,8 @@ def main() -> None:
                 "invariant_violations": int(s["invariant_violations"]),
                 "fallback_marker_calls": int(s["fallback_marker_calls"]),
                 "keep_top3_call_count": int(s["keep_top3_call_count"]),
-                "labels_without_marker_provenance": int(s["labels_without_marker_provenance"]),
+                "raw_labels_without_marker_provenance": int(s["raw_labels_without_marker_provenance"]),
+                "final_labels_without_marker_provenance": int(s["final_labels_without_marker_provenance"]),
             }
         )
 
@@ -2228,13 +2378,15 @@ def main() -> None:
             "raw_final_behavior": "semantic disconnected components create extra raw labels; keep_top3 truncates final labels to at most three",
             "fallback_labels": True,
             "keep_top3_effect": True,
+            "raw_labels_without_marker_provenance": int(final_primary_summary["P0_CURRENT"]["raw_labels_without_marker_provenance"]),
+            "final_labels_without_marker_provenance": int(final_primary_summary["P0_CURRENT"]["final_labels_without_marker_provenance"]),
         },
         "policy_table": policy_table,
         "per_sample_failures": actual_primary_rows,
         "best_gated_parameters": {
             "distance_gate": best_p3_cfg["distance_gate_px"],
             "area_gate": best_p3_cfg["relative_area_gate"],
-            "ambiguous_assignments": int(final_primary_summary["P3_GATED_ATTACH"]["ambiguous_assignments"]),
+            "ambiguous_assignments": int(final_primary_summary["P3_GATED_ATTACH"]["ambiguous_assignments"] or 0),
         },
         "invariants": invariants,
         "server_preflight": {
