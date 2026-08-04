@@ -1135,6 +1135,36 @@ def _write_recommended_policy_if_allowed(output_dir: Path, recommended: dict, ba
     return True
 
 
+def _print_primary_sections(summary: dict) -> None:
+    print("# PRIMARY OPERATING POINT")
+    print(json.dumps(summary["primary_operating_point"], ensure_ascii=False, indent=2))
+    print("# CURRENT POLICY")
+    print(json.dumps(summary["current_policy"], ensure_ascii=False, indent=2))
+    print("# POLICY TABLE")
+    print(json.dumps(summary["policy_table"], ensure_ascii=False, indent=2))
+    print("# PER-SAMPLE FAILURES")
+    print(json.dumps(summary["per_sample_failures"], ensure_ascii=False, indent=2))
+    print("# BEST GATED PARAMETERS")
+    print(json.dumps(summary["best_gated_parameters"], ensure_ascii=False, indent=2))
+    print("# INVARIANTS")
+    print(json.dumps(summary["invariants"], ensure_ascii=False, indent=2))
+    print("# SYNTHETIC TESTS")
+    print(json.dumps({"status": "covered by unittest"}, ensure_ascii=False, indent=2))
+    print("# RECOMMENDED POLICY")
+    print(json.dumps(summary["recommended_policy"], ensure_ascii=False, indent=2))
+    print("# PRODUCTION CHANGE PROPOSAL")
+    print(summary["production_change_proposal"])
+    print("# NEXT STEP")
+    print(summary["next_step"])
+
+
+def _print_baseline_mismatch_sections(report: dict) -> None:
+    print("# BASELINE MISMATCH")
+    print(json.dumps({"expected": {"exact_count_accuracy": report["expected_exact_count_accuracy"], "marker_contract_passes": report["expected_marker_contract_passes"], "first_failing_invariant": report["expected_first_failing_invariant"]}}, ensure_ascii=False, indent=2))
+    print(json.dumps({"actual": {"exact_count_accuracy": report["actual_exact_count_accuracy"], "marker_contract_passes": report["actual_marker_contract_passes"], "first_failing_invariant": report["actual_first_failing_invariant"]}}, ensure_ascii=False, indent=2))
+    print(json.dumps({"first_differing_sample": report["first_differing_sample"], "classification": report["classification"], "next_diagnostic": "Inspect baseline_mismatch.json and checkpoint iteration parsing before running P1-P4."}, ensure_ascii=False, indent=2))
+
+
 def _assert_policy_contract(policy_name: str, metrics: dict) -> None:
     contract = metrics["contract"]
     counts = metrics["counts"]
@@ -1480,6 +1510,7 @@ def main() -> None:
                 indent=2,
             )
         )
+        _print_baseline_mismatch_sections(baseline_report)
         raise SystemExit(1)
 
     print(
@@ -1596,6 +1627,7 @@ def main() -> None:
     }
     (out_dir / "policy_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_recommended_policy_if_allowed(out_dir, recommended, baseline_exact_match=True)
+    _print_primary_sections(summary)
 
     print(
         json.dumps(
