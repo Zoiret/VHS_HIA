@@ -4,6 +4,8 @@ import argparse
 import csv
 import hashlib
 import json
+import socket
+import subprocess
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -49,6 +51,8 @@ from validate_centerhead import _extract_metadata_centers
 
 
 DEFAULT_OUTPUT_DIR = "training/analysis/centerhead_spatial_x2_2_reconstruction_policy_holdout"
+AUTHORITATIVE_BEST_CHECKPOINT_SHA256 = "d582743fc28d39b10fb412443638404fe86bb2c2d1b7125f8287feae2766540b"
+EXPECTED_HOLDOUT_MANIFEST_SHA256 = "8ad12101e4ff4883919d97fe6c1eae0ed268c798c2b1306ed2496d929fa2f88c"
 EXCLUDED_MICROSET_IDS = (
     "m01_p02_s00",
     "m01_p02_s04",
@@ -257,6 +261,37 @@ def _checkpoint_identity(run_dir: Path) -> dict:
     }
 
 
+def _semantic_checkpoint_identity(cfg: dict, repo_root: Path) -> dict:
+    semantic_ckpt = _resolve_path(repo_root, (cfg.get("train") or {}).get("init_checkpoint", None))
+    if semantic_ckpt is None:
+        return {"semantic_checkpoint_path": None, "semantic_checkpoint_sha256": None}
+    return {
+        "semantic_checkpoint_path": str(semantic_ckpt.resolve()),
+        "semantic_checkpoint_sha256": _sha256_file(semantic_ckpt) if semantic_ckpt.exists() else None,
+    }
+
+
+def _safe_hostname() -> dict:
+    try:
+        return {"value": socket.gethostname(), "status": "ok"}
+    except Exception as exc:
+        return {"value": None, "status": f"unavailable: {exc}"}
+
+
+def _safe_git_commit(repo_root: Path) -> dict:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return {"value": result.stdout.strip(), "status": "ok"}
+    except Exception as exc:
+        return {"value": None, "status": f"unavailable: {exc}"}
+
+
 def _row_from_metrics(*, sample_entry: dict, threshold: float, policy: str, marker_contract: dict, center_metrics: dict, policy_metrics: dict, p3_cfg: dict | None) -> dict:
     return {
         "sample": sample_entry["sample"],
@@ -350,6 +385,45 @@ def _condition_rows_for_marker_contract(rows: list[dict]) -> list[dict]:
     return [row for row in rows if bool(row["marker_contract_pass"])]
 
 
+def _scope_sample_rows(rows: list[dict], policy: str | None = None) -> list[dict]:
+    filtered = rows if policy is None else [row for row in rows if str(row["policy"]) == str(policy)]
+    sample_map = {}
+    for row in filtered:
+        sample_map.setdefault(
+            str(row["sample"]),
+            {
+                "sample": str(row["sample"]),
+                "gt_instance_count": int(row["gt_instance_count"]),
+                "marker_contract_pass": bool(row["marker_contract_pass"]),
+            },
+        )
+    return [sample_map[key] for key in sorted(sample_map)]
+
+
+def _gt_distribution_from_rows(rows: list[dict], *, policy: str = "P0_CURRENT") -> dict[str, int]:
+    counts = Counter(int(row["gt_instance_count"]) for row in _scope_sample_rows(rows, policy=policy))
+    return {str(k): int(v) for k, v in sorted(counts.items())}
+
+
+def _conditioned_evidence_summary(*, total_holdout_sample_count: int, conditioned_primary_rows: list[dict]) -> dict:
+    conditioned_samples = _scope_sample_rows(conditioned_primary_rows, policy="P0_CURRENT")
+    conditioned_gt_distribution = Counter(int(row["gt_instance_count"]) for row in conditioned_samples)
+    conditioned_total = int(len(conditioned_samples))
+    meets_minimum = conditioned_total >= MIN_TOTAL_HELDOUT and all(
+        int(conditioned_gt_distribution.get(gt_count, 0)) >= int(required)
+        for gt_count, required in MIN_PER_GT_COUNT.items()
+    )
+    return {
+        "total_holdout_sample_count": int(total_holdout_sample_count),
+        "marker_contract_pass_sample_count": conditioned_total,
+        "marker_contract_pass_rate": float(conditioned_total / max(int(total_holdout_sample_count), 1)),
+        "conditioned_gt_count_distribution": {str(k): int(v) for k, v in sorted(conditioned_gt_distribution.items())},
+        "conditioned_meets_minimum": bool(meets_minimum),
+        "required_conditioned_total": int(MIN_TOTAL_HELDOUT),
+        "required_conditioned_gt_count_minimum": {str(k): int(v) for k, v in MIN_PER_GT_COUNT.items()},
+    }
+
+
 def _paired_p1_vs_p0(rows: list[dict], threshold: float) -> list[dict]:
     p0 = {row["sample"]: row for row in rows if row["policy"] == "P0_CURRENT" and abs(float(row["threshold"]) - float(threshold)) < 1e-9 and bool(row["marker_contract_pass"])}
     p1 = {row["sample"]: row for row in rows if row["policy"] == "P1_DROP_UNMARKED" and abs(float(row["threshold"]) - float(threshold)) < 1e-9 and bool(row["marker_contract_pass"])}
@@ -400,41 +474,149 @@ def _bootstrap_mean_ci(values: list[float], *, seed: int = BOOTSTRAP_SEED, n_boo
     }
 
 
-def _promotion_decision(*, conditioned_primary_by_policy: dict, paired_rows: list[dict], evidence_sufficient: bool) -> dict:
+def _scope_invariant_summary(rows: list[dict]) -> dict:
+    return {
+        "sample_count": int(len(rows)),
+        "all_samples_invariant_violations": int(sum(1 for row in rows if not bool(row["invariant_pass"]))),
+        "fallback_calls": int(sum(int(row["fallback_marker_calls"]) for row in rows)),
+        "keep_top3_calls": int(sum(int(row["keep_top3_call_count"]) for row in rows)),
+        "raw_provenance_violations": int(sum(1 for row in rows if int(row["raw_labels_without_marker_provenance"]) > 0)),
+        "final_provenance_violations": int(sum(1 for row in rows if int(row["final_labels_without_marker_provenance"]) > 0)),
+        "markers_disappeared": int(sum(1 for row in rows if not bool(row["markers_preserved"]))),
+        "output_count_over_marker_count": int(sum(1 for row in rows if int(row["final_output_label_count"]) > int(row["marker_count"]))),
+    }
+
+
+def _production_reasons(
+    *,
+    checkpoint_identity: dict,
+    evidence: dict,
+    end_to_end_primary_by_policy: dict,
+) -> list[str]:
+    reasons = []
+    if not bool(checkpoint_identity["authoritative_checkpoint_match"]):
+        reasons.append("checkpoint identity mismatch")
+    if not bool(evidence["conditioned_meets_minimum"]):
+        reasons.append("insufficient conditioned reconstruction evidence")
+    failed_center = int(evidence["total_holdout_sample_count"]) - int(evidence["marker_contract_pass_sample_count"])
+    if failed_center > 0:
+        reasons.append(
+            f"center marker contract fails on {failed_center} of {int(evidence['total_holdout_sample_count'])} samples"
+        )
+    p0 = end_to_end_primary_by_policy["P0_CURRENT"]
+    p1 = end_to_end_primary_by_policy["P1_DROP_UNMARKED"]
+    if (p1["exact_count_accuracy"] or 0.0) < (p0["exact_count_accuracy"] or 0.0):
+        reasons.append("P1 end-to-end exact-count is below P0")
+    mean_iou_delta = (p1["mean_matched_iou"] or 0.0) - (p0["mean_matched_iou"] or 0.0)
+    if mean_iou_delta < -0.02:
+        reasons.append("P1 end-to-end matched IoU is materially below P0")
+    return reasons
+
+
+def _promotion_decision(
+    *,
+    total_holdout_sample_count: int,
+    conditioned_primary_rows: list[dict],
+    end_to_end_primary_by_policy: dict,
+    conditioned_primary_by_policy: dict,
+    paired_rows: list[dict],
+    checkpoint_identity: dict,
+) -> dict:
     p0 = conditioned_primary_by_policy["P0_CURRENT"]
     p1 = conditioned_primary_by_policy["P1_DROP_UNMARKED"]
     iou_deltas = [float(row["matched_iou_delta"]) for row in paired_rows]
     exact_deltas = [float(row["exact_count_delta"]) for row in paired_rows]
     mean_iou_delta = float(np.mean(iou_deltas)) if iou_deltas else None
     median_iou_delta = float(np.median(iou_deltas)) if iou_deltas else None
+    evidence = _conditioned_evidence_summary(
+        total_holdout_sample_count=total_holdout_sample_count,
+        conditioned_primary_rows=conditioned_primary_rows,
+    )
+    conditioned_p1_scope = _scope_invariant_summary([row for row in conditioned_primary_rows if row["policy"] == "P1_DROP_UNMARKED"])
     criteria = {
-        "invariant_violations_zero": int(p1["invariant_violation_count"]) == 0,
-        "fallback_calls_zero": int(p1["fallback_marker_calls"]) == 0,
-        "keep_top3_zero": int(p1["keep_top3_calls"]) == 0,
-        "labels_without_marker_provenance_zero": int(p1["final_labels_without_marker_provenance"]) == 0 and int(p1["raw_labels_without_marker_provenance"]) == 0,
-        "exact_count_ge_p0": (p1["exact_count_accuracy"] or 0.0) >= (p0["exact_count_accuracy"] or 0.0),
-        "mean_iou_delta_ge_minus_0p02": mean_iou_delta is not None and mean_iou_delta >= -0.02,
-        "median_iou_delta_ge_minus_0p01": median_iou_delta is not None and median_iou_delta >= -0.01,
-        "no_marker_disappears": (p1["markers_preserved_rate"] or 0.0) >= 1.0,
-        "output_count_never_exceeds_marker_count": int(p1["invariant_violation_count"]) == 0,
-        "heldout_evidence_minimum": bool(evidence_sufficient),
+        "conditioned_invariant_violations_zero": int(p1["invariant_violation_count"]) == 0,
+        "conditioned_fallback_calls_zero": int(p1["fallback_marker_calls"]) == 0,
+        "conditioned_keep_top3_zero": int(p1["keep_top3_calls"]) == 0,
+        "conditioned_labels_without_marker_provenance_zero": int(p1["final_labels_without_marker_provenance"]) == 0 and int(p1["raw_labels_without_marker_provenance"]) == 0,
+        "conditioned_exact_count_ge_p0": (p1["exact_count_accuracy"] or 0.0) >= (p0["exact_count_accuracy"] or 0.0),
+        "conditioned_mean_iou_delta_ge_minus_0p02": mean_iou_delta is not None and mean_iou_delta >= -0.02,
+        "conditioned_median_iou_delta_ge_minus_0p01": median_iou_delta is not None and median_iou_delta >= -0.01,
+        "conditioned_no_marker_disappears": int(conditioned_p1_scope["markers_disappeared"]) == 0,
+        "conditioned_output_count_never_exceeds_marker_count": int(conditioned_p1_scope["output_count_over_marker_count"]) == 0,
+        "conditioned_evidence_minimum": bool(evidence["conditioned_meets_minimum"]),
     }
     passed = sorted([k for k, v in criteria.items() if v])
     failed = sorted([k for k, v in criteria.items() if not v])
-    if not evidence_sufficient:
-        status = "insufficient_evidence"
-    elif not failed:
-        status = "candidate_for_production_patch"
+    scope_invariants = {
+        policy: {
+            "all_samples": _scope_invariant_summary([row for row in end_to_end_primary_by_policy["_primary_rows"] if row["policy"] == policy]),
+            "conditioned": _scope_invariant_summary([row for row in conditioned_primary_rows if row["policy"] == policy]),
+        }
+        for policy in ("P0_CURRENT", "P1_DROP_UNMARKED")
+    }
+    if not bool(evidence["conditioned_meets_minimum"]):
+        corrected_status = "insufficient_conditioned_evidence"
+    elif not failed and bool(checkpoint_identity["authoritative_checkpoint_match"]):
+        corrected_status = "candidate_for_production_patch"
     else:
-        status = "reject"
+        corrected_status = "reject"
+    if not bool(evidence["conditioned_meets_minimum"]) and int(evidence["marker_contract_pass_sample_count"]) > 0:
+        descriptive_status = "reconstruction_candidate_pending_center_generalization"
+    else:
+        descriptive_status = None
+    if int(evidence["marker_contract_pass_sample_count"]) == int(evidence["total_holdout_sample_count"]):
+        center_status = "passed"
+    else:
+        center_status = "failed"
+    production_reasons = _production_reasons(
+        checkpoint_identity=checkpoint_identity,
+        evidence=evidence,
+        end_to_end_primary_by_policy=end_to_end_primary_by_policy,
+    )
+    production_status = "blocked" if production_reasons else "candidate_for_production_patch"
     return {
-        "status": status,
+        "previous_invalid_status": "candidate_for_production_patch",
+        "status": corrected_status,
+        "descriptive_status": descriptive_status,
         "criteria_passed": passed,
         "criteria_failed": failed,
         "mean_matched_iou_delta": mean_iou_delta,
         "median_matched_iou_delta": median_iou_delta,
         "bootstrap_mean_iou_delta_ci95": _bootstrap_mean_ci(iou_deltas),
         "bootstrap_exact_count_delta_ci95": _bootstrap_mean_ci(exact_deltas),
+        "evidence_scope": evidence,
+        "reconstruction_policy_result": {
+            "status": (
+                "promising_but_underpowered"
+                if int(evidence["marker_contract_pass_sample_count"]) > 0
+                and int(p1["invariant_violation_count"]) == 0
+                and (p1["exact_count_accuracy"] or 0.0) >= (p0["exact_count_accuracy"] or 0.0)
+                and (mean_iou_delta is None or mean_iou_delta >= -0.02)
+                and not bool(evidence["conditioned_meets_minimum"])
+                else ("candidate_for_production_patch" if corrected_status == "candidate_for_production_patch" else "reject")
+            ),
+            "conditioned_samples": int(evidence["marker_contract_pass_sample_count"]),
+            "conditioned_gt_count_distribution": evidence["conditioned_gt_count_distribution"],
+            "p1_exact_count_delta": None if p1["exact_count_accuracy"] is None or p0["exact_count_accuracy"] is None else float((p1["exact_count_accuracy"] or 0.0) - (p0["exact_count_accuracy"] or 0.0)),
+            "p1_mean_iou_delta": mean_iou_delta,
+        },
+        "center_generalization_result": {
+            "status": center_status,
+            "marker_contract_pass_count": int(evidence["marker_contract_pass_sample_count"]),
+            "total_samples": int(evidence["total_holdout_sample_count"]),
+            "marker_contract_pass_rate": evidence["marker_contract_pass_rate"],
+        },
+        "production_activation_result": {
+            "status": production_status,
+            "reasons": production_reasons,
+        },
+        "scope_invariants": scope_invariants,
+        "checkpoint_identity": {
+            "path": checkpoint_identity["checkpoint_path"],
+            "sha256": checkpoint_identity["checkpoint_sha256"],
+            "authoritative_match": checkpoint_identity["authoritative_checkpoint_match"],
+            "iteration": checkpoint_identity["checkpoint_iteration"],
+        },
     }
 
 
@@ -488,10 +670,12 @@ def main() -> None:
 
     inventory = _inventory_holdout_samples(cfg, repo_root)
     manifest_path, manifest_meta_path = _write_holdout_manifest(out_dir, inventory)
+    manifest_metadata = json.loads(manifest_meta_path.read_text(encoding="utf-8"))
     eligible_entries = list(inventory["eligible"])
     if not eligible_entries:
         payload = {"status": "insufficient_holdout_data", "inventory": inventory}
         _write_json_atomic(out_dir / "promotion_decision.json", {"status": "insufficient_holdout_data"})
+        _write_json_atomic(out_dir / "corrected_promotion_decision.json", {"status": "insufficient_holdout_data"})
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         raise SystemExit(1)
 
@@ -500,8 +684,33 @@ def main() -> None:
     loader = _build_loader(cfg, repo_root=repo_root, split_txt=loader_split, device=device)
     model = _build_model_from_cfg(cfg, repo_root=repo_root)
     ckpt_info = _checkpoint_identity(run_dir)
-    if int(ckpt_info["checkpoint_iteration"]) != 75:
-        raise SystemExit(json.dumps({"status": "checkpoint_iteration_mismatch", **ckpt_info}, ensure_ascii=False, indent=2))
+    semantic_identity = _semantic_checkpoint_identity(cfg, repo_root)
+    hostname_info = _safe_hostname()
+    git_commit_info = _safe_git_commit(repo_root)
+    ckpt_info.update(semantic_identity)
+    ckpt_info["authoritative_checkpoint_sha256"] = AUTHORITATIVE_BEST_CHECKPOINT_SHA256
+    ckpt_info["authoritative_checkpoint_match"] = bool(
+        str(ckpt_info["checkpoint_sha256"]) == str(AUTHORITATIVE_BEST_CHECKPOINT_SHA256)
+        and int(ckpt_info["checkpoint_iteration"]) == 75
+    )
+    ckpt_info["iteration_matches_authoritative"] = bool(int(ckpt_info["checkpoint_iteration"]) == 75)
+    ckpt_info["hostname"] = hostname_info["value"]
+    ckpt_info["hostname_status"] = hostname_info["status"]
+    ckpt_info["git_commit"] = git_commit_info["value"]
+    ckpt_info["git_commit_status"] = git_commit_info["status"]
+    ckpt_info["device"] = str(device)
+    ckpt_info["manifest_sha256"] = manifest_metadata["manifest_sha256"]
+    ckpt_info["expected_manifest_sha256"] = EXPECTED_HOLDOUT_MANIFEST_SHA256
+    ckpt_info["manifest_sha_matches_expected"] = bool(
+        str(manifest_metadata["manifest_sha256"]) == str(EXPECTED_HOLDOUT_MANIFEST_SHA256)
+    )
+    ckpt_info["status"] = (
+        "ok"
+        if bool(ckpt_info["authoritative_checkpoint_match"])
+        else "checkpoint_identity_mismatch"
+    )
+    checkpoint_identity_json = {key: value for key, value in ckpt_info.items() if key != "state_dict"}
+    _write_json_atomic((out_dir / "checkpoint_identity.json").resolve(), checkpoint_identity_json)
     incompat = model.load_state_dict(ckpt_info["state_dict"], strict=False)
     missing = list(getattr(incompat, "missing_keys", [])) if incompat is not None else []
     unexpected = list(getattr(incompat, "unexpected_keys", [])) if incompat is not None else []
@@ -603,10 +812,18 @@ def main() -> None:
         policy: conditioned_results[f"{PRIMARY_THRESHOLD:.2f}"][policy]
         for policy in REQUIRED_POLICIES
     }
+    end_to_end_primary_by_policy = {
+        policy: end_to_end_results[f"{PRIMARY_THRESHOLD:.2f}"][policy]
+        for policy in REQUIRED_POLICIES
+    }
+    end_to_end_primary_by_policy["_primary_rows"] = primary_rows
     promotion = _promotion_decision(
+        total_holdout_sample_count=len(eligible_entries),
+        conditioned_primary_rows=conditioned_primary_rows,
+        end_to_end_primary_by_policy=end_to_end_primary_by_policy,
         conditioned_primary_by_policy=conditioned_primary_by_policy,
         paired_rows=paired_rows,
-        evidence_sufficient=bool(inventory["meets_minimum"]),
+        checkpoint_identity=ckpt_info,
     )
 
     invariants = {
@@ -614,6 +831,8 @@ def main() -> None:
         "secondary_thresholds": list(SECONDARY_THRESHOLDS),
         "fixed_p3_cfg": dict(FIXED_P3_CFG),
         "component_artifact_unique_samples": len(per_component_assignments["samples"]) == len({(s["sample"], s["sample_index"]) for s in per_component_assignments["samples"]}),
+        "checkpoint_identity_status": ckpt_info["status"],
+        "manifest_sha_matches_expected": ckpt_info["manifest_sha_matches_expected"],
     }
 
     summary = {
@@ -629,6 +848,7 @@ def main() -> None:
             "missing": len(inventory["missing"]),
             "evidence_level": inventory["evidence_level"],
             "gt_instance_distribution": inventory["gt_instance_distribution"],
+            "manifest_sha256": manifest_metadata["manifest_sha256"],
         },
         "locked_operating_point": {
             "checkpoint": ckpt_info["checkpoint_path"],
@@ -636,6 +856,14 @@ def main() -> None:
             "primary_threshold": float(PRIMARY_THRESHOLD),
             "saved_threshold": ckpt_info["saved_best_threshold"],
             "saved_threshold_note": "checkpoint.saved_best_threshold reflects the micro-overfit center-F1 optimum; held-out reconstruction validation keeps the authoritative policy operating point locked at 0.03.",
+            "authoritative_checkpoint_sha256": AUTHORITATIVE_BEST_CHECKPOINT_SHA256,
+            "checkpoint_sha256": ckpt_info["checkpoint_sha256"],
+            "authoritative_checkpoint_match": ckpt_info["authoritative_checkpoint_match"],
+            "semantic_checkpoint_path": ckpt_info["semantic_checkpoint_path"],
+            "semantic_checkpoint_sha256": ckpt_info["semantic_checkpoint_sha256"],
+            "hostname": ckpt_info["hostname"],
+            "device": ckpt_info["device"],
+            "git_commit": ckpt_info["git_commit"],
         },
         "end_to_end_results": end_to_end_results,
         "marker_conditioned_results": conditioned_results,
@@ -644,6 +872,7 @@ def main() -> None:
             "bootstrap_mean_iou_delta_ci95": promotion["bootstrap_mean_iou_delta_ci95"],
             "bootstrap_exact_count_delta_ci95": promotion["bootstrap_exact_count_delta_ci95"],
         },
+        "checkpoint_identity": checkpoint_identity_json,
         "promotion_decision": promotion,
     }
 
@@ -652,6 +881,7 @@ def main() -> None:
     _write_json_atomic((out_dir / "invariants.json").resolve(), invariants)
     _write_json_atomic((out_dir / "validation_summary.json").resolve(), summary)
     _write_json_atomic((out_dir / "promotion_decision.json").resolve(), promotion)
+    _write_json_atomic((out_dir / "corrected_promotion_decision.json").resolve(), promotion)
 
     worst_sample_ids = sorted({row["sample"] for row in worst_iou_rows} | {row["sample"] for row in worst_drop_rows})
     visual_dir = (out_dir / "visual_review").resolve()
@@ -699,6 +929,7 @@ def main() -> None:
                 "holdout_manifest_metadata": str(manifest_meta_path),
                 "eligible": len(eligible_entries),
                 "promotion_status": promotion["status"],
+                "checkpoint_identity_status": ckpt_info["status"],
             },
             ensure_ascii=False,
             indent=2,
