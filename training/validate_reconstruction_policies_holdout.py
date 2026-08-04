@@ -805,6 +805,7 @@ def main() -> None:
     ap.add_argument("--run-dir", type=str, default="training/runs/unetpp_effb3_centerhead_spatial_x2_2_adapter_legacy_fp32_micro")
     ap.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     ap.add_argument("--device", type=str, default="")
+    ap.add_argument("--manifest-only", action="store_true")
     ap.add_argument("--expected-manifest-identity-sha", type=str, default="")
     ap.add_argument("--allow-manifest-mismatch-for-diagnostics", action="store_true")
     args = ap.parse_args()
@@ -884,7 +885,44 @@ def main() -> None:
     )
     checkpoint_identity_json = {key: value for key, value in ckpt_info.items() if key != "state_dict"}
     _write_json_atomic((out_dir / "checkpoint_identity.json").resolve(), checkpoint_identity_json)
+    if bool(args.manifest_only):
+        manifest_only_status = (
+            "manifest_only_completed"
+            if ckpt_info["overall_authoritative_status"] == "exact_match"
+            else "manifest_only_completed_but_authoritative_identity_failed"
+        )
+        checkpoint_identity_json["diagnosis_execution_status"] = manifest_only_status
+        _write_json_atomic((out_dir / "checkpoint_identity.json").resolve(), checkpoint_identity_json)
+        print(
+            json.dumps(
+                {
+                    "status": manifest_only_status,
+                    "holdout_manifest": str(manifest_path),
+                    "holdout_manifest_identity": str(identity_manifest_path),
+                    "holdout_manifest_metadata": str(manifest_meta_path),
+                    "checkpoint_identity_status": ckpt_info["checkpoint_identity_status"],
+                    "semantic_checkpoint_identity_status": ckpt_info["semantic_checkpoint_identity_status"],
+                    "manifest_identity_status": ckpt_info["manifest_identity_status"],
+                    "overall_authoritative_status": ckpt_info["overall_authoritative_status"],
+                    "process_exit_semantics": (
+                        "exit_0_authoritative"
+                        if ckpt_info["overall_authoritative_status"] == "exact_match"
+                        else (
+                            "exit_0_non_authoritative_diagnostics"
+                            if bool(args.allow_manifest_mismatch_for_diagnostics)
+                            else "exit_nonzero_identity_failure"
+                        )
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        if ckpt_info["overall_authoritative_status"] != "exact_match" and not bool(args.allow_manifest_mismatch_for_diagnostics):
+            raise SystemExit(1)
+        return
     incompat = model.load_state_dict(ckpt_info["state_dict"], strict=False)
+    missing = list(getattr(incompat, "missing_keys", [])) if incompat is not None else []
     missing = list(getattr(incompat, "missing_keys", [])) if incompat is not None else []
     unexpected = list(getattr(incompat, "unexpected_keys", [])) if incompat is not None else []
     if unexpected or missing:
@@ -1059,7 +1097,7 @@ def main() -> None:
         },
         "checkpoint_identity": checkpoint_identity_json,
         "promotion_decision": promotion,
-        "execution_status": ckpt_info["diagnosis_execution_status"],
+        "execution_status": "completed" if ckpt_info["overall_authoritative_status"] == "exact_match" else ckpt_info["diagnosis_execution_status"],
     }
 
     _write_csv_atomic((out_dir / "per_sample_policy_metrics.csv").resolve(), per_sample_rows)
@@ -1068,6 +1106,10 @@ def main() -> None:
     _write_json_atomic((out_dir / "validation_summary.json").resolve(), summary)
     _write_json_atomic((out_dir / "promotion_decision.json").resolve(), promotion)
     _write_json_atomic((out_dir / "corrected_promotion_decision.json").resolve(), promotion)
+    checkpoint_identity_json["diagnosis_execution_status"] = (
+        "completed" if ckpt_info["overall_authoritative_status"] == "exact_match" else ckpt_info["diagnosis_execution_status"]
+    )
+    _write_json_atomic((out_dir / "checkpoint_identity.json").resolve(), checkpoint_identity_json)
 
     worst_sample_ids = sorted({row["sample"] for row in worst_iou_rows} | {row["sample"] for row in worst_drop_rows})
     visual_dir = (out_dir / "visual_review").resolve()
@@ -1120,7 +1162,16 @@ def main() -> None:
                 "semantic_checkpoint_identity_status": ckpt_info["semantic_checkpoint_identity_status"],
                 "manifest_identity_status": ckpt_info["manifest_identity_status"],
                 "overall_authoritative_status": ckpt_info["overall_authoritative_status"],
-                "diagnosis_execution_status": ckpt_info["diagnosis_execution_status"],
+                "diagnosis_execution_status": checkpoint_identity_json["diagnosis_execution_status"],
+                "process_exit_semantics": (
+                    "exit_0_authoritative"
+                    if ckpt_info["overall_authoritative_status"] == "exact_match"
+                    else (
+                        "exit_0_non_authoritative_diagnostics"
+                        if bool(args.allow_manifest_mismatch_for_diagnostics)
+                        else "exit_nonzero_identity_failure"
+                    )
+                ),
             },
             ensure_ascii=False,
             indent=2,

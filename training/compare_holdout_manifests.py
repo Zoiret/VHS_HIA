@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -41,6 +42,11 @@ def _row_key(row: dict) -> tuple:
 
 def _row_without_index(row: dict) -> dict:
     return {key: value for key, value in row.items() if key != "sample_index"}
+
+
+def _canonical_sha(rows: list[dict]) -> str:
+    text = "".join(json.dumps(_row_without_index(row), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n" for row in rows)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _compare_rows(local_rows: list[dict], server_rows: list[dict]) -> dict:
@@ -98,8 +104,11 @@ def _compare_rows(local_rows: list[dict], server_rows: list[dict]) -> dict:
             _duplicates(server_rows),
         ]
     )
-    if same_identity:
-        status = "exact_match"
+    content_hash_differences = image_hash_diffs + semantic_hash_diffs + instance_hash_diffs + center_hash_diffs
+    if same_identity and not ordering_only:
+        status = "exact_content_match"
+    elif same_identity:
+        status = "ordering_only_difference"
     elif not image_hash_diffs and not semantic_hash_diffs and not instance_hash_diffs and not center_hash_diffs:
         status = "legacy_path_dependent_hash_mismatch"
     else:
@@ -107,12 +116,19 @@ def _compare_rows(local_rows: list[dict], server_rows: list[dict]) -> dict:
     return {
         "status": status,
         "same_canonical_identity": bool(same_identity),
+        "canonical_sha": _canonical_sha(local_rows) if same_identity else None,
+        "local_samples": int(len(local_rows)),
+        "server_samples": int(len(server_rows)),
+        "missing_local": sorted(server_samples - local_samples),
+        "missing_server": sorted(local_samples - server_samples),
         "sample_ids_missing_locally": sorted(server_samples - local_samples),
         "sample_ids_missing_on_server": sorted(local_samples - server_samples),
         "duplicate_samples": {
             "local": _duplicates(local_rows),
             "server": _duplicates(server_rows),
         },
+        "path_differences": relpath_diffs,
+        "content_hash_differences": content_hash_differences,
         "split_differences": split_diffs,
         "gt_count_differences": gt_count_diffs,
         "relative_path_differences": relpath_diffs,

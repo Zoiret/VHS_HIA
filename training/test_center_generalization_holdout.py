@@ -96,6 +96,10 @@ class TestCenterGeneralizationHoldout(unittest.TestCase):
         self.assertTrue(mod.PRODUCTION_FILES_UNCHANGED)
         self.assertIn("analysis", mod.DEFAULT_OUTPUT_DIR)
 
+    def test_manifest_only_support_exists(self):
+        mod = self._mod()
+        self.assertIn("--manifest-only", Path(mod.__file__).read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -168,6 +168,33 @@ class TestHoldoutManifestIdentity(unittest.TestCase):
         self.assertFalse(diff["same_canonical_identity"])
         self.assertEqual(len(diff["gt_count_differences"]), 1)
 
+    def test_compare_utility_detects_identical_manifests_as_exact_content_match(self):
+        mod = self._compare_mod()
+        rows = [
+            {
+                "sample": "a",
+                "sample_index": 0,
+                "split": "test",
+                "gt_instance_count": 3,
+                "image_relative_path": "images/a.png",
+                "semantic_gt_relative_path": "semantic_masks/a.png",
+                "instance_gt_relative_path": "instance_masks/a.png",
+                "center_gt_relative_path": "center_maps/a.png",
+                "image_sha256": "1",
+                "semantic_gt_sha256": "2",
+                "instance_gt_sha256": "3",
+                "center_gt_sha256": "4",
+            }
+        ]
+        diff = mod._compare_rows(rows, [dict(rows[0])])
+        self.assertEqual(diff["status"], "exact_content_match")
+        self.assertTrue(diff["same_canonical_identity"])
+
+    def test_expected_sha_unset_cannot_produce_authoritative_exact_match(self):
+        mod = self._holdout_mod()
+        status = mod._manifest_identity_status(actual_sha="abc", expected_sha=None, unique_sample_count=2, row_count=2)
+        self.assertEqual(status, "expected_manifest_identity_sha_unset")
+
 
 if __name__ == "__main__":
     unittest.main()
