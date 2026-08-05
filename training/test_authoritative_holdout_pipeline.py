@@ -36,6 +36,10 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
             else:
                 path.write_text("x", encoding="utf-8")
 
+    def _populate_packaging_support_files(self, out: Path) -> None:
+        (out / "artifact_integrity_report.json").write_text(json.dumps({"status": "passed"}), encoding="utf-8")
+        (out / "files_to_provide.txt").write_text("FILES TO PROVIDE:\n1. bundle\n2. checksum\n", encoding="utf-8")
+
     def test_stage_order(self):
         mod = self._mod()
         order = []
@@ -239,17 +243,12 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
         mod = self._mod()
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
-            for name in ("pipeline_run_summary.json", "pipeline.log", "artifact_index.json", "files_to_provide.txt"):
-                (out / name).write_text("x", encoding="utf-8")
+            self._populate_required_artifacts(mod, out)
+            self._populate_packaging_support_files(out)
+            (out / "pipeline_run_summary.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
             (out / "bad_checkpoint.pth").write_text("secret", encoding="utf-8")
-            artifact_index = [
-                {"relative_path": "pipeline_run_summary.json"},
-                {"relative_path": "pipeline.log"},
-                {"relative_path": "artifact_index.json"},
-                {"relative_path": "files_to_provide.txt"},
-                {"relative_path": "bad_checkpoint.pth"},
-            ]
-            bundle, _ = mod._bundle_review(out, artifact_index=artifact_index, include_visual_review=False)
+            mod._atomic_write_json(out / "artifact_index.json", {"artifacts": mod._build_artifact_index(out, include_visual_review=False)})
+            bundle, _ = mod._bundle_review(out, include_visual_review=False)
             with tarfile.open(bundle, "r:gz") as tar:
                 self.assertNotIn("bad_checkpoint.pth", tar.getnames())
 
@@ -257,19 +256,18 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
         mod = self._mod()
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
-            for name in ("pipeline_run_summary.json", "pipeline.log", "artifact_index.json", "files_to_provide.txt"):
-                (out / name).write_text("x", encoding="utf-8")
-            artifact_index = [
-                {"relative_path": "pipeline_run_summary.json"},
-                {"relative_path": "pipeline.log"},
-                {"relative_path": "artifact_index.json"},
-                {"relative_path": "files_to_provide.txt"},
-            ]
-            bundle, _ = mod._bundle_review(out, artifact_index=artifact_index, include_visual_review=False)
+            self._populate_required_artifacts(mod, out)
+            self._populate_packaging_support_files(out)
+            (out / "pipeline_run_summary.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+            (out / "artifact_index.json").write_text(json.dumps({"artifacts": []}), encoding="utf-8")
+            bundle, _ = mod._bundle_review(out, include_visual_review=False)
             with tarfile.open(bundle, "r:gz") as tar:
                 names = set(tar.getnames())
             self.assertIn("pipeline_run_summary.json", names)
             self.assertIn("pipeline.log", names)
+            self.assertIn("artifact_integrity_report.json", names)
+            self.assertIn("artifact_index.json", names)
+            self.assertIn("files_to_provide.txt", names)
 
     def test_files_to_provide_printed_on_success(self):
         mod = self._mod()
@@ -568,6 +566,148 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
                     mod.main()
                 self.assertEqual(cm.exception.code, 0)
                 bundle_mock.assert_called_once()
+
+    def test_bundle_contains_final_success_summary(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self._populate_required_artifacts(mod, out)
+            self._populate_packaging_support_files(out)
+            summary = {
+                "status": "success",
+                "failed_stage": None,
+                "failure_reason": None,
+                "artifact_bundle": str((out / "authoritative_holdout_review_bundle.tar.gz").resolve()),
+                "files_to_provide": [
+                    str((out / "authoritative_holdout_review_bundle.tar.gz").resolve()),
+                    str((out / "authoritative_holdout_review_bundle.tar.gz.sha256").resolve()),
+                ],
+                "authoritative_status": {"overall": "exact_match"},
+                "bottleneck_status": "mixed_center_and_semantic_failure",
+                "production_activation": "blocked",
+                "training_launched": False,
+                "production_changed": False,
+            }
+            (out / "pipeline_run_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            artifact_index = mod._build_artifact_index(out, include_visual_review=False)
+            mod._atomic_write_json(out / "artifact_index.json", {"artifacts": artifact_index})
+            bundle, _ = mod._bundle_review(out, include_visual_review=False)
+            with tarfile.open(bundle, "r:gz") as tar:
+                payload = json.loads(tar.extractfile("pipeline_run_summary.json").read().decode("utf-8"))
+            self.assertEqual(payload["status"], "success")
+            self.assertTrue(payload["artifact_bundle"])
+            self.assertTrue(payload["files_to_provide"])
+
+    def test_artifact_index_excludes_bundle_and_checksum(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self._populate_required_artifacts(mod, out)
+            self._populate_packaging_support_files(out)
+            (out / "pipeline_run_summary.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+            index = mod._build_artifact_index(out, include_visual_review=False)
+            rels = {row["relative_path"] for row in index}
+            self.assertNotIn("authoritative_holdout_review_bundle.tar.gz", rels)
+            self.assertNotIn("authoritative_holdout_review_bundle.tar.gz.sha256", rels)
+            self.assertNotIn("artifact_index.json", rels)
+
+    def test_package_existing_mode_never_launches_inference(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "training" / "analysis" / "out"
+            out.mkdir(parents=True, exist_ok=True)
+            args = SimpleNamespace(
+                config="cfg",
+                run_dir="training/analysis/run",
+                output_dir=str(out),
+                expected_manifest_identity_sha="sha",
+                expected_center_checkpoint_sha="center",
+                expected_semantic_checkpoint_sha="semantic",
+                device="cpu",
+                clean_output=False,
+                skip_tests=False,
+                include_visual_review=False,
+                package_existing_output=True,
+            )
+            with mock.patch.object(mod, "_parse_args", return_value=args), \
+                mock.patch.object(mod, "_safe_output_dir"), \
+                mock.patch.object(mod, "_repo_preflight", return_value={"git": {"commit": "abc", "branch": "main", "tracked_tree_clean": True}, "environment": {"hostname": "host", "device": "cpu", "python": "3.12", "torch": "2.x", "cuda_available": False}}), \
+                mock.patch.object(mod, "_validate_existing_authoritative_output", return_value={"checkpoint_identity": {"checkpoint_sha256": "csha", "semantic_checkpoint_sha256": "ssha", "checkpoint_identity_status": "exact_match", "semantic_checkpoint_identity_status": "exact_match", "manifest_identity_status": "exact_match", "diagnosis_execution_status": "completed", "overall_authoritative_status": "exact_match"}, "manifest_metadata": {"canonical_identity_sha256": "sha", "manifest_row_count": 106, "unique_sample_count": 106, "split_counts": {"test": 53, "val": 53}, "gt_instance_distribution": {"1": 15, "2": 37, "3": 54}}, "bottleneck_status": "mixed"}), \
+                mock.patch.object(mod, "_inspect_artifacts", return_value=({"status": "passed", "required": [], "optional": [], "generated_only_by_another_pipeline": [], "missing_required": [], "malformed": []}, [], [], [])), \
+                mock.patch.object(mod, "_build_artifact_index", return_value=[]), \
+                mock.patch.object(mod, "_bundle_review", return_value=(out / "bundle.tar.gz", out / "bundle.tar.gz.sha256")), \
+                mock.patch.object(mod, "_run_manifest_stage") as manifest_mock, \
+                mock.patch.object(mod, "_run_diagnosis_stage") as diagnosis_mock:
+                with self.assertRaises(SystemExit) as cm:
+                    mod.main()
+                self.assertEqual(cm.exception.code, 0)
+                manifest_mock.assert_not_called()
+                diagnosis_mock.assert_not_called()
+
+    def test_package_existing_mode_rejects_non_authoritative_output(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "training" / "analysis" / "out"
+            out.mkdir(parents=True, exist_ok=True)
+            args = SimpleNamespace(
+                config="cfg",
+                run_dir="training/analysis/run",
+                output_dir=str(out),
+                expected_manifest_identity_sha="sha",
+                expected_center_checkpoint_sha="center",
+                expected_semantic_checkpoint_sha="semantic",
+                device="cpu",
+                clean_output=False,
+                skip_tests=False,
+                include_visual_review=False,
+                package_existing_output=True,
+            )
+            with mock.patch.object(mod, "_parse_args", return_value=args), \
+                mock.patch.object(mod, "_safe_output_dir"), \
+                mock.patch.object(mod, "_repo_preflight", return_value={"git": {"commit": "abc", "branch": "main", "tracked_tree_clean": True}, "environment": {"hostname": "host", "device": "cpu", "python": "3.12", "torch": "2.x", "cuda_available": False}}), \
+                mock.patch.object(mod, "_validate_existing_authoritative_output", side_effect=mod.PipelineFailure(stage="bundle_repackaging", reason="bad", exit_code=mod.EXIT_AUTHORITATIVE_STATUS_MISMATCH)):
+                with self.assertRaises(SystemExit) as cm:
+                    mod.main()
+                self.assertEqual(cm.exception.code, mod.EXIT_AUTHORITATIVE_STATUS_MISMATCH)
+
+    def test_temporary_archive_is_atomically_renamed(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self._populate_required_artifacts(mod, out)
+            self._populate_packaging_support_files(out)
+            (out / "pipeline_run_summary.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+            mod._atomic_write_json(out / "artifact_index.json", {"artifacts": mod._build_artifact_index(out, include_visual_review=False)})
+            bundle, _ = mod._bundle_review(out, include_visual_review=False)
+            self.assertTrue(bundle.exists())
+            self.assertFalse((out / "authoritative_holdout_review_bundle.tar.gz.tmp").exists())
+
+    def test_bundle_checksum_matches_generated_archive(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self._populate_required_artifacts(mod, out)
+            self._populate_packaging_support_files(out)
+            (out / "pipeline_run_summary.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+            mod._atomic_write_json(out / "artifact_index.json", {"artifacts": mod._build_artifact_index(out, include_visual_review=False)})
+            bundle, checksum = mod._bundle_review(out, include_visual_review=False)
+            checksum_text = checksum.read_text(encoding="utf-8").strip()
+            self.assertEqual(checksum_text, f"{mod._sha256_file(bundle)}  {bundle.name}")
+
+    def test_bundle_content_ordering_remains_deterministic(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self._populate_required_artifacts(mod, out)
+            self._populate_packaging_support_files(out)
+            (out / "pipeline_run_summary.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+            mod._atomic_write_json(out / "artifact_index.json", {"artifacts": mod._build_artifact_index(out, include_visual_review=False)})
+            bundle, _ = mod._bundle_review(out, include_visual_review=False)
+            with tarfile.open(bundle, "r:gz") as tar:
+                names = tar.getnames()
+            self.assertEqual(names, sorted(names))
 
 
 if __name__ == "__main__":

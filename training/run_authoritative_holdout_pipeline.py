@@ -127,6 +127,14 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8", newline="\n") as tmp:
+        tmp.write(text)
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
+
+
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -562,27 +570,74 @@ def _write_files_to_provide(path: Path, files: list[str], optional_large: list[s
         lines.append("OPTIONAL LARGE FILES:")
         for idx, item in enumerate(optional_large, start=1):
             lines.append(f"{idx}. {item}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    _atomic_write_text(path, "\n".join(lines) + "\n")
+
+def _bundle_paths(output_dir: Path) -> tuple[Path, Path]:
+    return (
+        (output_dir / "authoritative_holdout_review_bundle.tar.gz").resolve(),
+        (output_dir / "authoritative_holdout_review_bundle.tar.gz.sha256").resolve(),
+    )
 
 
-def _bundle_review(output_dir: Path, *, artifact_index: list[dict[str, Any]], include_visual_review: bool) -> tuple[Path, Path]:
-    bundle_path = (output_dir / "authoritative_holdout_review_bundle.tar.gz").resolve()
-    checksum_path = (output_dir / "authoritative_holdout_review_bundle.tar.gz.sha256").resolve()
-    excluded_suffixes = {".pth", ".pt", ".tar"}
-    include_paths = []
-    for entry in artifact_index:
-        rel = entry["relative_path"]
-        if rel == "visual_review":
-            continue
-        include_paths.append((output_dir / rel).resolve())
+def _payload_files_for_bundle(output_dir: Path, *, include_visual_review: bool) -> tuple[list[Path], list[str]]:
+    payload = [
+        (output_dir / "pipeline_run_summary.json").resolve(),
+        (output_dir / "pipeline.log").resolve(),
+        (output_dir / "artifact_integrity_report.json").resolve(),
+        (output_dir / "artifact_index.json").resolve(),
+        (output_dir / "files_to_provide.txt").resolve(),
+    ]
+    payload.extend((output_dir / rel).resolve() for rel in REQUIRED_ARTIFACTS.keys() if rel not in {"pipeline_run_summary.json", "pipeline.log"})
+    for rel in OPTIONAL_ARTIFACTS.keys():
+        path = (output_dir / rel).resolve()
+        if path.exists() and path.is_file():
+            payload.append(path)
     visual_dir = (output_dir / "visual_review").resolve()
+    optional_large: list[str] = []
     if include_visual_review and visual_dir.exists():
-        include_paths.extend(sorted(p.resolve() for p in visual_dir.rglob("*") if p.is_file()))
-    with tarfile.open(bundle_path, "w:gz") as tar:
-        for path in sorted(include_paths, key=lambda p: str(p.relative_to(output_dir)).replace("\\", "/")):
+        payload.extend(sorted(p.resolve() for p in visual_dir.rglob("*") if p.is_file()))
+        optional_large.append(str(visual_dir))
+    else:
+        index_path = (output_dir / "visual_review_index.txt").resolve()
+        if index_path.exists():
+            payload.append(index_path)
+        if visual_dir.exists():
+            optional_large.append(str(visual_dir))
+    unique_payload = sorted({path.resolve() for path in payload if path.exists() and path.is_file()}, key=lambda p: str(p.relative_to(output_dir)).replace("\\", "/"))
+    return unique_payload, optional_large
+
+
+def _build_artifact_index(output_dir: Path, *, include_visual_review: bool) -> list[dict[str, Any]]:
+    payload_files, _optional_large = _payload_files_for_bundle(output_dir, include_visual_review=include_visual_review)
+    excluded_names = {"artifact_index.json", "authoritative_holdout_review_bundle.tar.gz", "authoritative_holdout_review_bundle.tar.gz.sha256"}
+    index: list[dict[str, Any]] = []
+    for path in payload_files:
+        rel = str(path.relative_to(output_dir)).replace("\\", "/")
+        if rel in excluded_names:
+            continue
+        index.append(
+            {
+                "relative_path": rel,
+                "size_bytes": int(path.stat().st_size),
+                "sha256": _sha256_file(path),
+                "required_for_review": True,
+                "description": "Bundle payload file",
+            }
+        )
+    return index
+
+
+def _bundle_review(output_dir: Path, *, include_visual_review: bool, bundle_path: Path | None = None, checksum_path: Path | None = None) -> tuple[Path, Path]:
+    bundle_path, checksum_path = (bundle_path, checksum_path) if bundle_path and checksum_path else _bundle_paths(output_dir)
+    excluded_suffixes = {".pth", ".pt", ".tar"}
+    include_paths, _optional_large = _payload_files_for_bundle(output_dir, include_visual_review=include_visual_review)
+    expected_names = [str(path.relative_to(output_dir)).replace("\\", "/") for path in include_paths if path.suffix not in excluded_suffixes]
+    tmp_bundle = bundle_path.with_name(bundle_path.name + ".tmp")
+    if tmp_bundle.exists():
+        tmp_bundle.unlink()
+    with tarfile.open(tmp_bundle, "w:gz") as tar:
+        for path in include_paths:
             if path.suffix in excluded_suffixes:
-                continue
-            if not path.is_file():
                 continue
             arcname = str(path.relative_to(output_dir)).replace("\\", "/")
             info = tar.gettarinfo(str(path), arcname=arcname)
@@ -593,8 +648,38 @@ def _bundle_review(output_dir: Path, *, artifact_index: list[dict[str, Any]], in
             info.gname = "root"
             with path.open("rb") as fh:
                 tar.addfile(info, fh)
-    checksum_path.write_text(f"{_sha256_file(bundle_path)}  {bundle_path.name}\n", encoding="utf-8", newline="\n")
+    with tarfile.open(tmp_bundle, "r:gz") as tar:
+        actual_names = tar.getnames()
+    if actual_names != expected_names:
+        raise PipelineFailure(stage="bundle_creation", reason=f"Bundle content mismatch: expected {expected_names} got {actual_names}", exit_code=EXIT_BUNDLE_CREATION_FAILED)
+    tmp_bundle.replace(bundle_path)
+    _atomic_write_text(checksum_path, f"{_sha256_file(bundle_path)}  {bundle_path.name}\n")
     return bundle_path, checksum_path
+
+
+def _validate_existing_authoritative_output(output_dir: Path, expected_sha: str) -> dict[str, Any]:
+    checkpoint_identity = _read_json((output_dir / "checkpoint_identity.json").resolve())
+    metadata = _read_json((output_dir / "holdout_manifest_metadata.json").resolve())
+    if str(checkpoint_identity.get("checkpoint_identity_status")) != "exact_match":
+        raise PipelineFailure(stage="bundle_repackaging", reason="Existing output checkpoint identity is not exact_match", exit_code=EXIT_AUTHORITATIVE_STATUS_MISMATCH)
+    if str(checkpoint_identity.get("semantic_checkpoint_identity_status")) != "exact_match":
+        raise PipelineFailure(stage="bundle_repackaging", reason="Existing output semantic checkpoint identity is not exact_match", exit_code=EXIT_AUTHORITATIVE_STATUS_MISMATCH)
+    if str(checkpoint_identity.get("manifest_identity_status")) != "exact_match":
+        raise PipelineFailure(stage="bundle_repackaging", reason="Existing output manifest identity is not exact_match", exit_code=EXIT_AUTHORITATIVE_STATUS_MISMATCH)
+    if str(checkpoint_identity.get("overall_authoritative_status")) != "exact_match":
+        raise PipelineFailure(stage="bundle_repackaging", reason="Existing output overall authoritative status is not exact_match", exit_code=EXIT_AUTHORITATIVE_STATUS_MISMATCH)
+    if str(checkpoint_identity.get("diagnosis_execution_status")) != "completed":
+        raise PipelineFailure(stage="bundle_repackaging", reason="Existing output diagnosis status is not completed", exit_code=EXIT_AUTHORITATIVE_STATUS_MISMATCH)
+    if str(metadata.get("canonical_identity_sha256")) != str(expected_sha):
+        raise PipelineFailure(stage="bundle_repackaging", reason="Existing output manifest SHA mismatch", exit_code=EXIT_MANIFEST_IDENTITY_MISMATCH)
+    if int(metadata.get("manifest_row_count", 0)) != 106 or int(metadata.get("unique_sample_count", 0)) != 106:
+        raise PipelineFailure(stage="bundle_repackaging", reason="Existing output sample count mismatch", exit_code=EXIT_MANIFEST_GENERATION_FAILED)
+    bottleneck = _read_json((output_dir / "bottleneck_decision.json").resolve())
+    return {
+        "checkpoint_identity": checkpoint_identity,
+        "manifest_metadata": metadata,
+        "bottleneck_status": str(bottleneck["status"]),
+    }
 
 
 def _final_success_block(summary: dict[str, Any], bundle_path: Path, checksum_path: Path, optional_large: list[str]) -> str:
@@ -672,14 +757,18 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--clean-output", action="store_true")
     ap.add_argument("--skip-tests", action="store_true")
     ap.add_argument("--include-visual-review", action="store_true")
+    ap.add_argument("--package-existing-output", action="store_true")
     return ap.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    package_existing_output = bool(getattr(args, "package_existing_output", False))
     repo_root = Path(__file__).resolve().parents[1]
     output_dir = (repo_root / args.output_dir).resolve()
     _safe_output_dir(repo_root, output_dir)
+    if package_existing_output and args.clean_output:
+        raise SystemExit(EXIT_REPOSITORY_PREFLIGHT_FAILED)
     if args.clean_output:
         _clean_output_dir(repo_root, output_dir)
     else:
@@ -712,6 +801,66 @@ def main() -> None:
         summary["git"] = {k: v for k, v in preflight["git"].items() if k != "status_porcelain"}
         summary["environment"] = preflight["environment"]
         _append_stage(summary, stage="repository_preflight", status="passed", exit_code=0, duration_sec=time.perf_counter() - stage_start, details={"requested_device": args.device})
+        if package_existing_output:
+            logger.log("Stage existing-output validation")
+            existing = _validate_existing_authoritative_output(output_dir, args.expected_manifest_identity_sha)
+            checkpoint_identity = existing["checkpoint_identity"]
+            metadata = existing["manifest_metadata"]
+            summary["identity"] = {
+                "center_checkpoint_sha": checkpoint_identity.get("checkpoint_sha256") or checkpoint_identity.get("center_checkpoint_sha") or checkpoint_identity.get("center_checkpoint_sha256"),
+                "semantic_checkpoint_sha": checkpoint_identity.get("semantic_checkpoint_sha256"),
+                "manifest_identity_sha": metadata["canonical_identity_sha256"],
+                "manifest_identity_match": True,
+            }
+            summary["dataset"] = {
+                "samples": int(metadata["manifest_row_count"]),
+                "unique_samples": int(metadata["unique_sample_count"]),
+                "split_counts": metadata["split_counts"],
+                "gt_count_distribution": metadata["gt_instance_distribution"],
+            }
+            summary["authoritative_status"] = {
+                "checkpoint": checkpoint_identity["checkpoint_identity_status"],
+                "semantic_checkpoint": checkpoint_identity["semantic_checkpoint_identity_status"],
+                "manifest": checkpoint_identity["manifest_identity_status"],
+                "diagnosis": checkpoint_identity["diagnosis_execution_status"],
+                "overall": checkpoint_identity["overall_authoritative_status"],
+            }
+            summary["bottleneck_status"] = existing["bottleneck_status"]
+            summary["production_activation"] = "blocked"
+            artifact_report, _existing_index, _existing_files, optional_large = _inspect_artifacts(output_dir, include_visual_review=args.include_visual_review)
+            _atomic_write_json((output_dir / "artifact_integrity_report.json").resolve(), artifact_report)
+            if artifact_report["status"] != "passed":
+                artifact_failure_details = {
+                    "missing_required_files": list(artifact_report["missing_required"]),
+                    "malformed": list(artifact_report["malformed"]),
+                }
+                _append_stage(summary, stage="artifact_integrity", status="failed", exit_code=EXIT_ARTIFACT_INTEGRITY_FAILED, duration_sec=0.0, details=artifact_failure_details)
+                _atomic_write_json((output_dir / "pipeline_run_summary.json").resolve(), summary)
+                summary["files_to_provide"] = _failure_files_to_provide(output_dir)
+                _atomic_write_json((output_dir / "pipeline_run_summary.json").resolve(), summary)
+                raise PipelineFailure(stage="artifact_integrity", reason="Artifact integrity failed", exit_code=EXIT_ARTIFACT_INTEGRITY_FAILED)
+            _append_stage(summary, stage="artifact_integrity", status="passed", exit_code=0, duration_sec=0.0, details={"missing_required_files": [], "malformed": []})
+            bundle_path, checksum_path = _bundle_paths(output_dir)
+            _append_stage(summary, stage="bundle_repackaging", status="passed", exit_code=0, duration_sec=0.0, details={"bundle_path": str(bundle_path)})
+            summary["status"] = "success"
+            summary["failed_stage"] = None
+            summary["failure_reason"] = None
+            summary["artifact_bundle"] = str(bundle_path)
+            summary["files_to_provide"] = [str(bundle_path), str(checksum_path)]
+            _write_files_to_provide((output_dir / "files_to_provide.txt").resolve(), summary["files_to_provide"], optional_large)
+            _atomic_write_json((output_dir / "pipeline_run_summary.json").resolve(), summary)
+            artifact_index = _build_artifact_index(output_dir, include_visual_review=args.include_visual_review)
+            _atomic_write_json(
+                (output_dir / "artifact_index.json").resolve(),
+                {
+                    "artifacts": artifact_index,
+                    "optional": artifact_report["optional"],
+                    "generated_only_by_another_pipeline": artifact_report["generated_only_by_another_pipeline"],
+                },
+            )
+            bundle_path, checksum_path = _bundle_review(output_dir, include_visual_review=args.include_visual_review, bundle_path=bundle_path, checksum_path=checksum_path)
+            logger.write(_final_success_block(summary, bundle_path, checksum_path, optional_large))
+            raise SystemExit(EXIT_SUCCESS)
         if not args.skip_tests:
             logger.log("Stage 1: tests")
             stage = _run_tests(repo_root, logger)
@@ -767,18 +916,9 @@ def main() -> None:
         }
         summary["bottleneck_status"] = stage.details["bottleneck_status"]
         summary["production_activation"] = "blocked"
-        _atomic_write_json((out_dir / "pipeline_run_summary.json").resolve(), summary)
         logger.log("Stage 6: artifact integrity")
         artifact_report, artifact_index, files_to_provide, optional_large = _inspect_artifacts(out_dir, include_visual_review=args.include_visual_review)
         _atomic_write_json((out_dir / "artifact_integrity_report.json").resolve(), artifact_report)
-        _atomic_write_json(
-            (out_dir / "artifact_index.json").resolve(),
-            {
-                "artifacts": artifact_index,
-                "optional": artifact_report["optional"],
-                "generated_only_by_another_pipeline": artifact_report["generated_only_by_another_pipeline"],
-            },
-        )
         if artifact_report["status"] != "passed":
             artifact_failure_details = {
                 "missing_required_files": list(artifact_report["missing_required"]),
@@ -789,15 +929,25 @@ def main() -> None:
             _atomic_write_json((out_dir / "pipeline_run_summary.json").resolve(), summary)
             raise PipelineFailure(stage="artifact_integrity", reason="Artifact integrity failed", exit_code=EXIT_ARTIFACT_INTEGRITY_FAILED)
         _append_stage(summary, stage="artifact_integrity", status="passed", exit_code=0, duration_sec=0.0, details={"missing_required_files": [], "malformed": []})
-        _write_files_to_provide((out_dir / "files_to_provide.txt").resolve(), files_to_provide, optional_large)
-        summary["files_to_provide"] = files_to_provide
-        bundle_path, checksum_path = _bundle_review(out_dir, artifact_index=artifact_index, include_visual_review=args.include_visual_review)
-        summary["artifact_bundle"] = str(bundle_path)
-        summary["files_to_provide"] = [str(bundle_path), str(checksum_path)]
+        bundle_path, checksum_path = _bundle_paths(out_dir)
+        _append_stage(summary, stage="bundle_creation", status="passed", exit_code=0, duration_sec=0.0, details={"bundle_path": str(bundle_path)})
         summary["status"] = "success"
         summary["failed_stage"] = None
         summary["failure_reason"] = None
+        summary["artifact_bundle"] = str(bundle_path)
+        summary["files_to_provide"] = [str(bundle_path), str(checksum_path)]
+        _write_files_to_provide((out_dir / "files_to_provide.txt").resolve(), summary["files_to_provide"], optional_large)
         _atomic_write_json((out_dir / "pipeline_run_summary.json").resolve(), summary)
+        artifact_index = _build_artifact_index(out_dir, include_visual_review=args.include_visual_review)
+        _atomic_write_json(
+            (out_dir / "artifact_index.json").resolve(),
+            {
+                "artifacts": artifact_index,
+                "optional": artifact_report["optional"],
+                "generated_only_by_another_pipeline": artifact_report["generated_only_by_another_pipeline"],
+            },
+        )
+        bundle_path, checksum_path = _bundle_review(out_dir, include_visual_review=args.include_visual_review, bundle_path=bundle_path, checksum_path=checksum_path)
         logger.write(_final_success_block(summary, bundle_path, checksum_path, optional_large))
         exit_code = EXIT_SUCCESS
     except PipelineFailure as exc:
