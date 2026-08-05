@@ -50,21 +50,24 @@ REQUIRED_ARTIFACTS: dict[str, dict[str, Any]] = {
     "holdout_manifest_identity.jsonl": {"type": "jsonl", "required_for_review": True, "description": "Canonical identity manifest"},
     "holdout_manifest_metadata.json": {"type": "json", "required_for_review": True, "description": "Manifest metadata and counts"},
     "checkpoint_identity.json": {"type": "json", "required_for_review": True, "description": "Checkpoint and manifest identity statuses"},
-    "corrected_promotion_decision.json": {"type": "json", "required_for_review": True, "description": "Corrected promotion gate result"},
     "bottleneck_decision.json": {"type": "json", "required_for_review": True, "description": "Bottleneck classification"},
     "oracle_scope_summary.json": {"type": "json", "required_for_review": True, "description": "End-to-end and oracle scope summary"},
     "full_oracle_invariants.json": {"type": "json", "required_for_review": True, "description": "Full-oracle invariant summary"},
     "center_threshold_summary.csv": {"type": "csv", "required_for_review": True, "description": "Center threshold sweep summary"},
     "per_sample_center_diagnostics.csv": {"type": "csv", "required_for_review": True, "description": "Per-sample center diagnostics"},
     "p0_gt_count_confusion.csv": {"type": "csv", "required_for_review": True, "description": "P0 count confusion table"},
-    "semantic_failure_summary.json": {"type": "json", "required_for_review": True, "description": "Semantic failure aggregate summary"},
-    "per_sample_semantic_diagnostics.csv": {"type": "csv", "required_for_review": True, "description": "Per-sample semantic diagnostics"},
 }
 OPTIONAL_ARTIFACTS: dict[str, dict[str, Any]] = {
     "end_to_end_vs_center_oracle.csv": {"type": "csv", "required_for_review": True, "description": "End-to-end vs center-oracle deltas"},
     "per_sample_oracle_policy_metrics.csv": {"type": "csv", "required_for_review": True, "description": "Per-sample oracle policy metrics"},
     "worst_center_failures.csv": {"type": "csv", "required_for_review": True, "description": "Worst center failures"},
     "visual_review": {"type": "dir", "required_for_review": False, "description": "Diagnostic visual panels"},
+}
+GENERATED_BY_OTHER_PIPELINES: dict[str, dict[str, Any]] = {
+    "promotion_decision.json": {"producer": "training/validate_reconstruction_policies_holdout.py", "description": "Holdout validation promotion decision"},
+    "corrected_promotion_decision.json": {"producer": "training/validate_reconstruction_policies_holdout.py", "description": "Corrected holdout validation promotion decision"},
+    "semantic_failure_summary.json": {"producer": None, "description": "No current producer in authoritative diagnosis path"},
+    "per_sample_semantic_diagnostics.csv": {"producer": None, "description": "No current producer in authoritative diagnosis path"},
 }
 EXIT_SUCCESS = 0
 EXIT_REPOSITORY_PREFLIGHT_FAILED = 10
@@ -395,24 +398,57 @@ def _validate_jsonl_file(path: Path) -> list[dict]:
     return rows
 
 
-def _artifact_index(output_dir: Path, *, include_visual_review: bool) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+def _inspect_artifacts(output_dir: Path, *, include_visual_review: bool) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], list[str]]:
+    report: dict[str, Any] = {
+        "status": "passed",
+        "required": [],
+        "optional": [],
+        "generated_only_by_another_pipeline": [],
+        "missing_required": [],
+        "malformed": [],
+    }
     index: list[dict[str, Any]] = []
     files_to_provide: list[str] = []
     optional_large: list[str] = []
     for rel_path, spec in REQUIRED_ARTIFACTS.items():
         path = (output_dir / rel_path).resolve()
+        record = {
+            "path": str(path),
+            "relative_path": rel_path,
+            "exists": bool(path.exists()),
+            "valid": False,
+            "status": None,
+        }
         if not path.exists():
-            raise PipelineFailure(stage="artifact_integrity", reason=f"Missing required artifact: {rel_path}", exit_code=EXIT_ARTIFACT_INTEGRITY_FAILED)
+            record["status"] = "missing_required"
+            report["missing_required"].append(rel_path)
+            report["required"].append(record)
+            continue
         if not path.is_file():
-            raise PipelineFailure(stage="artifact_integrity", reason=f"Required artifact is not a file: {rel_path}", exit_code=EXIT_ARTIFACT_INTEGRITY_FAILED)
+            record["status"] = "malformed"
+            report["malformed"].append({"path": rel_path, "reason": "not_a_regular_file"})
+            report["required"].append(record)
+            continue
         if path.stat().st_size <= 0:
-            raise PipelineFailure(stage="artifact_integrity", reason=f"Required artifact is empty: {rel_path}", exit_code=EXIT_ARTIFACT_INTEGRITY_FAILED)
-        if spec["type"] == "json":
-            _read_json(path)
-        elif spec["type"] == "csv":
-            _validate_csv_file(path)
-        elif spec["type"] == "jsonl":
-            _validate_jsonl_file(path)
+            record["status"] = "malformed"
+            report["malformed"].append({"path": rel_path, "reason": "empty_file"})
+            report["required"].append(record)
+            continue
+        try:
+            if spec["type"] == "json":
+                _read_json(path)
+            elif spec["type"] == "csv":
+                _validate_csv_file(path)
+            elif spec["type"] == "jsonl":
+                _validate_jsonl_file(path)
+        except Exception as exc:  # noqa: BLE001
+            record["status"] = "malformed"
+            report["malformed"].append({"path": rel_path, "reason": str(exc)})
+            report["required"].append(record)
+            continue
+        record["valid"] = True
+        record["status"] = "present_required"
+        report["required"].append(record)
         entry = {
             "relative_path": rel_path,
             "size_bytes": int(path.stat().st_size),
@@ -426,15 +462,34 @@ def _artifact_index(output_dir: Path, *, include_visual_review: bool) -> tuple[l
     visual_index_lines: list[str] = []
     for rel_path, spec in OPTIONAL_ARTIFACTS.items():
         path = (output_dir / rel_path).resolve()
+        record = {
+            "path": str(path),
+            "relative_path": rel_path,
+            "exists": bool(path.exists()),
+            "status": None,
+        }
         if not path.exists():
+            record["status"] = "absent_optional"
+            report["optional"].append(record)
             continue
         if path.is_file():
             if path.stat().st_size <= 0:
-                raise PipelineFailure(stage="artifact_integrity", reason=f"Optional file is empty: {rel_path}", exit_code=EXIT_ARTIFACT_INTEGRITY_FAILED)
-            if spec["type"] == "json":
-                _read_json(path)
-            elif spec["type"] == "csv":
-                _validate_csv_file(path)
+                record["status"] = "malformed_optional"
+                report["optional"].append(record)
+                report["malformed"].append({"path": rel_path, "reason": "empty_optional_file"})
+                continue
+            try:
+                if spec["type"] == "json":
+                    _read_json(path)
+                elif spec["type"] == "csv":
+                    _validate_csv_file(path)
+            except Exception as exc:  # noqa: BLE001
+                record["status"] = "malformed_optional"
+                report["optional"].append(record)
+                report["malformed"].append({"path": rel_path, "reason": str(exc)})
+                continue
+            record["status"] = "present_optional"
+            report["optional"].append(record)
             entry = {
                 "relative_path": rel_path,
                 "size_bytes": int(path.stat().st_size),
@@ -459,10 +514,15 @@ def _artifact_index(output_dir: Path, *, include_visual_review: bool) -> tuple[l
             if include_visual_review and total_size <= VISUAL_REVIEW_SIZE_LIMIT_BYTES:
                 optional_large.append(str(path))
             else:
+                record["status"] = "present_optional_excluded_from_bundle"
+                report["optional"].append(record)
                 visual_index_lines.append(f"visual_review_dir={path}")
                 visual_index_lines.append(f"total_size_bytes={total_size}")
                 for panel in sorted(path.rglob("*.png")):
                     visual_index_lines.append(str(panel.relative_to(output_dir)))
+            if include_visual_review and total_size <= VISUAL_REVIEW_SIZE_LIMIT_BYTES:
+                record["status"] = "present_optional_included_in_bundle"
+                report["optional"].append(record)
     if visual_index_lines:
         (output_dir / "visual_review_index.txt").write_text("\n".join(visual_index_lines) + "\n", encoding="utf-8", newline="\n")
         path = (output_dir / "visual_review_index.txt").resolve()
@@ -476,7 +536,21 @@ def _artifact_index(output_dir: Path, *, include_visual_review: bool) -> tuple[l
             }
         )
         files_to_provide.append(str(path))
-    return index, files_to_provide, optional_large
+    for rel_path, spec in GENERATED_BY_OTHER_PIPELINES.items():
+        path = (output_dir / rel_path).resolve()
+        report["generated_only_by_another_pipeline"].append(
+            {
+                "path": str(path),
+                "relative_path": rel_path,
+                "exists": bool(path.exists()),
+                "status": "generated_by_another_pipeline" if spec["producer"] else "no_current_producer",
+                "producer": spec["producer"],
+                "description": spec["description"],
+            }
+        )
+    if report["missing_required"] or report["malformed"]:
+        report["status"] = "failed"
+    return report, index, files_to_provide, optional_large
 
 
 def _write_files_to_provide(path: Path, files: list[str], optional_large: list[str]) -> None:
@@ -574,14 +648,16 @@ def _final_failure_block(summary: dict[str, Any], output_dir: Path, exit_code: i
 
 
 def _failure_files_to_provide(output_dir: Path) -> list[str]:
-    files = [
-        str((output_dir / "pipeline_run_summary.json").resolve()),
-        str((output_dir / "pipeline.log").resolve()),
+    candidates = [
+        (output_dir / "pipeline_run_summary.json").resolve(),
+        (output_dir / "pipeline.log").resolve(),
+        (output_dir / "checkpoint_identity.json").resolve(),
+        (output_dir / "holdout_manifest_metadata.json").resolve(),
+        (output_dir / "bottleneck_decision.json").resolve(),
+        (output_dir / "oracle_scope_summary.json").resolve(),
+        (output_dir / "artifact_integrity_report.json").resolve(),
     ]
-    chk = (output_dir / "checkpoint_identity.json").resolve()
-    if chk.exists():
-        files.append(str(chk))
-    return files
+    return [str(path) for path in candidates if path.exists() and path.is_file()]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -628,6 +704,7 @@ def main() -> None:
     }
     exit_code = EXIT_SUCCESS
     optional_large: list[str] = []
+    artifact_failure_details: dict[str, Any] | None = None
     try:
         logger.log("Stage 0: repository preflight")
         stage_start = time.perf_counter()
@@ -681,7 +758,6 @@ def main() -> None:
         _append_stage(summary, stage="authoritative_diagnosis", status="passed", exit_code=stage.exit_code, duration_sec=stage.duration_sec, details=stage.details)
         out_dir = (repo_root / args.output_dir).resolve()
         checkpoint_identity = _read_json(out_dir / "checkpoint_identity.json")
-        promotion = _read_json(out_dir / "corrected_promotion_decision.json")
         summary["authoritative_status"] = {
             "checkpoint": checkpoint_identity["checkpoint_identity_status"],
             "semantic_checkpoint": checkpoint_identity["semantic_checkpoint_identity_status"],
@@ -690,14 +766,34 @@ def main() -> None:
             "overall": checkpoint_identity["overall_authoritative_status"],
         }
         summary["bottleneck_status"] = stage.details["bottleneck_status"]
-        summary["production_activation"] = str(promotion["production_activation_result"]["status"])
+        summary["production_activation"] = "blocked"
+        _atomic_write_json((out_dir / "pipeline_run_summary.json").resolve(), summary)
         logger.log("Stage 6: artifact integrity")
-        artifact_index, files_to_provide, optional_large = _artifact_index(out_dir, include_visual_review=args.include_visual_review)
-        _atomic_write_json((out_dir / "artifact_index.json").resolve(), {"artifacts": artifact_index})
+        artifact_report, artifact_index, files_to_provide, optional_large = _inspect_artifacts(out_dir, include_visual_review=args.include_visual_review)
+        _atomic_write_json((out_dir / "artifact_integrity_report.json").resolve(), artifact_report)
+        _atomic_write_json(
+            (out_dir / "artifact_index.json").resolve(),
+            {
+                "artifacts": artifact_index,
+                "optional": artifact_report["optional"],
+                "generated_only_by_another_pipeline": artifact_report["generated_only_by_another_pipeline"],
+            },
+        )
+        if artifact_report["status"] != "passed":
+            artifact_failure_details = {
+                "missing_required_files": list(artifact_report["missing_required"]),
+                "malformed": list(artifact_report["malformed"]),
+            }
+            _append_stage(summary, stage="artifact_integrity", status="failed", exit_code=EXIT_ARTIFACT_INTEGRITY_FAILED, duration_sec=0.0, details=artifact_failure_details)
+            summary["files_to_provide"] = _failure_files_to_provide(out_dir)
+            _atomic_write_json((out_dir / "pipeline_run_summary.json").resolve(), summary)
+            raise PipelineFailure(stage="artifact_integrity", reason="Artifact integrity failed", exit_code=EXIT_ARTIFACT_INTEGRITY_FAILED)
+        _append_stage(summary, stage="artifact_integrity", status="passed", exit_code=0, duration_sec=0.0, details={"missing_required_files": [], "malformed": []})
         _write_files_to_provide((out_dir / "files_to_provide.txt").resolve(), files_to_provide, optional_large)
-        summary["files_to_provide"] = files_to_provide + optional_large
+        summary["files_to_provide"] = files_to_provide
         bundle_path, checksum_path = _bundle_review(out_dir, artifact_index=artifact_index, include_visual_review=args.include_visual_review)
         summary["artifact_bundle"] = str(bundle_path)
+        summary["files_to_provide"] = [str(bundle_path), str(checksum_path)]
         summary["status"] = "success"
         summary["failed_stage"] = None
         summary["failure_reason"] = None
@@ -711,8 +807,11 @@ def main() -> None:
         summary["failure_reason"] = exc.reason
         if exc.stage == "tests" and not any(stage["stage"] == "tests" for stage in summary.get("stages", [])):
             _append_stage(summary, stage="tests", status="failed", exit_code=1, duration_sec=0.0, details={"reason": exc.reason, "modules": list(REQUIRED_TEST_MODULES)})
+        elif exc.stage == "artifact_integrity" and not any(stage["stage"] == "artifact_integrity" for stage in summary.get("stages", [])):
+            _append_stage(summary, stage="artifact_integrity", status="failed", exit_code=exc.exit_code, duration_sec=0.0, details=artifact_failure_details or {"reason": exc.reason})
         elif exc.stage not in {stage["stage"] for stage in summary.get("stages", [])}:
             _append_stage(summary, stage=exc.stage, status="failed", exit_code=exc.exit_code, duration_sec=0.0, details={"reason": exc.reason})
+        _atomic_write_json((output_dir / "pipeline_run_summary.json").resolve(), summary)
         summary["files_to_provide"] = _failure_files_to_provide(output_dir)
         _atomic_write_json((output_dir / "pipeline_run_summary.json").resolve(), summary)
         logger.write(_final_failure_block(summary, output_dir, exit_code))
@@ -723,6 +822,7 @@ def main() -> None:
         summary["failure_reason"] = str(exc)
         if "repository_preflight" not in {stage["stage"] for stage in summary.get("stages", [])} and summary.get("environment"):
             _append_stage(summary, stage="repository_preflight", status="passed", exit_code=0, duration_sec=0.0, details={"requested_device": args.device})
+        _atomic_write_json((output_dir / "pipeline_run_summary.json").resolve(), summary)
         summary["files_to_provide"] = _failure_files_to_provide(output_dir)
         _atomic_write_json((output_dir / "pipeline_run_summary.json").resolve(), summary)
         logger.write(_final_failure_block(summary, output_dir, exit_code))

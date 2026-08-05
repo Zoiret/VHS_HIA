@@ -23,6 +23,19 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
 
         return mod
 
+    def _populate_required_artifacts(self, mod, out: Path) -> None:
+        for rel, spec in mod.REQUIRED_ARTIFACTS.items():
+            path = out / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if spec["type"] == "json":
+                path.write_text("{}", encoding="utf-8")
+            elif spec["type"] == "csv":
+                path.write_text("h\n1\n", encoding="utf-8")
+            elif spec["type"] == "jsonl":
+                path.write_text(''.join(json.dumps({"sample": f"s{i}"}) + "\n" for i in range(106)), encoding="utf-8")
+            else:
+                path.write_text("x", encoding="utf-8")
+
     def test_stage_order(self):
         mod = self._mod()
         order = []
@@ -50,7 +63,7 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
                 mock.patch.object(mod, "_run_manifest_stage", side_effect=lambda *a, **k: order.append("manifest") or mod.StageResult("manifest", 0, 0.0, {"samples": 106, "unique_samples": 106, "split_counts": {"test": 53, "val": 53}, "gt_count_distribution": {"1": 15, "2": 37, "3": 54}, "manifest_identity_sha": "sha"})), \
                 mock.patch.object(mod, "_run_diagnosis_stage", side_effect=lambda *a, **k: order.append("diagnosis") or mod.StageResult("diagnosis", 0, 0.0, {"bottleneck_status": "mixed"})), \
                 mock.patch.object(mod, "_read_json", side_effect=[{"checkpoint_identity_status": "exact_match", "semantic_checkpoint_identity_status": "exact_match", "manifest_identity_status": "exact_match", "diagnosis_execution_status": "completed", "overall_authoritative_status": "exact_match"}, {"production_activation_result": {"status": "blocked"}}]), \
-                mock.patch.object(mod, "_artifact_index", side_effect=lambda *a, **k: order.append("artifacts") or ([], [], [])), \
+                mock.patch.object(mod, "_inspect_artifacts", side_effect=lambda *a, **k: order.append("artifacts") or ({"status": "passed", "required": [], "optional": [], "generated_only_by_another_pipeline": [], "missing_required": [], "malformed": []}, [], [], [])), \
                 mock.patch.object(mod, "_bundle_review", side_effect=lambda *a, **k: order.append("bundle") or (out / "bundle.tar.gz", out / "bundle.tar.gz.sha256")), \
                 mock.patch.object(mod, "_write_files_to_provide"), \
                 mock.patch.object(mod, "_atomic_write_json"), \
@@ -192,7 +205,9 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
             with self.assertRaises(mod.PipelineFailure):
-                mod._artifact_index(out, include_visual_review=False)
+                report, _index, _files, _large = mod._inspect_artifacts(out, include_visual_review=False)
+                if report["status"] != "passed":
+                    raise mod.PipelineFailure(stage="artifact_integrity", reason="Artifact integrity failed", exit_code=mod.EXIT_ARTIFACT_INTEGRITY_FAILED)
 
     def test_artifact_integrity_catches_malformed_json(self):
         mod = self._mod()
@@ -209,8 +224,8 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
                     path.write_text('{"sample":"x"}\n' * 106, encoding="utf-8")
                 else:
                     path.write_text("x", encoding="utf-8")
-            with self.assertRaises(Exception):
-                mod._artifact_index(out, include_visual_review=False)
+            report, _index, _files, _large = mod._inspect_artifacts(out, include_visual_review=False)
+            self.assertEqual(report["status"], "failed")
 
     def test_artifact_integrity_catches_empty_csv(self):
         mod = self._mod()
@@ -352,6 +367,8 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
                     mod.main()
             summary = json.loads((out / "pipeline_run_summary.json").read_text(encoding="utf-8"))
             self.assertTrue(summary["files_to_provide"])
+            self.assertIn(str((out / "pipeline_run_summary.json").resolve()), summary["files_to_provide"])
+            self.assertIn(str((out / "pipeline.log").resolve()), summary["files_to_provide"])
 
     def test_json_files_to_provide_equals_console_files_list(self):
         mod = self._mod()
@@ -395,6 +412,162 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
                     mod.main()
                 manifest_mock.assert_not_called()
                 diagnosis_mock.assert_not_called()
+
+    def test_successful_diagnosis_data_persisted_before_artifact_integrity(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "training" / "analysis" / "out"
+            args = SimpleNamespace(
+                config="cfg",
+                run_dir="training/analysis/run",
+                output_dir=str(out),
+                expected_manifest_identity_sha="sha",
+                expected_center_checkpoint_sha="center",
+                expected_semantic_checkpoint_sha="semantic",
+                device="cpu",
+                clean_output=False,
+                skip_tests=True,
+                include_visual_review=False,
+            )
+            with mock.patch.object(mod, "_parse_args", return_value=args), \
+                mock.patch.object(mod, "_safe_output_dir"), \
+                mock.patch.object(mod, "_repo_preflight", return_value={"git": {"commit": "abc", "branch": "main", "tracked_tree_clean": True}, "environment": {"hostname": "host", "device": "cpu", "python": "3.12", "torch": "2.x", "cuda_available": False}}), \
+                mock.patch.object(mod, "_checkpoint_identity", return_value=mod.StageResult("checkpoint", 0, 0.0, {"center_checkpoint_sha": "csha", "semantic_checkpoint_sha": "ssha"})), \
+                mock.patch.object(mod, "_run_manifest_stage", return_value=mod.StageResult("manifest", 0, 0.0, {"samples": 106, "unique_samples": 106, "split_counts": {"test": 53, "val": 53}, "gt_count_distribution": {"1": 15, "2": 37, "3": 54}, "manifest_identity_sha": "sha"})), \
+                mock.patch.object(mod, "_run_diagnosis_stage", return_value=mod.StageResult("diagnosis", 0, 0.0, {"bottleneck_status": "mixed_center_and_semantic_failure"})), \
+                mock.patch.object(mod, "_read_json", side_effect=[{"checkpoint_identity_status": "exact_match", "semantic_checkpoint_identity_status": "exact_match", "manifest_identity_status": "exact_match", "diagnosis_execution_status": "completed", "overall_authoritative_status": "exact_match"}]), \
+                mock.patch.object(mod, "_inspect_artifacts", return_value=({"status": "failed", "required": [], "optional": [], "generated_only_by_another_pipeline": [], "missing_required": ["missing.json"], "malformed": []}, [], [], [])):
+                with self.assertRaises(SystemExit) as cm:
+                    mod.main()
+                self.assertEqual(cm.exception.code, mod.EXIT_ARTIFACT_INTEGRITY_FAILED)
+            summary = json.loads((out / "pipeline_run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["authoritative_status"]["overall"], "exact_match")
+            self.assertEqual(summary["bottleneck_status"], "mixed_center_and_semantic_failure")
+            self.assertEqual(summary["identity"]["manifest_identity_sha"], "sha")
+
+    def test_missing_required_artifact_returns_exit_code_60_not_99(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "training" / "analysis" / "out"
+            args = SimpleNamespace(
+                config="cfg",
+                run_dir="training/analysis/run",
+                output_dir=str(out),
+                expected_manifest_identity_sha="sha",
+                expected_center_checkpoint_sha="center",
+                expected_semantic_checkpoint_sha="semantic",
+                device="cpu",
+                clean_output=False,
+                skip_tests=True,
+                include_visual_review=False,
+            )
+            with mock.patch.object(mod, "_parse_args", return_value=args), \
+                mock.patch.object(mod, "_safe_output_dir"), \
+                mock.patch.object(mod, "_repo_preflight", return_value={"git": {"commit": "abc", "branch": "main", "tracked_tree_clean": True}, "environment": {"hostname": "host", "device": "cpu", "python": "3.12", "torch": "2.x", "cuda_available": False}}), \
+                mock.patch.object(mod, "_checkpoint_identity", return_value=mod.StageResult("checkpoint", 0, 0.0, {"center_checkpoint_sha": "csha", "semantic_checkpoint_sha": "ssha"})), \
+                mock.patch.object(mod, "_run_manifest_stage", return_value=mod.StageResult("manifest", 0, 0.0, {"samples": 106, "unique_samples": 106, "split_counts": {"test": 53, "val": 53}, "gt_count_distribution": {"1": 15, "2": 37, "3": 54}, "manifest_identity_sha": "sha"})), \
+                mock.patch.object(mod, "_run_diagnosis_stage", return_value=mod.StageResult("diagnosis", 0, 0.0, {"bottleneck_status": "mixed"})), \
+                mock.patch.object(mod, "_read_json", side_effect=[{"checkpoint_identity_status": "exact_match", "semantic_checkpoint_identity_status": "exact_match", "manifest_identity_status": "exact_match", "diagnosis_execution_status": "completed", "overall_authoritative_status": "exact_match"}]), \
+                mock.patch.object(mod, "_inspect_artifacts", return_value=({"status": "failed", "required": [], "optional": [], "generated_only_by_another_pipeline": [], "missing_required": ["x"], "malformed": []}, [], [], [])):
+                with self.assertRaises(SystemExit) as cm:
+                    mod.main()
+                self.assertEqual(cm.exception.code, mod.EXIT_ARTIFACT_INTEGRITY_FAILED)
+
+    def test_missing_optional_artifact_does_not_fail(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self._populate_required_artifacts(mod, out)
+            report, _index, _files, _large = mod._inspect_artifacts(out, include_visual_review=False)
+            self.assertEqual(report["status"], "passed")
+            optional_statuses = {row["relative_path"]: row["status"] for row in report["optional"]}
+            self.assertEqual(optional_statuses["end_to_end_vs_center_oracle.csv"], "absent_optional")
+
+    def test_artifact_integrity_failed_stage_is_recorded(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "training" / "analysis" / "out"
+            args = SimpleNamespace(
+                config="cfg",
+                run_dir="training/analysis/run",
+                output_dir=str(out),
+                expected_manifest_identity_sha="sha",
+                expected_center_checkpoint_sha="center",
+                expected_semantic_checkpoint_sha="semantic",
+                device="cpu",
+                clean_output=False,
+                skip_tests=True,
+                include_visual_review=False,
+            )
+            with mock.patch.object(mod, "_parse_args", return_value=args), \
+                mock.patch.object(mod, "_safe_output_dir"), \
+                mock.patch.object(mod, "_repo_preflight", return_value={"git": {"commit": "abc", "branch": "main", "tracked_tree_clean": True}, "environment": {"hostname": "host", "device": "cpu", "python": "3.12", "torch": "2.x", "cuda_available": False}}), \
+                mock.patch.object(mod, "_checkpoint_identity", return_value=mod.StageResult("checkpoint", 0, 0.0, {"center_checkpoint_sha": "csha", "semantic_checkpoint_sha": "ssha"})), \
+                mock.patch.object(mod, "_run_manifest_stage", return_value=mod.StageResult("manifest", 0, 0.0, {"samples": 106, "unique_samples": 106, "split_counts": {"test": 53, "val": 53}, "gt_count_distribution": {"1": 15, "2": 37, "3": 54}, "manifest_identity_sha": "sha"})), \
+                mock.patch.object(mod, "_run_diagnosis_stage", return_value=mod.StageResult("diagnosis", 0, 0.0, {"bottleneck_status": "mixed"})), \
+                mock.patch.object(mod, "_read_json", side_effect=[{"checkpoint_identity_status": "exact_match", "semantic_checkpoint_identity_status": "exact_match", "manifest_identity_status": "exact_match", "diagnosis_execution_status": "completed", "overall_authoritative_status": "exact_match"}]), \
+                mock.patch.object(mod, "_inspect_artifacts", return_value=({"status": "failed", "required": [], "optional": [], "generated_only_by_another_pipeline": [], "missing_required": ["x"], "malformed": []}, [], [], [])):
+                with self.assertRaises(SystemExit):
+                    mod.main()
+            summary = json.loads((out / "pipeline_run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["stages"][-1]["stage"], "artifact_integrity")
+            self.assertEqual(summary["stages"][-1]["status"], "failed")
+
+    def test_files_to_provide_contains_only_existing_files(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "pipeline.log").write_text("x", encoding="utf-8")
+            (out / "pipeline_run_summary.json").write_text("{}", encoding="utf-8")
+            files = mod._failure_files_to_provide(out)
+            self.assertEqual(set(files), {str((out / "pipeline.log").resolve()), str((out / "pipeline_run_summary.json").resolve())})
+
+    def test_actual_diagnosis_artifact_contract_matches_required_list(self):
+        mod = self._mod()
+        self.assertNotIn("corrected_promotion_decision.json", mod.REQUIRED_ARTIFACTS)
+        self.assertIn("bottleneck_decision.json", mod.REQUIRED_ARTIFACTS)
+        self.assertIn("oracle_scope_summary.json", mod.REQUIRED_ARTIFACTS)
+
+    def test_runner_does_not_create_fake_promotion_decision_artifact(self):
+        mod = self._mod()
+        self.assertNotIn("corrected_promotion_decision.json", mod.REQUIRED_ARTIFACTS)
+        self.assertIn("corrected_promotion_decision.json", mod.GENERATED_BY_OTHER_PIPELINES)
+
+    def test_successful_integrity_proceeds_to_bundle_creation(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "training" / "analysis" / "out"
+            args = SimpleNamespace(
+                config="cfg",
+                run_dir="training/analysis/run",
+                output_dir=str(out),
+                expected_manifest_identity_sha="sha",
+                expected_center_checkpoint_sha="center",
+                expected_semantic_checkpoint_sha="semantic",
+                device="cpu",
+                clean_output=False,
+                skip_tests=True,
+                include_visual_review=False,
+            )
+            with mock.patch.object(mod, "_parse_args", return_value=args), \
+                mock.patch.object(mod, "_safe_output_dir"), \
+                mock.patch.object(mod, "_repo_preflight", return_value={"git": {"commit": "abc", "branch": "main", "tracked_tree_clean": True}, "environment": {"hostname": "host", "device": "cpu", "python": "3.12", "torch": "2.x", "cuda_available": False}}), \
+                mock.patch.object(mod, "_checkpoint_identity", return_value=mod.StageResult("checkpoint", 0, 0.0, {"center_checkpoint_sha": "csha", "semantic_checkpoint_sha": "ssha"})), \
+                mock.patch.object(mod, "_run_manifest_stage", return_value=mod.StageResult("manifest", 0, 0.0, {"samples": 106, "unique_samples": 106, "split_counts": {"test": 53, "val": 53}, "gt_count_distribution": {"1": 15, "2": 37, "3": 54}, "manifest_identity_sha": "sha"})), \
+                mock.patch.object(mod, "_run_diagnosis_stage", return_value=mod.StageResult("diagnosis", 0, 0.0, {"bottleneck_status": "mixed"})), \
+                mock.patch.object(mod, "_read_json", side_effect=[{"checkpoint_identity_status": "exact_match", "semantic_checkpoint_identity_status": "exact_match", "manifest_identity_status": "exact_match", "diagnosis_execution_status": "completed", "overall_authoritative_status": "exact_match"}]), \
+                mock.patch.object(mod, "_inspect_artifacts", return_value=({"status": "passed", "required": [], "optional": [], "generated_only_by_another_pipeline": [], "missing_required": [], "malformed": []}, [], [], [])), \
+                mock.patch.object(mod, "_bundle_review", return_value=(out / "bundle.tar.gz", out / "bundle.tar.gz.sha256")) as bundle_mock, \
+                mock.patch.object(mod, "_write_files_to_provide"), \
+                mock.patch.object(mod, "_atomic_write_json"):
+                with self.assertRaises(SystemExit) as cm:
+                    mod.main()
+                self.assertEqual(cm.exception.code, 0)
+                bundle_mock.assert_called_once()
 
 
 if __name__ == "__main__":
