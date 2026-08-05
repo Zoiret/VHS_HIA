@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -84,6 +85,104 @@ class TestHoldoutManifestIdentity(unittest.TestCase):
             mod._path_to_posix_relative(r"C:\data\images\foo.png", r"C:\data"),
             "images/foo.png",
         )
+
+    def test_windows_forward_slash_path_produces_same_result(self):
+        mod = self._holdout_mod()
+        self.assertEqual(
+            mod._path_to_posix_relative("C:/data/images/foo.png", "C:/data"),
+            "images/foo.png",
+        )
+
+    def test_mixed_windows_separators_produce_same_result(self):
+        mod = self._holdout_mod()
+        self.assertEqual(
+            mod._path_to_posix_relative(r"C:\data/images\foo.png", "C:/data"),
+            "images/foo.png",
+        )
+
+    def test_posix_path_produces_same_result(self):
+        mod = self._holdout_mod()
+        self.assertEqual(
+            mod._path_to_posix_relative("/datasets/data/images/foo.png", "/datasets/data"),
+            "images/foo.png",
+        )
+
+    def test_unc_path_produces_expected_result(self):
+        mod = self._holdout_mod()
+        self.assertEqual(
+            mod._path_to_posix_relative(r"\\server\share\data\images\foo.png", r"\\server\share\data"),
+            "images/foo.png",
+        )
+
+    def test_different_windows_drives_produce_controlled_error(self):
+        mod = self._holdout_mod()
+        with self.assertRaises(mod.CanonicalPathError) as cm:
+            mod._path_to_posix_relative(r"D:\data\images\foo.png", r"C:\data")
+        self.assertEqual(cm.exception.flavour, "windows")
+
+    def test_different_unc_shares_produce_controlled_error(self):
+        mod = self._holdout_mod()
+        with self.assertRaises(mod.CanonicalPathError) as cm:
+            mod._path_to_posix_relative(r"\\server\share2\data\images\foo.png", r"\\server\share\data")
+        self.assertEqual(cm.exception.flavour, "windows")
+
+    def test_outside_root_path_produces_controlled_error(self):
+        mod = self._holdout_mod()
+        with self.assertRaises(mod.CanonicalPathError) as cm:
+            mod._path_to_posix_relative("/datasets/other/images/foo.png", "/datasets/data")
+        self.assertEqual(cm.exception.flavour, "posix")
+
+    def test_cwd_is_never_prepended_to_foreign_windows_paths(self):
+        mod = self._holdout_mod()
+        result = mod._path_to_posix_relative(r"C:\data\images\foo.png", r"C:\data")
+        self.assertEqual(result, "images/foo.png")
+        self.assertNotIn("Users", result)
+
+    def test_canonical_sha_equal_for_equivalent_windows_linux_representations(self):
+        mod = self._holdout_mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            img = root / "images" / "foo.png"
+            sem = root / "semantic_masks" / "foo.png"
+            inst = root / "instances" / "instance_masks" / "foo.png"
+            ctr = root / "center_maps" / "foo.png"
+            for path in (img, sem, inst, ctr):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"same")
+            inv_posix = {
+                "dataset_root": "/datasets/data",
+                "instance_root": "/datasets/data/instances",
+                "eligible": [
+                    {
+                        "sample": "foo",
+                        "split": "test",
+                        "gt_instance_count": 1,
+                        "image_path": "/datasets/data/images/foo.png",
+                        "gt_semantic_path": "/datasets/data/semantic_masks/foo.png",
+                        "gt_instance_path": "/datasets/data/instances/instance_masks/foo.png",
+                        "center_path": "/datasets/data/center_maps/foo.png",
+                    }
+                ],
+            }
+            inv_windows = {
+                "dataset_root": r"C:\datasets\data",
+                "instance_root": r"C:\datasets\data\instances",
+                "eligible": [
+                    {
+                        "sample": "foo",
+                        "split": "test",
+                        "gt_instance_count": 1,
+                        "image_path": r"C:\datasets\data\images\foo.png",
+                        "gt_semantic_path": r"C:\datasets\data\semantic_masks\foo.png",
+                        "gt_instance_path": r"C:\datasets\data\instances\instance_masks\foo.png",
+                        "center_path": r"C:\datasets\data\center_maps\foo.png",
+                    }
+                ],
+            }
+            with mock.patch.object(mod, "_identity_hash", return_value="samehash"):
+                sha_posix = mod._identity_manifest_sha256(mod._canonical_identity_entries(inv_posix))
+                sha_windows = mod._identity_manifest_sha256(mod._canonical_identity_entries(inv_windows))
+            self.assertEqual(sha_posix, sha_windows)
 
     def test_row_ordering_does_not_change_canonical_sha(self):
         mod = self._holdout_mod()

@@ -8,7 +8,7 @@ import socket
 import subprocess
 import tempfile
 from collections import Counter, defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import cv2
@@ -150,10 +150,72 @@ def _manifest_sha256(entries: list[dict]) -> str:
     return hashlib.sha256(_manifest_text(entries).encode("utf-8")).hexdigest()
 
 
+class CanonicalPathError(RuntimeError):
+    def __init__(self, *, path: str, root: str, flavour: str, reason: str) -> None:
+        super().__init__(reason)
+        self.path = str(path)
+        self.root = str(root)
+        self.flavour = str(flavour)
+        self.reason = str(reason)
+
+
+def _detect_path_flavour(value: str) -> str:
+    value = str(value)
+    if value.startswith("\\\\"):
+        return "windows"
+    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
+        return "windows"
+    if "\\" in value:
+        return "windows"
+    return "posix"
+
+
+def _normalize_windows_like(value: str) -> PureWindowsPath:
+    return PureWindowsPath(str(value).replace("/", "\\"))
+
+
+def _normalize_posix_like(value: str) -> PurePosixPath:
+    normalized = str(value).replace("\\", "/")
+    return PurePosixPath(normalized)
+
+
+def _controlled_canonical_path_error(path_text: str, root_text: str, flavour: str, reason: str) -> CanonicalPathError:
+    return CanonicalPathError(path=path_text, root=root_text, flavour=flavour, reason=reason)
+
+
 def _path_to_posix_relative(path_text: str, root_text: str) -> str:
-    path = Path(path_text).resolve()
-    root = Path(root_text).resolve()
-    return path.relative_to(root).as_posix()
+    path_value = str(path_text)
+    root_value = str(root_text)
+    path_flavour = _detect_path_flavour(path_value)
+    root_flavour = _detect_path_flavour(root_value)
+    if path_flavour != root_flavour:
+        raise _controlled_canonical_path_error(
+            path_value,
+            root_value,
+            "ambiguous",
+            f"incompatible path flavours: path={path_flavour} root={root_flavour}",
+        )
+    flavour = path_flavour
+    if flavour == "windows":
+        path = _normalize_windows_like(path_value)
+        root = _normalize_windows_like(root_value)
+        if str(path.drive).lower() != str(root.drive).lower():
+            raise _controlled_canonical_path_error(path_value, root_value, flavour, "different Windows drives")
+        if str(path.anchor).startswith("\\\\") or str(root.anchor).startswith("\\\\"):
+            if str(path.anchor).lower() != str(root.anchor).lower():
+                raise _controlled_canonical_path_error(path_value, root_value, flavour, "different UNC shares")
+        try:
+            relative = path.relative_to(root)
+        except ValueError as exc:
+            raise _controlled_canonical_path_error(path_value, root_value, flavour, f"path is outside root: {exc}") from None
+        return PurePosixPath(*relative.parts).as_posix()
+    path = _normalize_posix_like(path_value)
+    root = _normalize_posix_like(root_value)
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise _controlled_canonical_path_error(path_value, root_value, flavour, f"path is outside root: {exc}") from None
+    return PurePosixPath(*relative.parts).as_posix()
 
 
 def _stable_json_dumps(obj: Any) -> str:

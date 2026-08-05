@@ -293,6 +293,109 @@ class TestAuthoritativeHoldoutPipeline(unittest.TestCase):
         self.assertEqual(mod.EXIT_ARTIFACT_INTEGRITY_FAILED, 60)
         self.assertEqual(mod.EXIT_BUNDLE_CREATION_FAILED, 70)
 
+    def test_stage1_module_list_includes_both_runner_test_modules(self):
+        mod = self._mod()
+        self.assertIn("training.test_authoritative_holdout_pipeline", mod.REQUIRED_TEST_MODULES)
+        self.assertIn("training.test_cpu_cuda_replay_parity_runner", mod.REQUIRED_TEST_MODULES)
+
+    def test_failure_summary_records_passed_stage0_and_failed_stage1(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "training" / "analysis" / "out"
+            args = SimpleNamespace(
+                config="cfg",
+                run_dir="training/analysis/run",
+                output_dir=str(out),
+                expected_manifest_identity_sha="sha",
+                expected_center_checkpoint_sha="center",
+                expected_semantic_checkpoint_sha="semantic",
+                device="cpu",
+                clean_output=False,
+                skip_tests=False,
+                include_visual_review=False,
+            )
+            with mock.patch.object(mod, "_parse_args", return_value=args), \
+                mock.patch.object(mod, "_safe_output_dir"), \
+                mock.patch.object(mod, "_repo_preflight", return_value={"git": {"commit": "abc", "branch": "main", "tracked_tree_clean": True}, "environment": {"hostname": "host", "device": "cpu", "python": "3.12", "torch": "2.x", "cuda_available": False}}), \
+                mock.patch.object(mod, "_run_tests", side_effect=mod.PipelineFailure(stage="tests", reason="boom", exit_code=mod.EXIT_TESTS_FAILED)):
+                with self.assertRaises(SystemExit):
+                    mod.main()
+            summary = json.loads((out / "pipeline_run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["stages"][0]["stage"], "repository_preflight")
+            self.assertEqual(summary["stages"][0]["status"], "passed")
+            self.assertEqual(summary["stages"][1]["stage"], "tests")
+            self.assertEqual(summary["stages"][1]["status"], "failed")
+
+    def test_failure_summary_files_to_provide_is_non_empty(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            out = repo / "training" / "analysis" / "out"
+            args = SimpleNamespace(
+                config="cfg",
+                run_dir="training/analysis/run",
+                output_dir=str(out),
+                expected_manifest_identity_sha="sha",
+                expected_center_checkpoint_sha="center",
+                expected_semantic_checkpoint_sha="semantic",
+                device="cpu",
+                clean_output=False,
+                skip_tests=False,
+                include_visual_review=False,
+            )
+            with mock.patch.object(mod, "_parse_args", return_value=args), \
+                mock.patch.object(mod, "_safe_output_dir"), \
+                mock.patch.object(mod, "_repo_preflight", return_value={"git": {"commit": "abc", "branch": "main", "tracked_tree_clean": True}, "environment": {"hostname": "host", "device": "cpu", "python": "3.12", "torch": "2.x", "cuda_available": False}}), \
+                mock.patch.object(mod, "_run_tests", side_effect=mod.PipelineFailure(stage="tests", reason="boom", exit_code=mod.EXIT_TESTS_FAILED)):
+                with self.assertRaises(SystemExit):
+                    mod.main()
+            summary = json.loads((out / "pipeline_run_summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(summary["files_to_provide"])
+
+    def test_json_files_to_provide_equals_console_files_list(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            summary = {
+                "failed_stage": "tests",
+                "failure_reason": "boom",
+                "files_to_provide": [
+                    str((out / "pipeline_run_summary.json").resolve()),
+                    str((out / "pipeline.log").resolve()),
+                ],
+            }
+            block = mod._final_failure_block(summary, out, mod.EXIT_TESTS_FAILED)
+            for item in summary["files_to_provide"]:
+                self.assertIn(item, block)
+
+    def test_inference_manifest_and_diagnosis_not_called_after_test_failure(self):
+        mod = self._mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            args = SimpleNamespace(
+                config="cfg",
+                run_dir="training/analysis/run",
+                output_dir=str(repo / "training" / "analysis" / "out"),
+                expected_manifest_identity_sha="sha",
+                expected_center_checkpoint_sha="center",
+                expected_semantic_checkpoint_sha="semantic",
+                device="cpu",
+                clean_output=False,
+                skip_tests=False,
+                include_visual_review=False,
+            )
+            with mock.patch.object(mod, "_parse_args", return_value=args), \
+                mock.patch.object(mod, "_safe_output_dir"), \
+                mock.patch.object(mod, "_repo_preflight", return_value={"git": {"commit": "abc", "branch": "main", "tracked_tree_clean": True}, "environment": {"hostname": "host", "device": "cpu", "python": "3.12", "torch": "2.x", "cuda_available": False}}), \
+                mock.patch.object(mod, "_run_tests", side_effect=mod.PipelineFailure(stage="tests", reason="boom", exit_code=mod.EXIT_TESTS_FAILED)), \
+                mock.patch.object(mod, "_run_manifest_stage") as manifest_mock, \
+                mock.patch.object(mod, "_run_diagnosis_stage") as diagnosis_mock:
+                with self.assertRaises(SystemExit):
+                    mod.main()
+                manifest_mock.assert_not_called()
+                diagnosis_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

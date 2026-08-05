@@ -40,6 +40,8 @@ REQUIRED_TEST_MODULES = (
     "training.test_center_generalization_holdout",
     "training.test_holdout_manifest_identity",
     "training.test_center_semantic_preprocessing_parity",
+    "training.test_authoritative_holdout_pipeline",
+    "training.test_cpu_cuda_replay_parity_runner",
 )
 REQUIRED_ARTIFACTS: dict[str, dict[str, Any]] = {
     "pipeline_run_summary.json": {"type": "json", "required_for_review": True, "description": "Top-level orchestrator summary"},
@@ -151,6 +153,7 @@ def _run_command(command: list[str], *, cwd: Path, logger: TeeLogger, env: dict[
     assert proc.stdout is not None
     for line in proc.stdout:
         logger.write(line)
+    proc.stdout.close()
     rc = proc.wait()
     duration = time.perf_counter() - start
     logger.log(f"EXIT CODE: {rc} duration_sec={duration:.3f}")
@@ -233,6 +236,18 @@ def _run_tests(repo_root: Path, logger: TeeLogger) -> StageResult:
     if rc != 0:
         raise PipelineFailure(stage="tests", reason="Unit tests failed", exit_code=EXIT_TESTS_FAILED)
     return StageResult(name="tests", exit_code=rc, duration_sec=duration, details={"modules": list(REQUIRED_TEST_MODULES)})
+
+
+def _append_stage(summary: dict[str, Any], *, stage: str, status: str, exit_code: int, duration_sec: float, details: dict[str, Any] | None = None) -> None:
+    summary.setdefault("stages", []).append(
+        {
+            "stage": str(stage),
+            "status": str(status),
+            "exit_code": int(exit_code),
+            "duration_sec": float(duration_sec),
+            "details": dict(details or {}),
+        }
+    )
 
 
 def _checkpoint_identity(repo_root: Path, run_dir: Path, expected_center_sha: str, expected_semantic_sha: str) -> StageResult:
@@ -536,9 +551,11 @@ def _final_success_block(summary: dict[str, Any], bundle_path: Path, checksum_pa
 
 
 def _final_failure_block(summary: dict[str, Any], output_dir: Path, exit_code: int) -> str:
-    relevant = [str((output_dir / "pipeline_run_summary.json").resolve()), str((output_dir / "pipeline.log").resolve())]
+    relevant = list(summary.get("files_to_provide") or [])
+    if not relevant:
+        relevant = [str((output_dir / "pipeline_run_summary.json").resolve()), str((output_dir / "pipeline.log").resolve())]
     chk = (output_dir / "checkpoint_identity.json").resolve()
-    if chk.exists():
+    if chk.exists() and str(chk) not in relevant:
         relevant.append(str(chk))
     lines = [
         "==================================================",
@@ -554,6 +571,17 @@ def _final_failure_block(summary: dict[str, Any], output_dir: Path, exit_code: i
     for idx, item in enumerate(relevant, start=1):
         lines.append(f"{idx}. {item}")
     return "\n".join(lines) + "\n"
+
+
+def _failure_files_to_provide(output_dir: Path) -> list[str]:
+    files = [
+        str((output_dir / "pipeline_run_summary.json").resolve()),
+        str((output_dir / "pipeline.log").resolve()),
+    ]
+    chk = (output_dir / "checkpoint_identity.json").resolve()
+    if chk.exists():
+        files.append(str(chk))
+    return files
 
 
 def _parse_args() -> argparse.Namespace:
@@ -602,23 +630,25 @@ def main() -> None:
     optional_large: list[str] = []
     try:
         logger.log("Stage 0: repository preflight")
+        stage_start = time.perf_counter()
         preflight = _repo_preflight(repo_root, args.device)
         summary["git"] = {k: v for k, v in preflight["git"].items() if k != "status_porcelain"}
         summary["environment"] = preflight["environment"]
+        _append_stage(summary, stage="repository_preflight", status="passed", exit_code=0, duration_sec=time.perf_counter() - stage_start, details={"requested_device": args.device})
         if not args.skip_tests:
             logger.log("Stage 1: tests")
             stage = _run_tests(repo_root, logger)
-            summary["stages"].append(stage.__dict__)
+            _append_stage(summary, stage="tests", status="passed", exit_code=stage.exit_code, duration_sec=stage.duration_sec, details=stage.details)
         else:
             logger.log("Stage 1: tests skipped")
-            summary["stages"].append(StageResult(name="tests", exit_code=0, duration_sec=0.0, details={"skipped": True}).__dict__)
+            _append_stage(summary, stage="tests", status="passed", exit_code=0, duration_sec=0.0, details={"skipped": True})
         logger.log("Stage 2: checkpoint identity")
         stage = _checkpoint_identity(repo_root, (repo_root / args.run_dir).resolve(), args.expected_center_checkpoint_sha, args.expected_semantic_checkpoint_sha)
-        summary["stages"].append(stage.__dict__)
+        _append_stage(summary, stage="checkpoint_identity", status="passed", exit_code=stage.exit_code, duration_sec=stage.duration_sec, details=stage.details)
         summary["identity"]["center_checkpoint_sha"] = stage.details["center_checkpoint_sha"]
         summary["identity"]["semantic_checkpoint_sha"] = stage.details["semantic_checkpoint_sha"]
         logger.log("Stage 3: output preparation")
-        summary["stages"].append(StageResult(name="output_preparation", exit_code=0, duration_sec=0.0, details={"clean_output": bool(args.clean_output)}).__dict__)
+        _append_stage(summary, stage="output_preparation", status="passed", exit_code=0, duration_sec=0.0, details={"clean_output": bool(args.clean_output)})
         logger.log("Stage 4: canonical manifest generation")
         stage = _run_manifest_stage(
             repo_root,
@@ -629,7 +659,7 @@ def main() -> None:
             expected_sha=args.expected_manifest_identity_sha,
             logger=logger,
         )
-        summary["stages"].append(stage.__dict__)
+        _append_stage(summary, stage="manifest_generation", status="passed", exit_code=stage.exit_code, duration_sec=stage.duration_sec, details=stage.details)
         summary["identity"]["manifest_identity_sha"] = stage.details["manifest_identity_sha"]
         summary["identity"]["manifest_identity_match"] = True
         summary["dataset"] = {
@@ -648,7 +678,7 @@ def main() -> None:
             expected_sha=args.expected_manifest_identity_sha,
             logger=logger,
         )
-        summary["stages"].append(stage.__dict__)
+        _append_stage(summary, stage="authoritative_diagnosis", status="passed", exit_code=stage.exit_code, duration_sec=stage.duration_sec, details=stage.details)
         out_dir = (repo_root / args.output_dir).resolve()
         checkpoint_identity = _read_json(out_dir / "checkpoint_identity.json")
         promotion = _read_json(out_dir / "corrected_promotion_decision.json")
@@ -679,6 +709,11 @@ def main() -> None:
         summary["status"] = "failed"
         summary["failed_stage"] = exc.stage
         summary["failure_reason"] = exc.reason
+        if exc.stage == "tests" and not any(stage["stage"] == "tests" for stage in summary.get("stages", [])):
+            _append_stage(summary, stage="tests", status="failed", exit_code=1, duration_sec=0.0, details={"reason": exc.reason, "modules": list(REQUIRED_TEST_MODULES)})
+        elif exc.stage not in {stage["stage"] for stage in summary.get("stages", [])}:
+            _append_stage(summary, stage=exc.stage, status="failed", exit_code=exc.exit_code, duration_sec=0.0, details={"reason": exc.reason})
+        summary["files_to_provide"] = _failure_files_to_provide(output_dir)
         _atomic_write_json((output_dir / "pipeline_run_summary.json").resolve(), summary)
         logger.write(_final_failure_block(summary, output_dir, exit_code))
     except Exception as exc:  # noqa: BLE001
@@ -686,6 +721,9 @@ def main() -> None:
         summary["status"] = "failed"
         summary["failed_stage"] = "unexpected_exception"
         summary["failure_reason"] = str(exc)
+        if "repository_preflight" not in {stage["stage"] for stage in summary.get("stages", [])} and summary.get("environment"):
+            _append_stage(summary, stage="repository_preflight", status="passed", exit_code=0, duration_sec=0.0, details={"requested_device": args.device})
+        summary["files_to_provide"] = _failure_files_to_provide(output_dir)
         _atomic_write_json((output_dir / "pipeline_run_summary.json").resolve(), summary)
         logger.write(_final_failure_block(summary, output_dir, exit_code))
     finally:
