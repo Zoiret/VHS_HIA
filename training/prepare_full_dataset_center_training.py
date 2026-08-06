@@ -1028,9 +1028,9 @@ def _config_payload() -> dict[str, Any]:
             "pos_weight_max": 1000.0,
             "threshold_policy": {
                 "selection_scope": "validation_only",
-                "selection_metric": "mean_center_f1",
+                "selection_metric": "center_f1_mean_samples",
                 "locked_reference_threshold": LOCKED_REFERENCE_THRESHOLD,
-                "tie_break_rule": "higher_center_count_accuracy_then_lower_threshold",
+                "tie_break_rule": "higher_strict_marker_contract_pass_rate_then_higher_exact_center_count_accuracy_then_lower_localization_error_then_earlier_epoch",
             },
         },
         "center_loss": {
@@ -1050,19 +1050,19 @@ def _config_payload() -> dict[str, Any]:
         "scheduler": {
             "type": "reduce_on_plateau",
             "mode": "max",
-            "monitor": "center_f1",
+            "monitor": "center_f1_mean_samples",
             "factor": 0.5,
             "patience": 5,
             "min_lr": 1e-6,
         },
         "early_stopping": {
-            "monitor": "center_f1",
+            "monitor": "center_f1_mean_samples",
             "mode": "max",
             "patience": 20,
         },
         "validation": {
             "interval_epochs": 1,
-            "primary_metric": "center_f1",
+            "primary_metric": "center_f1_mean_samples",
             "additional_metrics": [
                 "strict_marker_contract_pass_rate",
                 "exact_center_count_accuracy",
@@ -1075,6 +1075,7 @@ def _config_payload() -> dict[str, Any]:
         "train": {
             "save_dir": "training/runs/unetpp_effb3_centerhead_x2_2_adapter_full_dataset_baseline_100ep",
             "init_checkpoint": "training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth",
+            "init_checkpoint_sha256": "ea19846a35da02cc0cb6041d814f206719eb1926f3b02cfd6fbf448d39834c48",
             "epochs": 100,
             "batch_size": 6,
             "lr": 0.001,
@@ -1093,7 +1094,8 @@ def _config_payload() -> dict[str, Any]:
             "log_every": 25,
             "smoke_steps": 1,
             "freeze_base": True,
-            "checkpoint_selection_metric": "center_f1",
+            "checkpoint_selection_metric": "center_f1_mean_samples",
+            "require_exact_semantic_checkpoint_load": True,
         },
     }
 

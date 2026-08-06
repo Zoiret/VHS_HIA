@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import time
@@ -55,6 +56,195 @@ def _get_save_dir(cfg: dict) -> Path:
     if not save_dir:
         raise SystemExit("Config: train.save_dir is required")
     return Path(save_dir).resolve()
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _append_dict_rows(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    with path.open("a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key) for key in fieldnames})
+
+
+def _configs_equal_for_run(existing: dict, current: dict) -> bool:
+    return json.dumps(existing, sort_keys=True, ensure_ascii=False) == json.dumps(current, sort_keys=True, ensure_ascii=False)
+
+
+def _ensure_save_dir_compatible(out_dir: Path, cfg: dict) -> None:
+    if not out_dir.exists():
+        return
+    existing_entries = [p.name for p in out_dir.iterdir()]
+    if not existing_entries:
+        return
+    config_path = out_dir / "config.json"
+    if not config_path.exists():
+        raise SystemExit(f"Save directory already contains files without config.json: {out_dir}")
+    existing_cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    if not _configs_equal_for_run(existing_cfg, cfg):
+        raise SystemExit(f"Save directory already contains an incompatible run: {out_dir}")
+
+
+def _float_or_none(x):
+    return None if x is None else float(x)
+
+
+def _candidate_key(row: dict | None, *, primary_metric: str, epoch: int, include_threshold: bool) -> tuple:
+    if not isinstance(row, dict):
+        return (-float("inf"), -float("inf"), -float("inf"), -float("inf"), float("inf"), float("inf"))
+    loc_err = row.get("localization_error_px", row.get("center_loc_err_px", None))
+    threshold = row.get("threshold", None)
+    return (
+        float(row.get(primary_metric) if row.get(primary_metric) is not None else -float("inf")),
+        float(row.get("strict_marker_contract_pass_rate") if row.get("strict_marker_contract_pass_rate") is not None else -float("inf")),
+        float(row.get("exact_center_count_accuracy", row.get("center_count_acc", None)) if (row.get("exact_center_count_accuracy", row.get("center_count_acc", None)) is not None) else -float("inf")),
+        -float(loc_err if loc_err is not None else float("inf")),
+        -float(epoch),
+        -float(threshold) if include_threshold and threshold is not None else 0.0,
+    )
+
+
+def _select_best_threshold_row(rows: list[dict], *, primary_metric: str = "center_f1_mean_samples") -> dict | None:
+    best = None
+    best_key = None
+    for row in rows:
+        key = _candidate_key(row, primary_metric=primary_metric, epoch=0, include_threshold=True)
+        if best_key is None or key > best_key:
+            best = row
+            best_key = key
+    return best
+
+
+def _is_better_epoch_candidate(candidate: dict | None, incumbent: dict | None, *, epoch: int, incumbent_epoch: int | None, primary_metric: str) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    if incumbent is None or incumbent_epoch is None:
+        return True
+    return _candidate_key(candidate, primary_metric=primary_metric, epoch=epoch, include_threshold=False) > _candidate_key(incumbent, primary_metric=primary_metric, epoch=incumbent_epoch, include_threshold=False)
+
+
+def _write_validation_reports(out_dir: Path, *, epoch: int, val_metrics: dict, sweep_res: dict | None, locked_threshold: float) -> None:
+    per_patient_rows = []
+    for patient_id, metrics in sorted((val_metrics.get("per_patient_center_metrics") or {}).items()):
+        per_patient_rows.append(
+            {
+                "epoch": int(epoch),
+                "patient_id": str(patient_id),
+                **dict(metrics),
+            }
+        )
+    _append_dict_rows(
+        out_dir / "validation_per_patient_metrics.csv",
+        per_patient_rows,
+        [
+            "epoch",
+            "patient_id",
+            "sample_count",
+            "center_precision",
+            "center_recall",
+            "center_f1",
+            "center_precision_mean_samples",
+            "center_recall_mean_samples",
+            "center_f1_mean_samples",
+            "exact_center_count_accuracy",
+            "strict_marker_contract_pass_count",
+            "strict_marker_contract_pass_rate",
+            "localization_error_px",
+        ],
+    )
+    per_gt_rows = []
+    for gt_count, metrics in sorted((val_metrics.get("per_gt_count_center_metrics") or {}).items(), key=lambda kv: int(kv[0])):
+        per_gt_rows.append(
+            {
+                "epoch": int(epoch),
+                "gt_instance_count": int(gt_count),
+                **dict(metrics),
+            }
+        )
+    _append_dict_rows(
+        out_dir / "validation_gt_count_metrics.csv",
+        per_gt_rows,
+        [
+            "epoch",
+            "gt_instance_count",
+            "sample_count",
+            "center_precision",
+            "center_recall",
+            "center_f1",
+            "center_precision_mean_samples",
+            "center_recall_mean_samples",
+            "center_f1_mean_samples",
+            "exact_center_count_accuracy",
+            "strict_marker_contract_pass_count",
+            "strict_marker_contract_pass_rate",
+            "localization_error_px",
+        ],
+    )
+    threshold_rows = []
+    rows = list((sweep_res or {}).get("rows") or [])
+    primary = _select_best_threshold_row(rows)
+    for row in rows:
+        threshold_rows.append(
+            {
+                "epoch": int(epoch),
+                **dict(row),
+                "is_locked_reference_threshold": bool(abs(float(row["threshold"]) - float(locked_threshold)) < 1e-9),
+                "is_best_primary_threshold": bool(primary is not None and abs(float(row["threshold"]) - float(primary["threshold"])) < 1e-9),
+            }
+        )
+    _append_dict_rows(
+        out_dir / "validation_threshold_summary.csv",
+        threshold_rows,
+        [
+            "epoch",
+            "threshold",
+            "center_precision",
+            "center_recall",
+            "center_f1",
+            "center_precision_mean_samples",
+            "center_recall_mean_samples",
+            "center_f1_mean_samples",
+            "predicted_center_count_mean",
+            "predicted_center_count_median",
+            "exact_center_count_accuracy",
+            "strict_marker_contract_pass_count",
+            "strict_marker_contract_pass_rate",
+            "missing_gt_instances",
+            "gt_instances_with_multiple_markers",
+            "markers_outside_all_gt_instances",
+            "localization_error_px",
+            "sample_count_gt1",
+            "sample_count_gt2",
+            "sample_count_gt3",
+            "pass_count_gt1",
+            "pass_count_gt2",
+            "pass_count_gt3",
+            "is_locked_reference_threshold",
+            "is_best_primary_threshold",
+        ],
+    )
 
 
 def _seed_all(seed: int) -> None:
@@ -182,6 +372,14 @@ def _build_model(cfg: dict) -> torch.nn.Module:
 
     init_path = (cfg.get("train") or {}).get("init_checkpoint", None)
     center_from_scratch = True
+    model.semantic_init_report = {
+        "checkpoint_path": str(init_path) if init_path else None,
+        "missing_keys": [],
+        "unexpected_keys": [],
+        "allowed_missing_keys": [],
+        "disallowed_missing_keys": [],
+        "status": "not_loaded" if not init_path else "pending",
+    }
     if init_path:
         missing, unexpected = load_semantic_checkpoint_non_strict(model, str(init_path))
         print(f"Loaded init checkpoint: {init_path}")
@@ -195,9 +393,23 @@ def _build_model(cfg: dict) -> torch.nn.Module:
             print(f"- {k}")
         if len(unexpected) > 50:
             print(f"... ({len(unexpected) - 50} more)")
-        center_missing_prefix = "center_head."
-        center_missing = [k for k in missing if str(k).startswith(center_missing_prefix)]
+        allowed_missing = [k for k in missing if str(k).startswith("center_head.") or str(k).startswith("center_adapter.")]
+        disallowed_missing = [k for k in missing if k not in allowed_missing]
+        center_missing = [k for k in missing if str(k).startswith("center_head.") or str(k).startswith("center_adapter.")]
         center_from_scratch = bool(len(center_missing) > 0)
+        model.semantic_init_report = {
+            "checkpoint_path": str(Path(init_path).resolve()),
+            "missing_keys": list(missing),
+            "unexpected_keys": list(unexpected),
+            "allowed_missing_keys": list(allowed_missing),
+            "disallowed_missing_keys": list(disallowed_missing),
+            "status": "exact" if (not disallowed_missing and not unexpected) else "mismatch",
+        }
+        if bool((cfg.get("train") or {}).get("require_exact_semantic_checkpoint_load", False)) and (disallowed_missing or unexpected):
+            raise SystemExit(
+                "Semantic checkpoint load is not exact: "
+                f"disallowed_missing={len(disallowed_missing)} unexpected={len(unexpected)}"
+            )
 
     init_bias = (cfg.get("model") or {}).get("center_head_init_bias", None)
     applied_bias = None
@@ -989,8 +1201,15 @@ def _threshold_sweep(
             "center_precision": m.get("center_precision"),
             "center_recall": m.get("center_recall"),
             "center_f1": m.get("center_f1"),
+            "center_precision_mean_samples": m.get("center_precision_mean_samples"),
+            "center_recall_mean_samples": m.get("center_recall_mean_samples"),
+            "center_f1_mean_samples": m.get("center_f1_mean_samples"),
             "center_count_acc": m.get("center_count_acc"),
+            "exact_center_count_accuracy": m.get("center_count_acc"),
+            "strict_marker_contract_pass_count": m.get("strict_marker_contract_pass_count"),
+            "strict_marker_contract_pass_rate": m.get("strict_marker_contract_pass_rate"),
             "center_loc_err_px": m.get("center_loc_err_px"),
+            "localization_error_px": m.get("center_loc_err_px"),
             "center_zero_cases": m.get("center_zero_cases"),
             "center_extra_cases": m.get("center_extra_cases"),
             "instance_exact_count_acc": m.get("instance_exact_count_acc"),
@@ -999,20 +1218,20 @@ def _threshold_sweep(
             "instance_mean_matched_iou": m.get("instance_mean_matched_iou"),
             "instance_perfect_rate": m.get("instance_perfect_rate"),
             "instance_score": float(inst_score) if inst_score is not None else None,
+            "sample_count_gt1": (m.get("per_gt_count_center_metrics") or {}).get("1", {}).get("sample_count"),
+            "sample_count_gt2": (m.get("per_gt_count_center_metrics") or {}).get("2", {}).get("sample_count"),
+            "sample_count_gt3": (m.get("per_gt_count_center_metrics") or {}).get("3", {}).get("sample_count"),
+            "pass_count_gt1": (m.get("per_gt_count_center_metrics") or {}).get("1", {}).get("strict_marker_contract_pass_count"),
+            "pass_count_gt2": (m.get("per_gt_count_center_metrics") or {}).get("2", {}).get("strict_marker_contract_pass_count"),
+            "pass_count_gt3": (m.get("per_gt_count_center_metrics") or {}).get("3", {}).get("strict_marker_contract_pass_count"),
         }
         rows.append(row)
-    def _pick_best(key: str) -> dict | None:
-        best_row = None
-        for r in rows:
-            if best_row is None or float(r.get(key) or 0.0) > float(best_row.get(key) or 0.0):
-                best_row = r
-        return best_row
     return {
         "rows": rows,
-        "best": _pick_best("center_f1"),
-        "best_center_f1": _pick_best("center_f1"),
-        "best_center_count_acc": _pick_best("center_count_acc"),
-        "best_instance_score": _pick_best("instance_score"),
+        "best": _select_best_threshold_row(rows, primary_metric="center_f1_mean_samples"),
+        "best_center_f1": _select_best_threshold_row(rows, primary_metric="center_f1_mean_samples"),
+        "best_center_count_acc": _select_best_threshold_row(rows, primary_metric="exact_center_count_accuracy"),
+        "best_instance_score": _select_best_threshold_row(rows, primary_metric="instance_score"),
     }
 
 
@@ -1403,8 +1622,32 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
 
 def train(cfg: dict, device: torch.device) -> None:
     out_dir = _get_save_dir(cfg)
+    _ensure_save_dir_compatible(out_dir, cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "config.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json_atomic(out_dir / "config.json", cfg)
+
+    semantic_ckpt = Path((cfg.get("train") or {}).get("init_checkpoint", "")).resolve()
+    train_manifest = Path((cfg.get("dataset") or {}).get("train_manifest", "")).resolve() if (cfg.get("dataset") or {}).get("train_manifest") else None
+    val_manifest = Path((cfg.get("dataset") or {}).get("val_manifest", "")).resolve() if (cfg.get("dataset") or {}).get("val_manifest") else None
+    identities = {
+        "semantic_checkpoint_path": str(semantic_ckpt),
+        "semantic_checkpoint_sha256": _sha256_file(semantic_ckpt) if semantic_ckpt.exists() else None,
+        "expected_semantic_checkpoint_sha256": (cfg.get("train") or {}).get("init_checkpoint_sha256"),
+        "train_manifest_path": str(train_manifest) if train_manifest else None,
+        "train_manifest_sha256": _sha256_file(train_manifest) if train_manifest and train_manifest.exists() else None,
+        "expected_train_manifest_sha256": (cfg.get("dataset") or {}).get("train_manifest_sha256"),
+        "val_manifest_path": str(val_manifest) if val_manifest else None,
+        "val_manifest_sha256": _sha256_file(val_manifest) if val_manifest and val_manifest.exists() else None,
+        "expected_val_manifest_sha256": (cfg.get("dataset") or {}).get("val_manifest_sha256"),
+        "device": str(device),
+    }
+    if identities["expected_semantic_checkpoint_sha256"] and identities["semantic_checkpoint_sha256"] != identities["expected_semantic_checkpoint_sha256"]:
+        raise SystemExit("Semantic checkpoint identity mismatch")
+    if identities["expected_train_manifest_sha256"] and identities["train_manifest_sha256"] != identities["expected_train_manifest_sha256"]:
+        raise SystemExit("Train manifest identity mismatch")
+    if identities["expected_val_manifest_sha256"] and identities["val_manifest_sha256"] != identities["expected_val_manifest_sha256"]:
+        raise SystemExit("Validation manifest identity mismatch")
+    _write_json_atomic(out_dir / "preflight_identities.json", identities)
 
     freeze_base = _freeze_base_enabled(cfg)
     partial_unfreeze = _partial_unfreeze_enabled(cfg)
@@ -1484,8 +1727,11 @@ def train(cfg: dict, device: torch.device) -> None:
                     "dice_leaflet",
                     "dice_ring",
                     "center_f1",
+                    "center_f1_mean_samples",
                     "center_precision",
                     "center_recall",
+                    "strict_marker_contract_pass_rate",
+                    "strict_marker_contract_pass_count",
                     "center_pos_frac",
                     "center_pred_count_mean",
                     "center_gt_count_mean",
@@ -1551,13 +1797,16 @@ def train(cfg: dict, device: torch.device) -> None:
     best_center_f1 = None
     best_center_count_acc = None
     best_instance = None
+    best_primary_candidate = None
     best_epoch_mean_fg = None
     best_epoch_center = None
     best_epoch_center_count_acc = None
     best_epoch_instance = None
+    best_epoch_primary = None
     no_improve = 0
 
     center_thr = float((cfg.get("center") or {}).get("marker_thr", 0.3))
+    primary_metric_key = str((cfg.get("train") or {}).get("checkpoint_selection_metric", "center_f1_mean_samples"))
     semantic_mean_fg0 = None
     semantic_degradation_streak = 0
 
@@ -1603,8 +1852,11 @@ def train(cfg: dict, device: torch.device) -> None:
                 float(val_metrics0["dice"][1]) if isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 1 else "",
                 float(val_metrics0["dice"][2]) if isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 2 else "",
                 float(val_metrics0.get("center_f1")) if val_metrics0.get("center_f1") is not None else "",
+                float(val_metrics0.get("center_f1_mean_samples")) if val_metrics0.get("center_f1_mean_samples") is not None else "",
                 float(val_metrics0.get("center_precision")) if val_metrics0.get("center_precision") is not None else "",
                 float(val_metrics0.get("center_recall")) if val_metrics0.get("center_recall") is not None else "",
+                float(val_metrics0.get("strict_marker_contract_pass_rate")) if val_metrics0.get("strict_marker_contract_pass_rate") is not None else "",
+                int(val_metrics0.get("strict_marker_contract_pass_count")) if val_metrics0.get("strict_marker_contract_pass_count") is not None else "",
                 float(val_metrics0.get("center_pos_frac")) if val_metrics0.get("center_pos_frac") is not None else "",
                 float(val_metrics0.get("center_pred_count_mean")) if val_metrics0.get("center_pred_count_mean") is not None else "",
                 float(val_metrics0.get("center_gt_count_mean")) if val_metrics0.get("center_gt_count_mean") is not None else "",
@@ -1673,6 +1925,7 @@ def train(cfg: dict, device: torch.device) -> None:
             max_samples=20,
         )
         (out_dir / "epoch0_metrics.json").write_text(json.dumps({"val_metrics": val_metrics0, "instance_score": inst_score0, "threshold_sweep": sweep0}, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_validation_reports(out_dir, epoch=0, val_metrics=val_metrics0, sweep_res=sweep0, locked_threshold=center_thr)
 
     for epoch in range(1, epochs + 1):
         _set_train_modes(model, freeze_base=freeze_base)
@@ -1860,7 +2113,14 @@ def train(cfg: dict, device: torch.device) -> None:
         sweep_best_center = (sweep_res or {}).get("best_center_f1") if isinstance(sweep_res, dict) else None
         sweep_best_count = (sweep_res or {}).get("best_center_count_acc") if isinstance(sweep_res, dict) else None
         sweep_best_inst = (sweep_res or {}).get("best_instance_score") if isinstance(sweep_res, dict) else None
-        center_f1_for_ckpt = float(sweep_best_center.get("center_f1")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("center_f1") is not None else (float(center_f1) if center_f1 is not None else None)
+        primary_candidate = sweep_best_center if isinstance(sweep_best_center, dict) else {
+            "threshold": float(center_thr),
+            "center_f1_mean_samples": _float_or_none(val_metrics.get("center_f1_mean_samples")),
+            "strict_marker_contract_pass_rate": _float_or_none(val_metrics.get("strict_marker_contract_pass_rate")),
+            "exact_center_count_accuracy": _float_or_none(val_metrics.get("center_count_acc")),
+            "localization_error_px": _float_or_none(val_metrics.get("center_loc_err_px")),
+        }
+        center_f1_for_ckpt = float(primary_candidate.get(primary_metric_key)) if isinstance(primary_candidate, dict) and primary_candidate.get(primary_metric_key) is not None else (float(center_f1) if center_f1 is not None else None)
         center_count_acc_for_ckpt = float(sweep_best_count.get("center_count_acc")) if isinstance(sweep_best_count, dict) and sweep_best_count.get("center_count_acc") is not None else (float(val_metrics.get("center_count_acc")) if val_metrics.get("center_count_acc") is not None else None)
         inst_score_for_ckpt = float(sweep_best_inst.get("instance_score")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_score") is not None else (float(inst_score) if inst_score is not None else None)
 
@@ -1894,8 +2154,11 @@ def train(cfg: dict, device: torch.device) -> None:
                     float(val_metrics["dice"][1]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 1 else "",
                     float(val_metrics["dice"][2]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 2 else "",
                     float(center_f1) if center_f1 is not None else "",
+                    float(val_metrics.get("center_f1_mean_samples")) if val_metrics.get("center_f1_mean_samples") is not None else "",
                     float(val_metrics.get("center_precision")) if val_metrics.get("center_precision") is not None else "",
                     float(val_metrics.get("center_recall")) if val_metrics.get("center_recall") is not None else "",
+                    float(val_metrics.get("strict_marker_contract_pass_rate")) if val_metrics.get("strict_marker_contract_pass_rate") is not None else "",
+                    int(val_metrics.get("strict_marker_contract_pass_count")) if val_metrics.get("strict_marker_contract_pass_count") is not None else "",
                     float(val_metrics.get("center_pos_frac")) if val_metrics.get("center_pos_frac") is not None else "",
                     float(val_metrics.get("center_pred_count_mean")) if val_metrics.get("center_pred_count_mean") is not None else "",
                     float(val_metrics.get("center_gt_count_mean")) if val_metrics.get("center_gt_count_mean") is not None else "",
@@ -1954,6 +2217,7 @@ def train(cfg: dict, device: torch.device) -> None:
                     lr_center_now,
                 ]
             )
+        _write_validation_reports(out_dir, epoch=epoch, val_metrics=val_metrics, sweep_res=sweep_res, locked_threshold=center_thr)
 
         if freeze_base and (not partial_unfreeze) and semantic_mean_fg0 is not None and mean_fg is not None:
             dev = abs(float(mean_fg) - float(semantic_mean_fg0))
@@ -1991,6 +2255,26 @@ def train(cfg: dict, device: torch.device) -> None:
                     tag="best_center_f1",
                     max_samples=20,
                 )
+            improved = True
+        if _is_better_epoch_candidate(primary_candidate, best_primary_candidate, epoch=epoch, incumbent_epoch=best_epoch_primary, primary_metric=primary_metric_key):
+            best_primary_candidate = dict(primary_candidate)
+            best_epoch_primary = int(epoch)
+            best_primary_path = out_dir / "best_primary.pth"
+            _save_checkpoint(best_primary_path, model, optimizer, epoch, cfg, extra={"val": val_metrics, "threshold_sweep": sweep_res, "best_threshold_metrics": primary_candidate})
+            best_primary_sha = _sha256_file(best_primary_path)
+            _write_json_atomic(
+                out_dir / "best_checkpoint_metadata.json",
+                {
+                    "checkpoint_path": str(best_primary_path.resolve()),
+                    "checkpoint_sha256": best_primary_sha,
+                    "epoch": int(epoch),
+                    "selection_metric": primary_metric_key,
+                    "tie_break_rule": "higher_strict_marker_contract_pass_rate_then_higher_exact_center_count_accuracy_then_lower_localization_error_then_earlier_epoch",
+                    "best_threshold_metrics": primary_candidate,
+                    "locked_reference_threshold": float(center_thr),
+                    "locked_reference_metrics": next((row for row in list((sweep_res or {}).get("rows") or []) if abs(float(row["threshold"]) - float(center_thr)) < 1e-9), None),
+                },
+            )
             improved = True
         if center_count_acc_for_ckpt is not None and (best_center_count_acc is None or float(center_count_acc_for_ckpt) > float(best_center_count_acc)):
             best_center_count_acc = float(center_count_acc_for_ckpt)
@@ -2056,7 +2340,7 @@ def train(cfg: dict, device: torch.device) -> None:
         if freeze_base:
             print(
                 f"epoch={epoch} time={dt:.1f}s train_center_loss={train_loss:.6f} "
-                f"mean_fg={mean_fg} center_f1={center_f1_for_ckpt} instance_score={inst_score_for_ckpt} "
+                f"mean_fg={mean_fg} center_metric={center_f1_for_ckpt} instance_score={inst_score_for_ckpt} "
                 f"grad_mean={grad_norm_mean_before:.4f} grad_max={grad_norm_before_max:.4f} clipped={clipped_pct:.1f}% "
                 f"nonfinite_grad_batches={nonfinite_grad_batches} skipped_steps={skipped_optimizer_steps} "
                 f"lr_decoder={lr_unfrozen_decoder_now:.2e} lr_center={lr_center_now:.2e}"
@@ -2064,7 +2348,7 @@ def train(cfg: dict, device: torch.device) -> None:
         else:
             print(
                 f"epoch={epoch} time={dt:.1f}s train_loss={train_loss:.6f} "
-                f"mean_fg={mean_fg} center_f1={center_f1} instance_score={inst_score} "
+                f"mean_fg={mean_fg} center_metric={center_f1_for_ckpt} instance_score={inst_score} "
                 f"lr_backbone={lr_backbone_now:.2e} lr_center={lr_center_now:.2e}"
             )
 
@@ -2079,6 +2363,8 @@ def train(cfg: dict, device: torch.device) -> None:
                 "best_epoch_mean_fg": best_epoch_mean_fg,
                 "best_center_f1": best_center_f1,
                 "best_epoch_center_f1": best_epoch_center,
+                "best_primary_metric": best_primary_candidate,
+                "best_epoch_primary_metric": best_epoch_primary,
                 "best_center_count_acc": best_center_count_acc,
                 "best_epoch_center_count_acc": best_epoch_center_count_acc,
                 "best_instance_score": best_instance,
@@ -2090,6 +2376,25 @@ def train(cfg: dict, device: torch.device) -> None:
             indent=2,
         ),
         encoding="utf-8",
+    )
+    _write_json_atomic(
+        out_dir / "final_training_summary.json",
+        {
+            "best_mean_fg": best_mean_fg,
+            "best_epoch_mean_fg": best_epoch_mean_fg,
+            "best_center_f1": best_center_f1,
+            "best_epoch_center_f1": best_epoch_center,
+            "best_primary_metric": best_primary_candidate,
+            "best_epoch_primary_metric": best_epoch_primary,
+            "best_center_count_acc": best_center_count_acc,
+            "best_epoch_center_count_acc": best_epoch_center_count_acc,
+            "best_instance_score": best_instance,
+            "best_epoch_instance_score": best_epoch_instance,
+            "selection_metric": primary_metric_key,
+            "locked_reference_threshold": float(center_thr),
+            "center_loss": center_loss_info,
+            "lambda_center": lambda_center,
+        },
     )
 
 

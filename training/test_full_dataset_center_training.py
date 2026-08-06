@@ -193,7 +193,9 @@ class TestFullDatasetCenterTraining(unittest.TestCase):
         self.assertIn("train_manifest", cfg["dataset"])
         self.assertIn("val_manifest", cfg["dataset"])
         self.assertEqual(cfg["center"]["threshold_policy"]["locked_reference_threshold"], 0.03)
-        self.assertEqual(cfg["train"]["checkpoint_selection_metric"], "center_f1")
+        self.assertEqual(cfg["train"]["checkpoint_selection_metric"], "center_f1_mean_samples")
+        self.assertEqual(cfg["scheduler"]["monitor"], "center_f1_mean_samples")
+        self.assertTrue(cfg["train"]["require_exact_semantic_checkpoint_load"])
 
     def test_config_yaml_parses(self):
         mod = self._mod()

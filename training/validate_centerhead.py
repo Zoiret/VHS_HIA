@@ -81,6 +81,95 @@ def _match_centers(pred_yx: list[tuple[int, int]], gt_yx: list[tuple[int, int]],
     return tp, fp, fn, matches
 
 
+def _patient_id_from_sample(sample_id: str) -> str:
+    if "_s" not in str(sample_id):
+        return str(sample_id)
+    return str(sample_id).rsplit("_s", 1)[0]
+
+
+def _positive_label_ids(labels: np.ndarray) -> list[int]:
+    return [int(v) for v in np.unique(labels) if int(v) > 0]
+
+
+def _sample_center_metrics(pred_pts: list[tuple[int, int]], gt_pts: list[tuple[int, int]]) -> dict:
+    tp, fp, fn, matches = _match_centers(pred_pts, gt_pts, max_dist_px=16.0)
+    precision = float(tp / max(tp + fp, 1))
+    recall = float(tp / max(tp + fn, 1))
+    f1 = float((2.0 * precision * recall) / max(precision + recall, 1e-7))
+    loc_err = float(sum(float(m[4]) for m in matches) / max(len(matches), 1))
+    return {
+        "center_precision": precision,
+        "center_recall": recall,
+        "center_f1": f1,
+        "center_count_accuracy": float(int(len(pred_pts) == len(gt_pts))),
+        "center_loc_err_px": loc_err,
+        "predicted_center_count": int(len(pred_pts)),
+        "gt_center_count": int(len(gt_pts)),
+        "tp": int(tp),
+        "fp": int(fp),
+        "fn": int(fn),
+    }
+
+
+def _marker_contract(gt_inst: np.ndarray, pred_pts: list[tuple[int, int]]) -> dict:
+    gt_instance_ids = _positive_label_ids(gt_inst)
+    counts = {int(inst_id): 0 for inst_id in gt_instance_ids}
+    outside = 0
+    for y, x in pred_pts:
+        inst_id = int(gt_inst[int(y), int(x)]) if 0 <= int(y) < gt_inst.shape[0] and 0 <= int(x) < gt_inst.shape[1] else 0
+        if int(inst_id) == 0:
+            outside += 1
+        elif int(inst_id) in counts:
+            counts[int(inst_id)] += 1
+    zero = [int(inst_id) for inst_id, c in counts.items() if int(c) == 0]
+    multi = [int(inst_id) for inst_id, c in counts.items() if int(c) > 1]
+    one = [int(inst_id) for inst_id, c in counts.items() if int(c) == 1]
+    gt_total = int(len(gt_instance_ids))
+    return {
+        "extracted_marker_count": int(len(pred_pts)),
+        "markers_outside_all_gt_instances": int(outside),
+        "missing_gt_instance_markers": int(len(zero)),
+        "multiple_markers_inside_gt_instances": int(len(multi)),
+        "gt_instances_total": gt_total,
+        "gt_instances_with_exactly_one_marker_count": int(len(one)),
+        "one_marker_per_instance_rate": float(len(one) / max(gt_total, 1)),
+        "marker_contract_pass": bool(int(len(pred_pts)) == gt_total and len(zero) == 0 and len(multi) == 0 and int(outside) == 0),
+    }
+
+
+def _aggregate_center_rows(rows: list[dict]) -> dict:
+    if not rows:
+        return {
+            "sample_count": 0,
+            "center_precision": None,
+            "center_recall": None,
+            "center_f1": None,
+            "center_precision_mean_samples": None,
+            "center_recall_mean_samples": None,
+            "center_f1_mean_samples": None,
+            "exact_center_count_accuracy": None,
+            "strict_marker_contract_pass_count": 0,
+            "strict_marker_contract_pass_rate": None,
+            "localization_error_px": None,
+        }
+    tp = int(sum(int(row["tp"]) for row in rows))
+    fp = int(sum(int(row["fp"]) for row in rows))
+    fn = int(sum(int(row["fn"]) for row in rows))
+    return {
+        "sample_count": int(len(rows)),
+        "center_precision": float(tp / max(tp + fp, 1)),
+        "center_recall": float(tp / max(tp + fn, 1)),
+        "center_f1": float((2.0 * tp) / max(2 * tp + fp + fn, 1)),
+        "center_precision_mean_samples": float(np.mean([float(row["center_precision"]) for row in rows])),
+        "center_recall_mean_samples": float(np.mean([float(row["center_recall"]) for row in rows])),
+        "center_f1_mean_samples": float(np.mean([float(row["center_f1"]) for row in rows])),
+        "exact_center_count_accuracy": float(np.mean([float(row["center_count_acc"]) for row in rows])),
+        "strict_marker_contract_pass_count": int(sum(1 for row in rows if bool(row["marker_contract_pass"]))),
+        "strict_marker_contract_pass_rate": float(np.mean([1.0 if bool(row["marker_contract_pass"]) else 0.0 for row in rows])),
+        "localization_error_px": float(np.mean([float(row["center_loc_err_px"]) for row in rows])),
+    }
+
+
 def _connected_components(mask01: np.ndarray) -> tuple[np.ndarray, int]:
     m = (mask01.astype(np.uint8) > 0).astype(np.uint8) * 255
     n, labels = cv2.connectedComponents(m, connectivity=8)
@@ -376,6 +465,7 @@ def validate_centerhead(
     prob_far_n = 0
     prob_max_sum = 0.0
     prob_max_n = 0
+    center_rows: list[dict] = []
 
     for batch in tqdm(loader, desc="Validate(centerhead)", leave=False):
         images = batch["image"].to(device, non_blocking=True)
@@ -414,8 +504,12 @@ def validate_centerhead(
             pred_pts = [(y, x) for (y, x, _) in _markers_from_center_map(pred_center[i, 0], leaf_union, float(center_thr), max_markers=3)]
             meta_p = meta_paths[i] if i < len(meta_paths) else None
             gt_pts = _extract_metadata_centers(str(meta_p)) if isinstance(meta_p, str) and meta_p else []
+            center_metrics = _sample_center_metrics(pred_pts, gt_pts)
 
-            tpi, fpi, fni, matches = _match_centers(pred_pts, gt_pts, max_dist_px=16.0)
+            tpi = int(center_metrics["tp"])
+            fpi = int(center_metrics["fp"])
+            fni = int(center_metrics["fn"])
+            _tp2, _fp2, _fn2, matches = _match_centers(pred_pts, gt_pts, max_dist_px=16.0)
             tp += int(tpi)
             fp += int(fpi)
             fn += int(fni)
@@ -485,6 +579,28 @@ def validate_centerhead(
             if gt_k <= 0:
                 continue
 
+            marker_contract = _marker_contract(gt_inst, pred_pts)
+            center_rows.append(
+                {
+                    "sample": str(sid),
+                    "patient_id": _patient_id_from_sample(str(sid)),
+                    "gt_instance_count": int(len(gt_pts)),
+                    "tp": int(tpi),
+                    "fp": int(fpi),
+                    "fn": int(fni),
+                    "center_precision": float(center_metrics["center_precision"]),
+                    "center_recall": float(center_metrics["center_recall"]),
+                    "center_f1": float(center_metrics["center_f1"]),
+                    "center_count_acc": float(center_metrics["center_count_accuracy"]),
+                    "center_loc_err_px": float(center_metrics["center_loc_err_px"]),
+                    "predicted_center_count": int(center_metrics["predicted_center_count"]),
+                    "marker_contract_pass": bool(marker_contract["marker_contract_pass"]),
+                    "missing_gt_instance_markers": int(marker_contract["missing_gt_instance_markers"]),
+                    "multiple_markers_inside_gt_instances": int(marker_contract["multiple_markers_inside_gt_instances"]),
+                    "markers_outside_all_gt_instances": int(marker_contract["markers_outside_all_gt_instances"]),
+                }
+            )
+
             pred_inst, pred_k, _pred_pts_scored = reconstruct_instances_from_semantic_and_center(
                 pred_sem[i],
                 pred_center[i, 0],
@@ -537,6 +653,16 @@ def validate_centerhead(
     prob_near_mean = float(prob_near_sum / max(prob_near_n, 1))
     prob_far_mean = float(prob_far_sum / max(prob_far_n, 1))
     prob_max_mean = float(prob_max_sum / max(prob_max_n, 1))
+    agg_all = _aggregate_center_rows(center_rows)
+    per_gt_count = {
+        str(gt_count): _aggregate_center_rows([row for row in center_rows if int(row["gt_instance_count"]) == int(gt_count)])
+        for gt_count in (1, 2, 3)
+    }
+    per_patient_ids = sorted({str(row["patient_id"]) for row in center_rows})
+    per_patient = {
+        patient_id: _aggregate_center_rows([row for row in center_rows if str(row["patient_id"]) == str(patient_id)])
+        for patient_id in per_patient_ids
+    }
 
     return {
         "semantic_loss": float(total_sem_loss / max(n_batches, 1)),
@@ -565,4 +691,12 @@ def validate_centerhead(
         "center_prob_mean_near": prob_near_mean,
         "center_prob_mean_far": prob_far_mean,
         "center_prob_mean_max": prob_max_mean,
+        "center_precision_mean_samples": agg_all["center_precision_mean_samples"],
+        "center_recall_mean_samples": agg_all["center_recall_mean_samples"],
+        "center_f1_mean_samples": agg_all["center_f1_mean_samples"],
+        "strict_marker_contract_pass_count": agg_all["strict_marker_contract_pass_count"],
+        "strict_marker_contract_pass_rate": agg_all["strict_marker_contract_pass_rate"],
+        "per_gt_count_center_metrics": per_gt_count,
+        "per_patient_center_metrics": per_patient,
+        "per_sample_center_rows": center_rows,
     }
