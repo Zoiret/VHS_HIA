@@ -1,0 +1,169 @@
+{
+  "seed": 1337,
+  "train_manifest": "E:\\3d_visual\\ml\\training\\manifests\\center_full_train_manifest.jsonl",
+  "val_manifest": "E:\\3d_visual\\ml\\training\\manifests\\center_full_val_manifest.jsonl",
+  "train_txt": "E:\\3d_visual\\ml\\training\\manifests\\center_full_train.txt",
+  "val_txt": "E:\\3d_visual\\ml\\training\\manifests\\center_full_val.txt",
+  "train_manifest_sha256": "f130780e24170ca2476936335dbeb9a6779970fc9c1aa174a0b59e52a1453b66",
+  "val_manifest_sha256": "42ce62dbe7316c898dc4c2a7849972a62b974c3941b88c4f1d9ae3502cb55940",
+  "patients_per_split": {
+    "train": [
+      "m01_p01",
+      "m01_p02",
+      "m02_p01",
+      "m03_p01",
+      "m06_p01",
+      "m07_p01",
+      "m08_p01",
+      "m09_p01",
+      "m10_p01",
+      "m10_p02",
+      "m10_p03",
+      "m11_p01",
+      "m11_p02",
+      "m11_p03",
+      "m11_p04",
+      "m12_p01",
+      "m12_p03",
+      "m13_p01",
+      "m13_p02",
+      "m13_p03",
+      "m14_p01",
+      "m14_p02",
+      "m14_p03",
+      "m15_p01",
+      "m15_p02"
+    ],
+    "val": [
+      "m04_p01",
+      "m05_p01",
+      "m12_p02"
+    ]
+  },
+  "samples_per_split": {
+    "train": 332,
+    "val": 93
+  },
+  "gt_count_distribution": {
+    "train": {
+      "1": 46,
+      "2": 119,
+      "3": 167
+    },
+    "val": {
+      "1": 16,
+      "2": 31,
+      "3": 46
+    }
+  },
+  "foreground_statistics": {
+    "train": {
+      "count": 332,
+      "min": 8743,
+      "max": 373410,
+      "mean": 122053.6656626506,
+      "median": 110341.5
+    },
+    "val": {
+      "count": 93,
+      "min": 36113,
+      "max": 246688,
+      "mean": 96407.90322580645,
+      "median": 93422.0
+    }
+  },
+  "microset_membership": {
+    "train": [
+      "m01_p01_s00",
+      "m01_p01_s01",
+      "m01_p01_s02",
+      "m01_p01_s03",
+      "m01_p02_s00",
+      "m01_p02_s04"
+    ],
+    "val": []
+  },
+  "overlap_checks": {
+    "patient_leakage": false,
+    "sample_overlap": [],
+    "authoritative_holdout_overlap_train": [],
+    "authoritative_holdout_overlap_val": []
+  },
+  "threshold_policy": {
+    "selection_scope": "validation_only",
+    "selection_metric": "mean_center_f1",
+    "locked_reference_threshold": 0.03,
+    "tie_break_rule": "higher_center_count_accuracy_then_lower_threshold"
+  },
+  "reference_authoritative_baseline": {
+    "locked_threshold": 0.03,
+    "center_f1": 0.0101,
+    "strict_marker_contract_pass_count": 3,
+    "strict_marker_contract_total": 106,
+    "bottleneck": "mixed_center_and_semantic_failure"
+  },
+  "seed_selection": {
+    "seed": 1337,
+    "validation_ratio": 0.2,
+    "patient_counts": {
+      "train": 25,
+      "val": 3
+    },
+    "sample_counts": {
+      "train": 332,
+      "val": 93
+    },
+    "gt_distribution": {
+      "train": {
+        "1": 46,
+        "2": 119,
+        "3": 167
+      },
+      "val": {
+        "1": 16,
+        "2": 31,
+        "3": 46
+      }
+    },
+    "patients": {
+      "train": [
+        "m01_p01",
+        "m01_p02",
+        "m02_p01",
+        "m03_p01",
+        "m06_p01",
+        "m07_p01",
+        "m08_p01",
+        "m09_p01",
+        "m10_p01",
+        "m10_p02",
+        "m10_p03",
+        "m11_p01",
+        "m11_p02",
+        "m11_p03",
+        "m11_p04",
+        "m12_p01",
+        "m12_p03",
+        "m13_p01",
+        "m13_p02",
+        "m13_p03",
+        "m14_p01",
+        "m14_p02",
+        "m14_p03",
+        "m15_p01",
+        "m15_p02"
+      ],
+      "val": [
+        "m04_p01",
+        "m05_p01",
+        "m12_p02"
+      ]
+    }
+  },
+  "holdout_sample_count": 106,
+  "holdout_overlap_checks": {
+    "train": [],
+    "val": []
+  },
+  "duplicate_content_across_train_val": []
+}

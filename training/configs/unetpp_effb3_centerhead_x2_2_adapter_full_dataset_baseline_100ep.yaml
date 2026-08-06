@@ -1,0 +1,112 @@
+seed: 1337
+dataset:
+  root: datasets/converted_leaflet_distance
+  train_txt: training/manifests/center_full_train.txt
+  val_txt: training/manifests/center_full_val.txt
+  train_manifest: training/manifests/center_full_train_manifest.jsonl
+  val_manifest: training/manifests/center_full_val_manifest.jsonl
+  split_summary: training/manifests/center_full_split_summary.json
+  instance_root: datasets/converted_leaflet_instances
+model:
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+  center_head_type: spatial_dilated
+  center_head_init_bias: -2.19
+  center_initialization_policy: semantic_checkpoint_base_only_center_head_and_adapter_from_scratch
+  center_feature:
+    module_path: base.decoder.blocks.x_2_2
+    expected_channels: 32
+    adapter_out_channels: 16
+    native_stride: 4
+    upsample_logits_to_target: true
+loss:
+  ce_class_weights:
+  - 0.2
+  - 1.0
+  - 2.5
+  ce_coef: 0.3
+  dice_coef: 0.7
+center:
+  lambda: 1.0
+  marker_thr: 0.03
+  pos_weight: 1000.0
+  pos_weight_thr: 0.5
+  pos_weight_max: 1000.0
+  threshold_policy:
+    selection_scope: validation_only
+    selection_metric: mean_center_f1
+    locked_reference_threshold: 0.03
+    tie_break_rule: higher_center_count_accuracy_then_lower_threshold
+center_loss:
+  type: centernet_focal
+  alpha: 2.0
+  beta: 4.0
+  normalization_mode: legacy_num_pos
+  threshold_sweep:
+  - 0.005
+  - 0.01
+  - 0.02
+  - 0.03
+  - 0.05
+  - 0.1
+  - 0.2
+  - 0.3
+  - 0.5
+  - 0.7
+  - 0.8
+  - 0.9
+augment:
+  rotate90: false
+  hflip: false
+  vflip: false
+  brightness_contrast: false
+  gamma: false
+scheduler:
+  type: reduce_on_plateau
+  mode: max
+  monitor: center_f1
+  factor: 0.5
+  patience: 5
+  min_lr: 1.0e-06
+early_stopping:
+  monitor: center_f1
+  mode: max
+  patience: 20
+validation:
+  interval_epochs: 1
+  primary_metric: center_f1
+  additional_metrics:
+  - strict_marker_contract_pass_rate
+  - exact_center_count_accuracy
+  - precision
+  - recall
+  - localization_error
+  stratify_by_gt_count:
+  - 1
+  - 2
+  - 3
+train:
+  save_dir: training/runs/unetpp_effb3_centerhead_x2_2_adapter_full_dataset_baseline_100ep
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth
+  epochs: 100
+  batch_size: 6
+  lr: 0.001
+  lr_backbone: 1.0e-05
+  lr_center_head: 0.001
+  lr_center_adapter: 0.001
+  optimizer: adamw
+  weight_decay: 0.0
+  center_grad_clip_norm: 5.0
+  center_fp32: true
+  amp: true
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  prefetch_factor: 2
+  log_every: 25
+  smoke_steps: 1
+  freeze_base: true
+  checkpoint_selection_metric: center_f1
