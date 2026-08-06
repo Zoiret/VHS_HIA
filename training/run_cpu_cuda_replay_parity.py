@@ -20,6 +20,7 @@ DEFAULT_OUTPUT_DIR = "training/analysis/centerhead_spatial_x2_2_cpu_cuda_replay_
 EXIT_SUCCESS = 0
 EXIT_IDENTITY_MISMATCH = 30
 EXIT_DISCRETE_MISMATCH = 31
+EXIT_OUTPUT_SERIALIZATION_FAILED = 32
 EXIT_BUNDLE_FAILURE = 70
 EXIT_UNEXPECTED_EXCEPTION = 99
 
@@ -61,16 +62,102 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    _write_parity_csv(path, rows)
+
+
+def _normalized_record_type(row: dict[str, Any]) -> str:
+    explicit = str(row.get("record_type", "")).strip()
+    if explicit:
+        return explicit
+    kind = str(row.get("kind", "")).strip()
+    if kind == "center":
+        return "center_diagnostic"
+    if kind == "scope":
+        return "oracle_policy"
+    return "unknown"
+
+
+def _prepare_parity_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prepared = []
+    for row in rows:
+        normalized = dict(row)
+        normalized["record_type"] = _normalized_record_type(normalized)
+        prepared.append(normalized)
+    prepared.sort(
+        key=lambda row: (
+            str(row.get("sample", "")),
+            str(row.get("threshold", "")),
+            str(row.get("record_type", "")),
+            str(row.get("scope", "")),
+            str(row.get("policy", "")),
+        )
+    )
+    return prepared
+
+
+def _fieldnames_for_parity_rows(rows: list[dict[str, Any]]) -> list[str]:
+    prepared = _prepare_parity_rows(rows)
+    all_keys = set()
+    for row in prepared:
+        all_keys.update(str(key) for key in row.keys())
+    identity_columns = ["sample", "threshold"]
+    record_type_column = ["record_type"]
+    common_comparison_columns = [
+        "scope",
+        "policy",
+        "marker_contract_pass_equal",
+        "predicted_count_equal",
+        "marker_count_equal",
+        "output_count_equal",
+        "invariant_equal",
+        "center_f1_abs_delta",
+        "matched_iou_abs_delta",
+        "dice_abs_delta",
+    ]
+    preferred = identity_columns + record_type_column + common_comparison_columns
+    extras = sorted(key for key in all_keys if key not in preferred and key != "kind")
+    fieldnames = [key for key in preferred if key in all_keys]
+    if "kind" in all_keys and "kind" not in fieldnames:
+        extras.append("kind")
+    fieldnames.extend(extras)
+    return fieldnames
+
+
+def _missing_schema_keys(rows: list[dict[str, Any]], fieldnames: list[str]) -> list[str]:
+    fieldname_set = set(fieldnames)
+    missing = set()
+    for row in rows:
+        for key in row.keys():
+            if str(key) not in fieldname_set:
+                missing.add(str(key))
+    return sorted(missing)
+
+
+def _write_parity_csv(path: Path, rows: list[dict[str, Any]], *, fieldnames: list[str] | None = None) -> tuple[list[str], int]:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         raise ParityFailure("Parity CSV has no rows", EXIT_DISCRETE_MISMATCH)
-    fieldnames = list(rows[0].keys())
+    prepared = _prepare_parity_rows(rows)
+    chosen_fieldnames = list(fieldnames) if fieldnames is not None else _fieldnames_for_parity_rows(prepared)
+    missing_keys = _missing_schema_keys(prepared, chosen_fieldnames)
+    if missing_keys:
+        raise ParityFailure(
+            f"Parity CSV schema missing keys: {missing_keys}",
+            EXIT_OUTPUT_SERIALIZATION_FAILED,
+        )
     with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8", newline="") as tmp:
-        writer = csv.DictWriter(tmp, fieldnames=fieldnames)
+        writer = csv.DictWriter(tmp, fieldnames=chosen_fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(prepared)
         tmp_path = Path(tmp.name)
     tmp_path.replace(path)
+    actual_rows = list(csv.DictReader(path.read_text(encoding="utf-8").splitlines()))
+    if len(actual_rows) != len(prepared):
+        raise ParityFailure(
+            f"Parity CSV row count mismatch after write: expected {len(prepared)} got {len(actual_rows)}",
+            EXIT_OUTPUT_SERIALIZATION_FAILED,
+        )
+    return chosen_fieldnames, len(prepared)
 
 
 def _sha256_file(path: Path) -> str:
@@ -240,32 +327,71 @@ def main() -> None:
     logger = TeeLogger((output_dir / "parity.log").resolve())
     summary: dict[str, Any] = {
         "status": "failed",
+        "failed_stage": None,
         "failure_reason": None,
         "samples_compared": 0,
         "canonical_manifest_match": False,
         "checkpoint_match": False,
+        "semantic_checkpoint_match": False,
+        "sample_ids_match": False,
         "discrete_output_match": False,
         "classification": None,
+        "offending_keys": [],
+        "prepared_row_count": 0,
         "files_to_provide": [],
     }
     exit_code = EXIT_SUCCESS
     try:
         logger.log("Validating local/server diagnosis identity")
         ident = _validate_identity(local_dir, server_dir)
+        summary.update(
+            {
+                "canonical_manifest_match": bool(ident["canonical_manifest_match"]),
+                "checkpoint_match": bool(ident["checkpoint_match"]),
+                "semantic_checkpoint_match": bool(ident["semantic_checkpoint_match"]),
+                "sample_ids_match": bool(ident["sample_ids_match"]),
+                "samples_compared": int(ident["samples"]),
+                "identity": ident,
+            }
+        )
         logger.log("Running per-sample replay parity comparison")
         rows, replay_summary = _replay_parity_rows(local_dir, server_dir)
         classification = _classify(replay_summary)
-        _write_csv((output_dir / "per_sample_replay_parity.csv").resolve(), rows)
         replay_payload = dict(replay_summary)
         replay_payload["classification"] = classification
+        summary.update(
+            {
+                "classification": classification,
+                "discrete_output_match": bool(replay_summary["exact_discrete_matches"]),
+                "replay_summary": replay_payload,
+                "prepared_row_count": len(rows),
+            }
+        )
+        _atomic_write_json((output_dir / "parity_run_summary.json").resolve(), summary)
+        try:
+            fieldnames, written_row_count = _write_parity_csv((output_dir / "per_sample_replay_parity.csv").resolve(), rows)
+        except ParityFailure as exc:
+            if exc.exit_code == EXIT_OUTPUT_SERIALIZATION_FAILED:
+                offending = []
+                if "missing keys:" in exc.reason:
+                    offending = [part.strip(" []'") for part in exc.reason.split("missing keys:", 1)[1].split(",")]
+                summary.update(
+                    {
+                        "failed_stage": "output_serialization",
+                        "failure_reason": exc.reason,
+                        "offending_keys": [key for key in offending if key],
+                    }
+                )
+                _atomic_write_json((output_dir / "parity_run_summary.json").resolve(), summary)
+            raise
+        summary["csv_fieldnames"] = fieldnames
+        summary["written_row_count"] = written_row_count
         _atomic_write_json((output_dir / "replay_parity.json").resolve(), replay_payload)
         summary.update(
             {
                 "status": "success" if classification != "device_sensitive_discrete_output" else "failed",
+                "failed_stage": None if classification != "device_sensitive_discrete_output" else "discrete_output_mismatch",
                 "failure_reason": None if classification != "device_sensitive_discrete_output" else "Discrete CPU/CUDA output mismatch",
-                "samples_compared": ident["samples"],
-                "canonical_manifest_match": True,
-                "checkpoint_match": True,
                 "discrete_output_match": bool(replay_summary["exact_discrete_matches"]),
                 "classification": classification,
                 "replay_summary": replay_payload,
@@ -289,6 +415,7 @@ def main() -> None:
     except ParityFailure as exc:
         exit_code = exc.exit_code
         summary["status"] = "failed"
+        summary["failed_stage"] = summary.get("failed_stage") or ("output_serialization" if exc.exit_code == EXIT_OUTPUT_SERIALIZATION_FAILED else "parity_runner")
         summary["failure_reason"] = exc.reason
         _atomic_write_json((output_dir / "parity_run_summary.json").resolve(), summary)
         logger.write(
@@ -301,6 +428,7 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         exit_code = EXIT_UNEXPECTED_EXCEPTION
         summary["status"] = "failed"
+        summary["failed_stage"] = "unexpected_exception"
         summary["failure_reason"] = str(exc)
         _atomic_write_json((output_dir / "parity_run_summary.json").resolve(), summary)
         logger.write(
