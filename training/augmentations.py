@@ -88,17 +88,113 @@ def _center_crop(
 
 
 def _random_brightness_contrast(image: np.ndarray) -> np.ndarray:
+    raise NotImplementedError("Use _random_brightness_contrast_with_rng")
+
+
+def _maybe_float(cfg: dict | None, key: str, default: float) -> float:
+    if not cfg:
+        return float(default)
+    value = cfg.get(key, default)
+    return float(value)
+
+
+def sample_train_augmentation_params(cfg: dict | None = None, *, rng=None) -> dict:
+    rr = rng if rng is not None else random
+    cfg = dict(cfg or {})
+    rotate90 = _flag(cfg, "rotate90", True)
+    hflip_enabled = _flag(cfg, "hflip", True)
+    vflip_enabled = _flag(cfg, "vflip", True)
+    brightness_contrast_enabled = _flag(cfg, "brightness_contrast", False)
+    gamma_enabled = _flag(cfg, "gamma", False)
+    contrast_limit = _maybe_float(cfg, "contrast_limit", 0.15)
+    brightness_limit = _maybe_float(cfg, "brightness_limit", 20.0)
+    gamma_min = _maybe_float(cfg, "gamma_min", 0.9)
+    gamma_max = _maybe_float(cfg, "gamma_max", 1.1)
+    return {
+        "hflip": bool(hflip_enabled and rr.random() < 0.5),
+        "vflip": bool(vflip_enabled and rr.random() < 0.5),
+        "rot90_k": int(rr.randint(0, 3)) if rotate90 else 0,
+        "brightness_delta": float(rr.uniform(-brightness_limit, brightness_limit)) if brightness_contrast_enabled else 0.0,
+        "contrast_delta": float(rr.uniform(-contrast_limit, contrast_limit)) if brightness_contrast_enabled else 0.0,
+        "gamma": float(rr.uniform(gamma_min, gamma_max)) if gamma_enabled else 1.0,
+    }
+
+
+def apply_exact_geometric_transform(
+    image: np.ndarray,
+    mask: np.ndarray,
+    *,
+    boundary: np.ndarray | None = None,
+    center: np.ndarray | None = None,
+    hflip: bool = False,
+    vflip: bool = False,
+    rot90_k: int = 0,
+):
+    if bool(hflip):
+        image = np.ascontiguousarray(image[:, ::-1, :])
+        mask = np.ascontiguousarray(mask[:, ::-1])
+        if boundary is not None:
+            boundary = np.ascontiguousarray(boundary[:, ::-1])
+        if center is not None:
+            center = np.ascontiguousarray(center[:, ::-1])
+    if bool(vflip):
+        image = np.ascontiguousarray(image[::-1, :, :])
+        mask = np.ascontiguousarray(mask[::-1, :])
+        if boundary is not None:
+            boundary = np.ascontiguousarray(boundary[::-1, :])
+        if center is not None:
+            center = np.ascontiguousarray(center[::-1, :])
+    k = int(rot90_k) % 4
+    if k:
+        image = np.ascontiguousarray(np.rot90(image, k))
+        mask = np.ascontiguousarray(np.rot90(mask, k))
+        if boundary is not None:
+            boundary = np.ascontiguousarray(np.rot90(boundary, k))
+        if center is not None:
+            center = np.ascontiguousarray(np.rot90(center, k))
+    if boundary is None and center is None:
+        return image, mask
+    if boundary is not None and center is None:
+        return image, mask, boundary
+    if boundary is None and center is not None:
+        return image, mask, center
+    return image, mask, boundary, center
+
+
+def transform_points_row_col_yx(
+    points_yx: list[tuple[int, int]],
+    shape_hw: tuple[int, int],
+    *,
+    hflip: bool = False,
+    vflip: bool = False,
+    rot90_k: int = 0,
+) -> list[tuple[int, int]]:
+    h, w = [int(v) for v in shape_hw]
+    out: list[tuple[int, int]] = []
+    for y0, x0 in points_yx:
+        y = int(y0)
+        x = int(x0)
+        if bool(hflip):
+            x = int(w - 1 - x)
+        if bool(vflip):
+            y = int(h - 1 - y)
+        hh, ww = h, w
+        for _ in range(int(rot90_k) % 4):
+            y, x = int(ww - 1 - x), int(y)
+            hh, ww = ww, hh
+        out.append((int(y), int(x)))
+    return out
+
+
+def _random_brightness_contrast_with_rng(image: np.ndarray, *, contrast_delta: float, brightness_delta: float) -> np.ndarray:
     img = image.astype(np.float32)
-    contrast = random.uniform(-0.15, 0.15)
-    brightness = random.uniform(-20.0, 20.0)
-    img = img * (1.0 + contrast) + brightness
+    img = img * (1.0 + float(contrast_delta)) + float(brightness_delta)
     return np.clip(img, 0.0, 255.0).astype(np.uint8)
 
 
-def _random_gamma(image: np.ndarray) -> np.ndarray:
+def _random_gamma_with_value(image: np.ndarray, *, gamma: float) -> np.ndarray:
     img = image.astype(np.float32) / 255.0
-    gamma = random.uniform(0.9, 1.1)
-    img = np.power(img, gamma) * 255.0
+    img = np.power(img, float(gamma)) * 255.0
     return np.clip(img, 0.0, 255.0).astype(np.uint8)
 
 
@@ -112,6 +208,11 @@ class TrainAugmentations:
         vflip: bool,
         brightness_contrast: bool,
         gamma: bool,
+        random_crop: bool | None,
+        brightness_limit: float,
+        contrast_limit: float,
+        gamma_min: float,
+        gamma_max: float,
     ) -> None:
         self.input_h = int(input_h)
         self.input_w = int(input_w)
@@ -120,34 +221,45 @@ class TrainAugmentations:
         self.vflip = bool(vflip)
         self.brightness_contrast = bool(brightness_contrast)
         self.gamma = bool(gamma)
+        self.random_crop = None if random_crop is None else bool(random_crop)
+        self.brightness_limit = float(brightness_limit)
+        self.contrast_limit = float(contrast_limit)
+        self.gamma_min = float(gamma_min)
+        self.gamma_max = float(gamma_max)
 
     def __call__(self, image: np.ndarray, mask: np.ndarray, boundary: np.ndarray | None = None, center: np.ndarray | None = None):
-        if self.hflip and random.random() < 0.5:
-            image = np.ascontiguousarray(image[:, ::-1, :])
-            mask = np.ascontiguousarray(mask[:, ::-1])
-            if boundary is not None:
-                boundary = np.ascontiguousarray(boundary[:, ::-1])
-            if center is not None:
-                center = np.ascontiguousarray(center[:, ::-1])
-        if self.vflip and random.random() < 0.5:
-            image = np.ascontiguousarray(image[::-1, :, :])
-            mask = np.ascontiguousarray(mask[::-1, :])
-            if boundary is not None:
-                boundary = np.ascontiguousarray(boundary[::-1, :])
-            if center is not None:
-                center = np.ascontiguousarray(center[::-1, :])
+        params = sample_train_augmentation_params(
+            {
+                "rotate90": self.rotate90,
+                "hflip": self.hflip,
+                "vflip": self.vflip,
+                "brightness_contrast": self.brightness_contrast,
+                "gamma": self.gamma,
+                "brightness_limit": self.brightness_limit,
+                "contrast_limit": self.contrast_limit,
+                "gamma_min": self.gamma_min,
+                "gamma_max": self.gamma_max,
+            }
+        )
+        out = apply_exact_geometric_transform(
+            image,
+            mask,
+            boundary=boundary,
+            center=center,
+            hflip=bool(params["hflip"]),
+            vflip=bool(params["vflip"]),
+            rot90_k=int(params["rot90_k"]),
+        )
+        if boundary is None and center is None:
+            image, mask = out
+        elif boundary is not None and center is None:
+            image, mask, boundary = out
+        elif boundary is None and center is not None:
+            image, mask, center = out
+        else:
+            image, mask, boundary, center = out
 
-        if self.rotate90:
-            k = random.randint(0, 3)
-            if k:
-                image = np.ascontiguousarray(np.rot90(image, k))
-                mask = np.ascontiguousarray(np.rot90(mask, k))
-                if boundary is not None:
-                    boundary = np.ascontiguousarray(np.rot90(boundary, k))
-                if center is not None:
-                    center = np.ascontiguousarray(np.rot90(center, k))
-
-        deterministic_crop = (not self.rotate90) and (not self.hflip) and (not self.vflip)
+        deterministic_crop = (self.random_crop is False) or ((self.random_crop is None) and (not self.rotate90) and (not self.hflip) and (not self.vflip))
         if boundary is None and center is None:
             if deterministic_crop:
                 image, mask = _center_crop(image, mask, self.input_h, self.input_w)
@@ -166,9 +278,13 @@ class TrainAugmentations:
                 image, mask, boundary, center = out
 
         if self.brightness_contrast:
-            image = _random_brightness_contrast(image)
+            image = _random_brightness_contrast_with_rng(
+                image,
+                contrast_delta=float(params["contrast_delta"]),
+                brightness_delta=float(params["brightness_delta"]),
+            )
         if self.gamma:
-            image = _random_gamma(image)
+            image = _random_gamma_with_value(image, gamma=float(params["gamma"]))
 
         if boundary is None and center is None:
             return image, mask
@@ -205,6 +321,11 @@ def get_train_augmentations(input_h: int, input_w: int, augment_cfg: dict | None
         vflip=_flag(cfg, "vflip", True),
         brightness_contrast=_flag(cfg, "brightness_contrast", False),
         gamma=_flag(cfg, "gamma", False),
+        random_crop=cfg.get("random_crop", None),
+        brightness_limit=_maybe_float(cfg, "brightness_limit", 20.0),
+        contrast_limit=_maybe_float(cfg, "contrast_limit", 0.15),
+        gamma_min=_maybe_float(cfg, "gamma_min", 0.9),
+        gamma_max=_maybe_float(cfg, "gamma_max", 1.1),
     )
 
 

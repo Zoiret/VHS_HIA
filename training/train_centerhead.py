@@ -111,6 +111,14 @@ def _float_or_none(x):
     return None if x is None else float(x)
 
 
+def _locked_threshold_context_label(locked_threshold: float) -> str:
+    return f"locked_reference_threshold@{float(locked_threshold):.6f}"
+
+
+def _best_sweep_threshold_context_label() -> str:
+    return "best_validation_threshold_from_sweep"
+
+
 def _candidate_key(row: dict | None, *, primary_metric: str, epoch: int, include_threshold: bool) -> tuple:
     if not isinstance(row, dict):
         return (-float("inf"), -float("inf"), -float("inf"), -float("inf"), float("inf"), float("inf"))
@@ -1758,6 +1766,21 @@ def train(cfg: dict, device: torch.device) -> None:
                     "sweep_best_threshold_instance_score",
                     "sweep_best_instance_score",
                     "sweep_best_instance_mean_matched_iou",
+                    "scheduler_monitor_name",
+                    "scheduler_monitor_threshold_context",
+                    "scheduler_monitor_value",
+                    "checkpoint_selection_metric_name",
+                    "checkpoint_selection_threshold_context",
+                    "checkpoint_selection_metric_value",
+                    "early_stop_metric_name",
+                    "early_stop_threshold_context",
+                    "early_stop_reset_policy",
+                    "early_stop_metric_value",
+                    "lr_before_scheduler_step",
+                    "lr_after_scheduler_step",
+                    "scheduler_best",
+                    "scheduler_num_bad_epochs",
+                    "scheduler_cooldown_counter",
                     "train_grad_norm_mean_before_clip",
                     "train_grad_norm_max_before_clip",
                     "train_center_grad_norm_mean_before_clip",
@@ -1883,6 +1906,21 @@ def train(cfg: dict, device: torch.device) -> None:
                 float(sweep0_inst.get("threshold")) if isinstance(sweep0_inst, dict) and sweep0_inst.get("threshold") is not None else "",
                 float(sweep0_inst.get("instance_score")) if isinstance(sweep0_inst, dict) and sweep0_inst.get("instance_score") is not None else "",
                 float(sweep0_inst.get("instance_mean_matched_iou")) if isinstance(sweep0_inst, dict) and sweep0_inst.get("instance_mean_matched_iou") is not None else "",
+                str((scheduler_cfg or {}).get("monitor", early_monitor)) if scheduler is not None else "",
+                _locked_threshold_context_label(center_thr) if scheduler is not None else "",
+                "",
+                str(primary_metric_key),
+                _best_sweep_threshold_context_label() if freeze_base else _locked_threshold_context_label(center_thr),
+                float(sweep0_center.get(primary_metric_key)) if isinstance(sweep0_center, dict) and sweep0_center.get(primary_metric_key) is not None else (float(val_metrics0.get(primary_metric_key)) if val_metrics0.get(primary_metric_key) is not None else ""),
+                str(early_monitor),
+                _locked_threshold_context_label(center_thr),
+                "any_checkpoint_improvement_resets_patience",
+                float(val_metrics0.get(early_monitor)) if val_metrics0.get(early_monitor) is not None else (float(inst_score0) if early_monitor == "instance_score" and inst_score0 is not None else ""),
+                "",
+                "",
+                "",
+                "",
+                "",
                 "",
                 "",
                 "",
@@ -2141,82 +2179,6 @@ def train(cfg: dict, device: torch.device) -> None:
         center_grad_mean_after = float(center_grad_after_sum / max(n_batches, 1))
         decoder_grad_mean_after = float(decoder_grad_after_sum / max(n_batches, 1))
         combined_grad_mean_after = float(combined_grad_after_sum / max(n_batches, 1))
-
-        with metrics_csv.open("a", encoding="utf-8", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(
-                [
-                    epoch,
-                    train_loss,
-                    float(val_metrics["semantic_loss"]),
-                    float(val_metrics["center_loss"]),
-                    float(mean_fg) if mean_fg is not None else "",
-                    float(val_metrics["dice"][1]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 1 else "",
-                    float(val_metrics["dice"][2]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 2 else "",
-                    float(center_f1) if center_f1 is not None else "",
-                    float(val_metrics.get("center_f1_mean_samples")) if val_metrics.get("center_f1_mean_samples") is not None else "",
-                    float(val_metrics.get("center_precision")) if val_metrics.get("center_precision") is not None else "",
-                    float(val_metrics.get("center_recall")) if val_metrics.get("center_recall") is not None else "",
-                    float(val_metrics.get("strict_marker_contract_pass_rate")) if val_metrics.get("strict_marker_contract_pass_rate") is not None else "",
-                    int(val_metrics.get("strict_marker_contract_pass_count")) if val_metrics.get("strict_marker_contract_pass_count") is not None else "",
-                    float(val_metrics.get("center_pos_frac")) if val_metrics.get("center_pos_frac") is not None else "",
-                    float(val_metrics.get("center_pred_count_mean")) if val_metrics.get("center_pred_count_mean") is not None else "",
-                    float(val_metrics.get("center_gt_count_mean")) if val_metrics.get("center_gt_count_mean") is not None else "",
-                    int(val_metrics.get("center_zero_cases")) if val_metrics.get("center_zero_cases") is not None else "",
-                    int(val_metrics.get("center_extra_cases")) if val_metrics.get("center_extra_cases") is not None else "",
-                    float(val_metrics.get("center_loc_err_px")) if val_metrics.get("center_loc_err_px") is not None else "",
-                    float(val_metrics.get("center_count_acc")) if val_metrics.get("center_count_acc") is not None else "",
-                    float(inst_score) if inst_score is not None else "",
-                    float(val_metrics["instance_exact_count_acc"]),
-                    float(val_metrics["instance_mean_matched_iou"]),
-                    float(val_metrics.get("instance_median_matched_iou")) if val_metrics.get("instance_median_matched_iou") is not None else "",
-                    float(val_metrics["instance_merged_rate"]),
-                    float(val_metrics["instance_fragmented_rate"]),
-                    float(val_metrics.get("instance_mixed_rate")) if val_metrics.get("instance_mixed_rate") is not None else "",
-                    float(val_metrics.get("instance_perfect_rate")) if val_metrics.get("instance_perfect_rate") is not None else "",
-                    float(val_metrics.get("center_prob_mean_pos")) if val_metrics.get("center_prob_mean_pos") is not None else "",
-                    float(val_metrics.get("center_prob_mean_near")) if val_metrics.get("center_prob_mean_near") is not None else "",
-                    float(val_metrics.get("center_prob_mean_far")) if val_metrics.get("center_prob_mean_far") is not None else "",
-                    float(val_metrics.get("center_prob_mean_max")) if val_metrics.get("center_prob_mean_max") is not None else "",
-                    float(sweep_best_center.get("threshold")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("threshold") is not None else "",
-                    float(sweep_best_center.get("center_f1")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("center_f1") is not None else "",
-                    float(sweep_best_count.get("threshold")) if isinstance(sweep_best_count, dict) and sweep_best_count.get("threshold") is not None else "",
-                    float(sweep_best_count.get("center_count_acc")) if isinstance(sweep_best_count, dict) and sweep_best_count.get("center_count_acc") is not None else "",
-                    float(sweep_best_inst.get("threshold")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("threshold") is not None else "",
-                    float(sweep_best_inst.get("instance_score")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_score") is not None else "",
-                    float(sweep_best_inst.get("instance_mean_matched_iou")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_mean_matched_iou") is not None else "",
-                    grad_norm_mean_before,
-                    grad_norm_before_max,
-                    center_grad_mean_before,
-                    decoder_grad_mean_before,
-                    combined_grad_mean_before,
-                    float(finite_grad_norm_mean_before) if finite_grad_norm_mean_before is not None else "",
-                    float(finite_grad_norm_before_max) if finite_batch_count > 0 else "",
-                    int(nonfinite_grad_batches),
-                    int(skipped_optimizer_steps),
-                    int(clipped_batches),
-                    clipped_pct,
-                    grad_norm_mean_after,
-                    center_grad_mean_after,
-                    decoder_grad_mean_after,
-                    combined_grad_mean_after,
-                    float(amp_scale_min) if amp_scale_min is not None else "",
-                    float(amp_scale_max) if amp_scale_max is not None else "",
-                    float(amp_scale_last) if amp_scale_last is not None else "",
-                    bool(train_loss_is_finite),
-                    bool(params_finite),
-                    bool(train_logits_finite),
-                    (last_precision_info or {}).get("decoder_features_dtype", ""),
-                    (last_precision_info or {}).get("center_logits_dtype", ""),
-                    (last_precision_info or {}).get("center_loss_dtype", ""),
-                    (last_precision_info or {}).get("center_grad_scaler_enabled", ""),
-                    float(center_w_norm) if center_w_norm is not None else "",
-                    float(center_bias) if center_bias is not None else "",
-                    lr_unfrozen_decoder_now if partial_unfreeze else "",
-                    "" if freeze_base else lr_backbone_now,
-                    lr_center_now,
-                ]
-            )
         _write_validation_reports(out_dir, epoch=epoch, val_metrics=val_metrics, sweep_res=sweep_res, locked_threshold=center_thr)
 
         if freeze_base and (not partial_unfreeze) and semantic_mean_fg0 is not None and mean_fg is not None:
@@ -2312,19 +2274,128 @@ def train(cfg: dict, device: torch.device) -> None:
                 max_samples=20,
             )
 
+        scheduler_monitor_name = str((scheduler_cfg or {}).get("monitor", early_monitor)) if scheduler is not None else ""
+        scheduler_monitor_threshold_context = _locked_threshold_context_label(center_thr) if scheduler is not None else ""
+        checkpoint_selection_metric_name = str(primary_metric_key)
+        checkpoint_selection_threshold_context = _best_sweep_threshold_context_label() if freeze_base else _locked_threshold_context_label(center_thr)
+        checkpoint_selection_metric_value = center_f1_for_ckpt
+        early_stop_metric_name = str(early_monitor)
+        early_stop_threshold_context = _locked_threshold_context_label(center_thr)
+        early_stop_reset_policy = "any_checkpoint_improvement_resets_patience"
+        lr_before_scheduler_step = lr_center_now
+        lr_after_scheduler_step = lr_center_now
+        scheduler_best_value = None
+        scheduler_num_bad_epochs = None
+        scheduler_cooldown_counter = None
+
         if scheduler is not None:
-            monitor_key = str((scheduler_cfg or {}).get("monitor", early_monitor))
+            monitor_key = scheduler_monitor_name
             monitor_val = val_metrics.get(monitor_key, None)
             if monitor_val is None and monitor_key == "instance_score":
                 monitor_val = inst_score
             if monitor_val is not None:
                 scheduler.step(float(monitor_val))
+                lr_after_scheduler_step = float(next((g["lr"] for g in optimizer_meta if g["name"] == "center_head"), 0.0)) if freeze_base else float(optimizer.param_groups[1]["lr"])
+                scheduler_best_value = float(scheduler.best)
+                scheduler_num_bad_epochs = int(scheduler.num_bad_epochs)
+                scheduler_cooldown_counter = int(getattr(scheduler, "cooldown_counter", 0))
 
         monitor_val_es = val_metrics.get(early_monitor, None)
         if monitor_val_es is None and early_monitor == "instance_score":
             monitor_val_es = inst_score
         if monitor_val_es is None:
             monitor_val_es = inst_score
+
+        with metrics_csv.open("a", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(
+                [
+                    epoch,
+                    train_loss,
+                    float(val_metrics["semantic_loss"]),
+                    float(val_metrics["center_loss"]),
+                    float(mean_fg) if mean_fg is not None else "",
+                    float(val_metrics["dice"][1]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 1 else "",
+                    float(val_metrics["dice"][2]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 2 else "",
+                    float(center_f1) if center_f1 is not None else "",
+                    float(val_metrics.get("center_f1_mean_samples")) if val_metrics.get("center_f1_mean_samples") is not None else "",
+                    float(val_metrics.get("center_precision")) if val_metrics.get("center_precision") is not None else "",
+                    float(val_metrics.get("center_recall")) if val_metrics.get("center_recall") is not None else "",
+                    float(val_metrics.get("strict_marker_contract_pass_rate")) if val_metrics.get("strict_marker_contract_pass_rate") is not None else "",
+                    int(val_metrics.get("strict_marker_contract_pass_count")) if val_metrics.get("strict_marker_contract_pass_count") is not None else "",
+                    float(val_metrics.get("center_pos_frac")) if val_metrics.get("center_pos_frac") is not None else "",
+                    float(val_metrics.get("center_pred_count_mean")) if val_metrics.get("center_pred_count_mean") is not None else "",
+                    float(val_metrics.get("center_gt_count_mean")) if val_metrics.get("center_gt_count_mean") is not None else "",
+                    int(val_metrics.get("center_zero_cases")) if val_metrics.get("center_zero_cases") is not None else "",
+                    int(val_metrics.get("center_extra_cases")) if val_metrics.get("center_extra_cases") is not None else "",
+                    float(val_metrics.get("center_loc_err_px")) if val_metrics.get("center_loc_err_px") is not None else "",
+                    float(val_metrics.get("center_count_acc")) if val_metrics.get("center_count_acc") is not None else "",
+                    float(inst_score) if inst_score is not None else "",
+                    float(val_metrics["instance_exact_count_acc"]),
+                    float(val_metrics["instance_mean_matched_iou"]),
+                    float(val_metrics.get("instance_median_matched_iou")) if val_metrics.get("instance_median_matched_iou") is not None else "",
+                    float(val_metrics["instance_merged_rate"]),
+                    float(val_metrics["instance_fragmented_rate"]),
+                    float(val_metrics.get("instance_mixed_rate")) if val_metrics.get("instance_mixed_rate") is not None else "",
+                    float(val_metrics.get("instance_perfect_rate")) if val_metrics.get("instance_perfect_rate") is not None else "",
+                    float(val_metrics.get("center_prob_mean_pos")) if val_metrics.get("center_prob_mean_pos") is not None else "",
+                    float(val_metrics.get("center_prob_mean_near")) if val_metrics.get("center_prob_mean_near") is not None else "",
+                    float(val_metrics.get("center_prob_mean_far")) if val_metrics.get("center_prob_mean_far") is not None else "",
+                    float(val_metrics.get("center_prob_mean_max")) if val_metrics.get("center_prob_mean_max") is not None else "",
+                    float(sweep_best_center.get("threshold")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("threshold") is not None else "",
+                    float(sweep_best_center.get("center_f1")) if isinstance(sweep_best_center, dict) and sweep_best_center.get("center_f1") is not None else "",
+                    float(sweep_best_count.get("threshold")) if isinstance(sweep_best_count, dict) and sweep_best_count.get("threshold") is not None else "",
+                    float(sweep_best_count.get("center_count_acc")) if isinstance(sweep_best_count, dict) and sweep_best_count.get("center_count_acc") is not None else "",
+                    float(sweep_best_inst.get("threshold")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("threshold") is not None else "",
+                    float(sweep_best_inst.get("instance_score")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_score") is not None else "",
+                    float(sweep_best_inst.get("instance_mean_matched_iou")) if isinstance(sweep_best_inst, dict) and sweep_best_inst.get("instance_mean_matched_iou") is not None else "",
+                    scheduler_monitor_name,
+                    scheduler_monitor_threshold_context,
+                    float(monitor_val) if scheduler is not None and monitor_val is not None else "",
+                    checkpoint_selection_metric_name,
+                    checkpoint_selection_threshold_context,
+                    float(checkpoint_selection_metric_value) if checkpoint_selection_metric_value is not None else "",
+                    early_stop_metric_name,
+                    early_stop_threshold_context,
+                    early_stop_reset_policy,
+                    float(monitor_val_es) if monitor_val_es is not None else "",
+                    float(lr_before_scheduler_step),
+                    float(lr_after_scheduler_step),
+                    float(scheduler_best_value) if scheduler_best_value is not None else "",
+                    int(scheduler_num_bad_epochs) if scheduler_num_bad_epochs is not None else "",
+                    int(scheduler_cooldown_counter) if scheduler_cooldown_counter is not None else "",
+                    grad_norm_mean_before,
+                    grad_norm_before_max,
+                    center_grad_mean_before,
+                    decoder_grad_mean_before,
+                    combined_grad_mean_before,
+                    float(finite_grad_norm_mean_before) if finite_grad_norm_mean_before is not None else "",
+                    float(finite_grad_norm_before_max) if finite_batch_count > 0 else "",
+                    int(nonfinite_grad_batches),
+                    int(skipped_optimizer_steps),
+                    int(clipped_batches),
+                    clipped_pct,
+                    grad_norm_mean_after,
+                    center_grad_mean_after,
+                    decoder_grad_mean_after,
+                    combined_grad_mean_after,
+                    float(amp_scale_min) if amp_scale_min is not None else "",
+                    float(amp_scale_max) if amp_scale_max is not None else "",
+                    float(amp_scale_last) if amp_scale_last is not None else "",
+                    bool(train_loss_is_finite),
+                    bool(params_finite),
+                    bool(train_logits_finite),
+                    (last_precision_info or {}).get("decoder_features_dtype", ""),
+                    (last_precision_info or {}).get("center_logits_dtype", ""),
+                    (last_precision_info or {}).get("center_loss_dtype", ""),
+                    (last_precision_info or {}).get("center_grad_scaler_enabled", ""),
+                    float(center_w_norm) if center_w_norm is not None else "",
+                    float(center_bias) if center_bias is not None else "",
+                    lr_unfrozen_decoder_now if partial_unfreeze else "",
+                    "" if freeze_base else lr_backbone_now,
+                    lr_before_scheduler_step,
+                ]
+            )
 
         if monitor_val_es is None:
             no_improve += 1
@@ -2343,13 +2414,13 @@ def train(cfg: dict, device: torch.device) -> None:
                 f"mean_fg={mean_fg} center_metric={center_f1_for_ckpt} instance_score={inst_score_for_ckpt} "
                 f"grad_mean={grad_norm_mean_before:.4f} grad_max={grad_norm_before_max:.4f} clipped={clipped_pct:.1f}% "
                 f"nonfinite_grad_batches={nonfinite_grad_batches} skipped_steps={skipped_optimizer_steps} "
-                f"lr_decoder={lr_unfrozen_decoder_now:.2e} lr_center={lr_center_now:.2e}"
+                f"lr_decoder={lr_unfrozen_decoder_now:.2e} lr_center={lr_before_scheduler_step:.2e}->{lr_after_scheduler_step:.2e}"
             )
         else:
             print(
                 f"epoch={epoch} time={dt:.1f}s train_loss={train_loss:.6f} "
                 f"mean_fg={mean_fg} center_metric={center_f1_for_ckpt} instance_score={inst_score} "
-                f"lr_backbone={lr_backbone_now:.2e} lr_center={lr_center_now:.2e}"
+                f"lr_backbone={lr_backbone_now:.2e} lr_center={lr_before_scheduler_step:.2e}->{lr_after_scheduler_step:.2e}"
             )
 
         if no_improve >= int(early_patience):

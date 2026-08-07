@@ -92,6 +92,25 @@ class TestFullDatasetCenterBaselineDiagnosis(unittest.TestCase):
         hit = next(row for row in out if int(row["gt_instance_count"]) == 3 and int(row["predicted_count"]) == 3)
         self.assertEqual(hit["sample_count"], 1)
 
+    def test_classification_uses_full_trajectory_and_detects_overfitting(self):
+        mod = self._mod()
+        summary_rows = [
+            {"checkpoint_tag": "best_primary", "split": "train", "best_threshold": 0.02, "best_center_f1_mean_samples": 0.128, "best_strict_marker_contract_pass_rate": 0.14, "best_exact_center_count_accuracy": 0.55},
+            {"checkpoint_tag": "best_primary", "split": "val", "best_threshold": 0.01, "best_center_f1_mean_samples": 0.119, "best_strict_marker_contract_pass_rate": 0.29, "best_exact_center_count_accuracy": 0.63},
+            {"checkpoint_tag": "last", "split": "train", "best_threshold": 0.2, "best_center_f1_mean_samples": 0.968, "best_strict_marker_contract_pass_rate": 0.91, "best_exact_center_count_accuracy": 0.91},
+            {"checkpoint_tag": "last", "split": "val", "best_threshold": 0.02, "best_center_f1_mean_samples": 0.046, "best_strict_marker_contract_pass_rate": 0.075, "best_exact_center_count_accuracy": 0.55},
+        ]
+        heat_rows = [
+            {"checkpoint_tag": "best_primary", "split": "train", "threshold": 0.02, "median_margin": -0.04, "fraction_samples_margin_gt_0": 0.0},
+            {"checkpoint_tag": "best_primary", "split": "val", "threshold": 0.01, "median_margin": -0.05, "fraction_samples_margin_gt_0": 0.01},
+            {"checkpoint_tag": "last", "split": "train", "threshold": 0.2, "median_margin": 0.78, "fraction_samples_margin_gt_0": 0.99},
+            {"checkpoint_tag": "last", "split": "val", "threshold": 0.02, "median_margin": -0.075, "fraction_samples_margin_gt_0": 0.0},
+        ]
+        out = mod._classify(summary_rows, heat_rows)
+        self.assertEqual(out["result"], "center_head_overfitting")
+        self.assertAlmostEqual(out["evidence"]["last_train_center_f1_mean_samples"], 0.968, places=6)
+        self.assertAlmostEqual(out["evidence"]["last_val_center_f1_mean_samples"], 0.046, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

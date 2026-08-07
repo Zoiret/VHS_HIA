@@ -596,39 +596,77 @@ def _summary_rows(threshold_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _classify(summary_rows: list[dict[str, Any]], heat_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    best_train = next(row for row in summary_rows if row["checkpoint_tag"] == "best_primary" and row["split"] == "train")
-    best_val = next(row for row in summary_rows if row["checkpoint_tag"] == "best_primary" and row["split"] == "val")
-    heat_train = next(row for row in heat_rows if row["checkpoint_tag"] == "best_primary" and row["split"] == "train" and abs(float(row["threshold"]) - float(best_train["best_threshold"])) < 1e-9)
-    heat_val = next(row for row in heat_rows if row["checkpoint_tag"] == "best_primary" and row["split"] == "val" and abs(float(row["threshold"]) - float(best_val["best_threshold"])) < 1e-9)
+    def _summary(checkpoint_tag: str, split: str) -> dict[str, Any]:
+        return next(row for row in summary_rows if row["checkpoint_tag"] == checkpoint_tag and row["split"] == split)
 
-    train_f1 = float(best_train["best_center_f1_mean_samples"])
-    val_f1 = float(best_val["best_center_f1_mean_samples"])
-    train_contract = float(best_train["best_strict_marker_contract_pass_rate"])
-    val_contract = float(best_val["best_strict_marker_contract_pass_rate"])
-    train_margin = float(heat_train["median_margin"] or 0.0)
-    val_margin = float(heat_val["median_margin"] or 0.0)
-    train_margin_pos = float(heat_train["fraction_samples_margin_gt_0"] or 0.0)
-    val_margin_pos = float(heat_val["fraction_samples_margin_gt_0"] or 0.0)
+    def _heat(checkpoint_tag: str, split: str, threshold: float) -> dict[str, Any]:
+        return next(
+            row
+            for row in heat_rows
+            if row["checkpoint_tag"] == checkpoint_tag
+            and row["split"] == split
+            and abs(float(row["threshold"]) - float(threshold)) < 1e-9
+        )
 
-    if train_f1 >= 0.30 and train_contract >= 0.40 and val_f1 < (train_f1 - 0.10):
+    best_train = _summary("best_primary", "train")
+    best_val = _summary("best_primary", "val")
+    last_train = _summary("last", "train")
+    last_val = _summary("last", "val")
+    best_heat_train = _heat("best_primary", "train", float(best_train["best_threshold"]))
+    best_heat_val = _heat("best_primary", "val", float(best_val["best_threshold"]))
+    last_heat_train = _heat("last", "train", float(last_train["best_threshold"]))
+    last_heat_val = _heat("last", "val", float(last_val["best_threshold"]))
+
+    best_train_f1 = float(best_train["best_center_f1_mean_samples"])
+    best_val_f1 = float(best_val["best_center_f1_mean_samples"])
+    best_train_margin = float(best_heat_train["median_margin"] or 0.0)
+    best_val_margin = float(best_heat_val["median_margin"] or 0.0)
+    best_train_margin_pos = float(best_heat_train["fraction_samples_margin_gt_0"] or 0.0)
+    best_val_margin_pos = float(best_heat_val["fraction_samples_margin_gt_0"] or 0.0)
+
+    last_train_f1 = float(last_train["best_center_f1_mean_samples"])
+    last_val_f1 = float(last_val["best_center_f1_mean_samples"])
+    last_train_contract = float(last_train["best_strict_marker_contract_pass_rate"])
+    last_val_contract = float(last_val["best_strict_marker_contract_pass_rate"])
+    last_train_margin = float(last_heat_train["median_margin"] or 0.0)
+    last_val_margin = float(last_heat_val["median_margin"] or 0.0)
+    last_train_margin_pos = float(last_heat_train["fraction_samples_margin_gt_0"] or 0.0)
+    last_val_margin_pos = float(last_heat_val["fraction_samples_margin_gt_0"] or 0.0)
+
+    if (
+        last_train_f1 >= 0.80
+        and last_train_contract >= 0.70
+        and last_train_margin > 0.0
+        and last_train_margin_pos >= 0.90
+        and last_val_f1 <= 0.10
+        and last_val_contract <= 0.15
+        and last_val_margin < 0.0
+        and last_val_margin_pos <= 0.10
+    ):
         status = "center_head_overfitting"
-    elif train_f1 < 0.20 and train_margin <= 0.0 and train_margin_pos < 0.5:
+    elif best_train_f1 < 0.20 and best_train_margin <= 0.0 and best_train_margin_pos < 0.5:
         status = "center_objective_extraction_mismatch"
-    elif train_f1 < 0.20 and train_margin > 0.0:
+    elif best_train_f1 < 0.20 and best_train_margin > 0.0:
         status = "insufficient_frozen_feature_representation"
     else:
         status = "mixed_center_training_failure"
     return {
         "result": status,
         "evidence": {
-            "best_primary_train_center_f1_mean_samples": train_f1,
-            "best_primary_val_center_f1_mean_samples": val_f1,
-            "best_primary_train_strict_marker_contract_pass_rate": train_contract,
-            "best_primary_val_strict_marker_contract_pass_rate": val_contract,
-            "best_primary_train_median_margin": train_margin,
-            "best_primary_val_median_margin": val_margin,
-            "best_primary_train_fraction_samples_margin_gt_0": train_margin_pos,
-            "best_primary_val_fraction_samples_margin_gt_0": val_margin_pos,
+            "best_primary_train_center_f1_mean_samples": best_train_f1,
+            "best_primary_val_center_f1_mean_samples": best_val_f1,
+            "best_primary_train_median_margin": best_train_margin,
+            "best_primary_val_median_margin": best_val_margin,
+            "best_primary_train_fraction_samples_margin_gt_0": best_train_margin_pos,
+            "best_primary_val_fraction_samples_margin_gt_0": best_val_margin_pos,
+            "last_train_center_f1_mean_samples": last_train_f1,
+            "last_val_center_f1_mean_samples": last_val_f1,
+            "last_train_strict_marker_contract_pass_rate": last_train_contract,
+            "last_val_strict_marker_contract_pass_rate": last_val_contract,
+            "last_train_median_margin": last_train_margin,
+            "last_val_median_margin": last_val_margin,
+            "last_train_fraction_samples_margin_gt_0": last_train_margin_pos,
+            "last_val_fraction_samples_margin_gt_0": last_val_margin_pos,
         },
     }
 
