@@ -111,6 +111,29 @@ class TestFullDatasetCenterBaselineDiagnosis(unittest.TestCase):
         self.assertAlmostEqual(out["evidence"]["last_train_center_f1_mean_samples"], 0.968, places=6)
         self.assertAlmostEqual(out["evidence"]["last_val_center_f1_mean_samples"], 0.046, places=6)
 
+    def test_scheduler_segment_selection_uses_only_final_run(self):
+        mod = self._mod()
+        rows = [{"epoch": "0", "center_f1_mean_samples": "0.0", "lr_center_head": ""}]
+        rows.extend({"epoch": str(i), "center_f1_mean_samples": f"{0.2 - i * 0.001:.6f}", "lr_center_head": "0.001"} for i in range(1, 39))
+        rows.extend({"epoch": str(i), "center_f1_mean_samples": f"{0.5 - i * 0.002:.6f}", "lr_center_head": "0.001"} for i in range(1, 81))
+        segments = mod._segment_metrics_rows(rows)
+        self.assertEqual(len(segments), 2)
+        self.assertEqual((int(segments[0][0]["epoch"]), int(segments[0][-1]["epoch"])), (1, 38))
+        self.assertEqual((int(segments[1][0]["epoch"]), int(segments[1][-1]["epoch"])), (1, 80))
+        idx, selected, ignored = mod._select_scheduler_segment(segments, checkpoint_epoch=80)
+        self.assertEqual(idx, 1)
+        self.assertEqual((int(selected[0]["epoch"]), int(selected[-1]["epoch"])), (1, 80))
+        self.assertEqual(ignored, 38)
+
+    def test_scheduler_segment_selection_fails_closed_on_ambiguous_match(self):
+        mod = self._mod()
+        segments = [
+            [{"epoch": "1", "center_f1_mean_samples": "0.1", "lr_center_head": "0.001"}, {"epoch": "5", "center_f1_mean_samples": "0.1", "lr_center_head": "0.001"}],
+            [{"epoch": "1", "center_f1_mean_samples": "0.2", "lr_center_head": "0.001"}, {"epoch": "5", "center_f1_mean_samples": "0.2", "lr_center_head": "0.001"}],
+        ]
+        with self.assertRaises(RuntimeError):
+            mod._select_scheduler_segment(segments, checkpoint_epoch=5)
+
 
 if __name__ == "__main__":
     unittest.main()

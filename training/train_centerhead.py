@@ -1734,6 +1734,10 @@ def train(cfg: dict, device: torch.device) -> None:
                     "mean_dice_fg",
                     "dice_leaflet",
                     "dice_ring",
+                    "semantic_mean_dice_fg_delta_from_init",
+                    "semantic_mean_dice_fg_abs_delta_from_init",
+                    "semantic_dice_leaflet_delta_from_init",
+                    "semantic_dice_ring_delta_from_init",
                     "center_f1",
                     "center_f1_mean_samples",
                     "center_precision",
@@ -1874,6 +1878,10 @@ def train(cfg: dict, device: torch.device) -> None:
                 float(mean_fg0) if mean_fg0 is not None else "",
                 float(val_metrics0["dice"][1]) if isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 1 else "",
                 float(val_metrics0["dice"][2]) if isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 2 else "",
+                0.0 if mean_fg0 is not None else "",
+                0.0 if mean_fg0 is not None else "",
+                0.0 if isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 1 else "",
+                0.0 if isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 2 else "",
                 float(val_metrics0.get("center_f1")) if val_metrics0.get("center_f1") is not None else "",
                 float(val_metrics0.get("center_f1_mean_samples")) if val_metrics0.get("center_f1_mean_samples") is not None else "",
                 float(val_metrics0.get("center_precision")) if val_metrics0.get("center_precision") is not None else "",
@@ -2134,6 +2142,12 @@ def train(cfg: dict, device: torch.device) -> None:
         )
 
         mean_fg = val_metrics.get("mean_dice_fg", None)
+        dice_leaflet = float(val_metrics["dice"][1]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 1 else None
+        dice_ring = float(val_metrics["dice"][2]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 2 else None
+        semantic_mean_fg_delta = (float(mean_fg) - float(semantic_mean_fg0)) if (semantic_mean_fg0 is not None and mean_fg is not None) else None
+        semantic_mean_fg_abs_delta = abs(float(semantic_mean_fg_delta)) if semantic_mean_fg_delta is not None else None
+        semantic_dice_leaflet_delta = (float(dice_leaflet) - float(val_metrics0["dice"][1])) if (dice_leaflet is not None and isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 1) else None
+        semantic_dice_ring_delta = (float(dice_ring) - float(val_metrics0["dice"][2])) if (dice_ring is not None and isinstance(val_metrics0.get("dice"), list) and len(val_metrics0["dice"]) > 2) else None
         center_f1 = val_metrics.get("center_f1", None)
         inst_score = _instance_score(val_metrics)
         sweep_res = _maybe_run_threshold_sweep(
@@ -2315,8 +2329,12 @@ def train(cfg: dict, device: torch.device) -> None:
                     float(val_metrics["semantic_loss"]),
                     float(val_metrics["center_loss"]),
                     float(mean_fg) if mean_fg is not None else "",
-                    float(val_metrics["dice"][1]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 1 else "",
-                    float(val_metrics["dice"][2]) if isinstance(val_metrics.get("dice"), list) and len(val_metrics["dice"]) > 2 else "",
+                    float(dice_leaflet) if dice_leaflet is not None else "",
+                    float(dice_ring) if dice_ring is not None else "",
+                    float(semantic_mean_fg_delta) if semantic_mean_fg_delta is not None else "",
+                    float(semantic_mean_fg_abs_delta) if semantic_mean_fg_abs_delta is not None else "",
+                    float(semantic_dice_leaflet_delta) if semantic_dice_leaflet_delta is not None else "",
+                    float(semantic_dice_ring_delta) if semantic_dice_ring_delta is not None else "",
                     float(center_f1) if center_f1 is not None else "",
                     float(val_metrics.get("center_f1_mean_samples")) if val_metrics.get("center_f1_mean_samples") is not None else "",
                     float(val_metrics.get("center_precision")) if val_metrics.get("center_precision") is not None else "",

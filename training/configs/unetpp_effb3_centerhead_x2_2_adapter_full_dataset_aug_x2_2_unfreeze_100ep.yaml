@@ -1,0 +1,154 @@
+seed: 1337
+dataset:
+  root: datasets/converted_leaflet_distance
+  train_txt: training/manifests/center_full_train.txt
+  val_txt: training/manifests/center_full_val.txt
+  train_manifest: training/manifests/center_full_train_manifest.jsonl
+  train_manifest_sha256: f130780e24170ca2476936335dbeb9a6779970fc9c1aa174a0b59e52a1453b66
+  val_manifest: training/manifests/center_full_val_manifest.jsonl
+  val_manifest_sha256: 42ce62dbe7316c898dc4c2a7849972a62b974c3941b88c4f1d9ae3502cb55940
+  split_summary: training/manifests/center_full_split_summary.json
+  instance_root: datasets/converted_leaflet_instances
+model:
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+  center_head_type: spatial_dilated
+  center_head_init_bias: -2.19
+  center_initialization_policy: semantic_checkpoint_base_only_center_head_and_adapter_from_scratch
+  center_feature:
+    module_path: base.decoder.blocks.x_2_2
+    expected_channels: 32
+    adapter_out_channels: 16
+    native_stride: 4
+    upsample_logits_to_target: true
+loss:
+  ce_class_weights:
+  - 0.2
+  - 1.0
+  - 2.5
+  ce_coef: 0.3
+  dice_coef: 0.7
+center:
+  lambda: 1.0
+  marker_thr: 0.03
+  pos_weight: 1000.0
+  pos_weight_thr: 0.5
+  pos_weight_max: 1000.0
+  threshold_policy:
+    selection_scope: validation_only
+    selection_metric: center_f1_mean_samples
+    locked_reference_threshold: 0.03
+    tie_break_rule: higher_strict_marker_contract_pass_rate_then_higher_exact_center_count_accuracy_then_lower_localization_error_then_earlier_epoch
+center_loss:
+  type: centernet_focal
+  alpha: 2.0
+  beta: 4.0
+  normalization_mode: legacy_num_pos
+  threshold_sweep:
+  - 0.005
+  - 0.01
+  - 0.02
+  - 0.03
+  - 0.05
+  - 0.1
+  - 0.2
+  - 0.3
+  - 0.5
+  - 0.7
+  - 0.8
+  - 0.9
+augment:
+  rotate90: true
+  hflip: true
+  vflip: true
+  brightness_contrast: true
+  brightness_limit: 12.0
+  contrast_limit: 0.1
+  gamma: false
+  random_crop: false
+scheduler:
+  type: reduce_on_plateau
+  mode: max
+  monitor: center_f1_mean_samples
+  factor: 0.5
+  patience: 5
+  min_lr: 1.0e-06
+early_stopping:
+  monitor: center_f1_mean_samples
+  mode: max
+  patience: 20
+validation:
+  interval_epochs: 1
+  primary_metric: center_f1_mean_samples
+  additional_metrics:
+  - strict_marker_contract_pass_rate
+  - exact_center_count_accuracy
+  - precision
+  - recall
+  - localization_error
+  stratify_by_gt_count:
+  - 1
+  - 2
+  - 3
+train:
+  save_dir: training/runs/unetpp_effb3_centerhead_x2_2_adapter_full_dataset_aug_x2_2_unfreeze_100ep
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth
+  init_checkpoint_sha256: ea19846a35da02cc0cb6041d814f206719eb1926f3b02cfd6fbf448d39834c48
+  epochs: 100
+  batch_size: 6
+  lr: 0.001
+  lr_backbone: 1.0e-05
+  lr_center_head: 0.001
+  lr_center_adapter: 0.001
+  optimizer: adamw
+  weight_decay: 0.0
+  center_grad_clip_norm: 5.0
+  center_fp32: true
+  amp: true
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  prefetch_factor: 2
+  log_every: 25
+  smoke_steps: 1
+  freeze_base: true
+  checkpoint_selection_metric: center_f1_mean_samples
+  require_exact_semantic_checkpoint_load: true
+  trainable_base_modules:
+  - base.decoder.blocks.x_2_2
+  lr_unfrozen_decoder: 1.0e-05
+experiment_metadata:
+  semantic_checkpoint_sha256: ea19846a35da02cc0cb6041d814f206719eb1926f3b02cfd6fbf448d39834c48
+  train_manifest_sha256: f130780e24170ca2476936335dbeb9a6779970fc9c1aa174a0b59e52a1453b66
+  val_manifest_sha256: 42ce62dbe7316c898dc4c2a7849972a62b974c3941b88c4f1d9ae3502cb55940
+  augmentation:
+    rotate90: true
+    hflip: true
+    vflip: true
+    brightness_contrast: true
+    brightness_limit: 12.0
+    contrast_limit: 0.1
+    gamma: false
+    random_crop: false
+  trainable_modules:
+  - base.decoder.blocks.x_2_2
+  - center_adapter
+  - center_head
+  frozen_modules:
+  - base.encoder
+  - base.decoder.blocks(except x_2_2)
+  - base.segmentation_head
+  - all_other_semantic_parameters
+  parameter_counts:
+    center: 176353
+    x2_2: 32384
+  optimizer_groups:
+    center_head:
+      lr: 0.001
+      parameter_count: 176353
+    x2_2:
+      lr: 1.0e-05
+      parameter_count: 32384

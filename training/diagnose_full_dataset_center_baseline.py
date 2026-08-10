@@ -414,24 +414,81 @@ def _scheduler_state_sequence(metrics_rows: list[dict[str, Any]], scheduler_cfg:
     return states
 
 
+def _epoch_rows(metrics_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    for row in metrics_rows:
+        epoch_raw = str(row.get("epoch", "")).strip()
+        if not epoch_raw:
+            continue
+        epoch = int(epoch_raw)
+        if epoch <= 0:
+            continue
+        out.append(dict(row))
+    return out
+
+
+def _segment_metrics_rows(metrics_rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    rows = _epoch_rows(metrics_rows)
+    if not rows:
+        return []
+    segments: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = [rows[0]]
+    prev_epoch = int(rows[0]["epoch"])
+    for row in rows[1:]:
+        epoch = int(row["epoch"])
+        if epoch <= prev_epoch:
+            segments.append(current)
+            current = [row]
+        else:
+            current.append(row)
+        prev_epoch = epoch
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _select_scheduler_segment(segments: list[list[dict[str, Any]]], *, checkpoint_epoch: int) -> tuple[int, list[dict[str, Any]], int]:
+    matches = [(idx, seg) for idx, seg in enumerate(segments) if int(seg[-1]["epoch"]) == int(checkpoint_epoch)]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Ambiguous scheduler segment selection for checkpoint epoch {checkpoint_epoch}: "
+            f"match_count={len(matches)} segment_ends={[int(seg[-1]['epoch']) for seg in segments]}"
+        )
+    idx, seg = matches[0]
+    ignored_rows = sum(len(candidate) for candidate in segments[:idx]) + sum(len(candidate) for candidate in segments[idx + 1 :])
+    return int(idx), list(seg), int(ignored_rows)
+
+
 def _scheduler_audit(run_dir: Path) -> dict[str, Any]:
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     metrics_rows = list(csv.DictReader((run_dir / "metrics.csv").open("r", encoding="utf-8")))
     scheduler_cfg = dict(config.get("scheduler") or {})
-    states = _scheduler_state_sequence(metrics_rows, scheduler_cfg)
-    reductions = [state for state in states if bool(state["lr_reduced"])]
     last_ckpt = torch.load(run_dir / "last.pth", map_location="cpu")
+    checkpoint_epoch = int(last_ckpt["epoch"])
+    segments = _segment_metrics_rows(metrics_rows)
+    selected_segment_index, selected_segment_rows, ignored_stale_rows = _select_scheduler_segment(segments, checkpoint_epoch=checkpoint_epoch)
+    states = _scheduler_state_sequence(selected_segment_rows, scheduler_cfg)
+    reductions = [state for state in states if bool(state["lr_reduced"])]
     optimizer_lr = float(last_ckpt["optimizer"]["param_groups"][0]["lr"])
     return {
         "instantiated": str(scheduler_cfg.get("type", "")).strip().lower() == "reduce_on_plateau",
         "type": scheduler_cfg.get("type"),
         "monitor": scheduler_cfg.get("monitor"),
-        "monitor_value_by_epoch": [{"epoch": int(row["epoch"]), "value": float(row[scheduler_cfg["monitor"]])} for row in metrics_rows if str(row["epoch"]) != "0"],
-        "logged_optimizer_lr_before_scheduler_step": [{"epoch": int(row["epoch"]), "lr": float(row["lr_center_head"])} for row in metrics_rows if str(row["epoch"]) not in {"", "0"} and row.get("lr_center_head")],
+        "scheduler_segment_count": int(len(segments)),
+        "segment_ranges": [{"index": int(idx), "epoch_start": int(seg[0]["epoch"]), "epoch_end": int(seg[-1]["epoch"]), "row_count": int(len(seg))} for idx, seg in enumerate(segments)],
+        "selected_segment_index": int(selected_segment_index),
+        "selected_epoch_start": int(selected_segment_rows[0]["epoch"]),
+        "selected_epoch_end": int(selected_segment_rows[-1]["epoch"]),
+        "ignored_stale_rows": int(ignored_stale_rows),
+        "monitor_value_by_epoch": [{"epoch": int(row["epoch"]), "value": float(row[scheduler_cfg["monitor"]])} for row in selected_segment_rows],
+        "logged_optimizer_lr_before_scheduler_step": [{"epoch": int(row["epoch"]), "lr": float(row["lr_center_head"])} for row in selected_segment_rows if row.get("lr_center_head")],
         "scheduler_state_by_epoch": states,
         "expected_lr_reductions": [{"epoch": int(state["epoch"]), "lr_before_step": float(state["lr_before_step"]), "lr_after_step": float(state["lr_after_step"])} for state in reductions],
         "actual_lr_reductions": [{"epoch": int(state["epoch"]), "lr_after_step": float(state["lr_after_step"])} for state in reductions],
         "final_optimizer_lr_from_last_checkpoint": optimizer_lr,
+        "reconstructed_final_lr": float(states[-1]["lr_after_step"]) if states else None,
+        "reconstructed_matches_checkpoint_final_lr": bool(states and abs(float(states[-1]["lr_after_step"]) - float(optimizer_lr)) < 1e-12),
+        "checkpoint_epoch": int(checkpoint_epoch),
         "root_cause": "logging_before_scheduler_step",
     }
 
