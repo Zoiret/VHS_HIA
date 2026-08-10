@@ -119,14 +119,28 @@ def _best_sweep_threshold_context_label() -> str:
     return "best_validation_threshold_from_sweep"
 
 
+def _center_branch_prefixes(model: UnetPlusPlusSemanticCenterHead) -> list[str]:
+    prefixes = list(getattr(model, "center_branch_parameter_prefixes", lambda: ["center_head.", "center_adapter."])())
+    return [str(prefix) for prefix in prefixes]
+
+
+def _is_center_branch_param_name(model: UnetPlusPlusSemanticCenterHead, name: str) -> bool:
+    return any(str(name).startswith(prefix) for prefix in _center_branch_prefixes(model))
+
+
+def _strict_checkpoint_metric_key(cfg: dict) -> str:
+    return str(((cfg.get("train") or {}).get("strict_checkpoint_metric")) or "strict_marker_contract_pass_rate")
+
+
 def _candidate_key(row: dict | None, *, primary_metric: str, epoch: int, include_threshold: bool) -> tuple:
     if not isinstance(row, dict):
         return (-float("inf"), -float("inf"), -float("inf"), -float("inf"), float("inf"), float("inf"))
-    loc_err = row.get("localization_error_px", row.get("center_loc_err_px", None))
+    loc_err = row.get("localization_error_px_pooled_matches", row.get("localization_error_px", row.get("center_loc_err_px", None)))
     threshold = row.get("threshold", None)
+    secondary_metric = "center_f1_mean_samples" if str(primary_metric) == "strict_marker_contract_pass_rate" else "strict_marker_contract_pass_rate"
     return (
         float(row.get(primary_metric) if row.get(primary_metric) is not None else -float("inf")),
-        float(row.get("strict_marker_contract_pass_rate") if row.get("strict_marker_contract_pass_rate") is not None else -float("inf")),
+        float(row.get(secondary_metric) if row.get(secondary_metric) is not None else -float("inf")),
         float(row.get("exact_center_count_accuracy", row.get("center_count_acc", None)) if (row.get("exact_center_count_accuracy", row.get("center_count_acc", None)) is not None) else -float("inf")),
         -float(loc_err if loc_err is not None else float("inf")),
         -float(epoch),
@@ -180,6 +194,7 @@ def _write_validation_reports(out_dir: Path, *, epoch: int, val_metrics: dict, s
             "strict_marker_contract_pass_count",
             "strict_marker_contract_pass_rate",
             "localization_error_px",
+            "localization_error_px_pooled_matches",
         ],
     )
     per_gt_rows = []
@@ -208,11 +223,13 @@ def _write_validation_reports(out_dir: Path, *, epoch: int, val_metrics: dict, s
             "strict_marker_contract_pass_count",
             "strict_marker_contract_pass_rate",
             "localization_error_px",
+            "localization_error_px_pooled_matches",
         ],
     )
     threshold_rows = []
     rows = list((sweep_res or {}).get("rows") or [])
     primary = _select_best_threshold_row(rows)
+    strict_best = _select_best_threshold_row(rows, primary_metric="strict_marker_contract_pass_rate")
     for row in rows:
         threshold_rows.append(
             {
@@ -220,6 +237,7 @@ def _write_validation_reports(out_dir: Path, *, epoch: int, val_metrics: dict, s
                 **dict(row),
                 "is_locked_reference_threshold": bool(abs(float(row["threshold"]) - float(locked_threshold)) < 1e-9),
                 "is_best_primary_threshold": bool(primary is not None and abs(float(row["threshold"]) - float(primary["threshold"])) < 1e-9),
+                "is_best_strict_threshold": bool(strict_best is not None and abs(float(row["threshold"]) - float(strict_best["threshold"])) < 1e-9),
             }
         )
     _append_dict_rows(
@@ -243,6 +261,17 @@ def _write_validation_reports(out_dir: Path, *, epoch: int, val_metrics: dict, s
             "gt_instances_with_multiple_markers",
             "markers_outside_all_gt_instances",
             "localization_error_px",
+            "localization_error_px_pooled_matches",
+            "raw_component_count_mean",
+            "raw_component_count_median",
+            "fraction_raw_component_count_gt_3",
+            "fraction_predicted_count_eq_3",
+            "duplicate_markers_total",
+            "markers_outside_all_gt_instances_total",
+            "missing_gt_markers_total",
+            "median_heatmap_margin",
+            "fraction_heatmap_margin_gt_0",
+            "predicted_count_distribution",
             "sample_count_gt1",
             "sample_count_gt2",
             "sample_count_gt3",
@@ -251,6 +280,7 @@ def _write_validation_reports(out_dir: Path, *, epoch: int, val_metrics: dict, s
             "pass_count_gt3",
             "is_locked_reference_threshold",
             "is_best_primary_threshold",
+            "is_best_strict_threshold",
         ],
     )
 
@@ -401,9 +431,9 @@ def _build_model(cfg: dict) -> torch.nn.Module:
             print(f"- {k}")
         if len(unexpected) > 50:
             print(f"... ({len(unexpected) - 50} more)")
-        allowed_missing = [k for k in missing if str(k).startswith("center_head.") or str(k).startswith("center_adapter.")]
+        allowed_missing = [k for k in missing if _is_center_branch_param_name(model, str(k))]
         disallowed_missing = [k for k in missing if k not in allowed_missing]
-        center_missing = [k for k in missing if str(k).startswith("center_head.") or str(k).startswith("center_adapter.")]
+        center_missing = [k for k in missing if _is_center_branch_param_name(model, str(k))]
         center_from_scratch = bool(len(center_missing) > 0)
         model.semantic_init_report = {
             "checkpoint_path": str(Path(init_path).resolve()),
@@ -513,11 +543,9 @@ def _apply_training_policy(model: UnetPlusPlusSemanticCenterHead, cfg: dict) -> 
 
     for p in model.parameters():
         p.requires_grad = False
-    if getattr(model, "center_adapter", None) is not None:
-        for p in model.center_adapter.parameters():
+    for module in model.center_branch_modules():
+        for p in module.parameters():
             p.requires_grad = True
-    for p in model.center_head.parameters():
-        p.requires_grad = True
 
     selected_param_names: list[str] = []
     for module_path in trainable_base_modules:
@@ -537,10 +565,10 @@ def _apply_training_policy(model: UnetPlusPlusSemanticCenterHead, cfg: dict) -> 
     total_params = int(sum(int(p.numel()) for p in model.parameters()))
     trainable_params = int(sum(int(p.numel()) for p in model.parameters() if bool(p.requires_grad)))
     trainable_names = [n for (n, p) in model.named_parameters() if bool(p.requires_grad)]
-    allowed_prefixes = ["center_head.", "center_adapter."] + [f"{p}." for p in trainable_base_modules]
+    allowed_prefixes = _center_branch_prefixes(model) + [f"{p}." for p in trainable_base_modules]
     assert all(any(n.startswith(pref) for pref in allowed_prefixes) for n in trainable_names), f"Unexpected trainable params found: {trainable_names[:10]}"
 
-    center_param_names = [n for n, _p in model.named_parameters() if n.startswith("center_head.") or n.startswith("center_adapter.")]
+    center_param_names = [n for n, _p in model.named_parameters() if _is_center_branch_param_name(model, n)]
     decoder_param_names = sorted(set(selected_param_names))
     return {
         "freeze_base": bool(freeze_base),
@@ -563,9 +591,8 @@ def _set_train_modes(model: UnetPlusPlusSemanticCenterHead, *, freeze_base: bool
         model.encoder.eval()
         model.segmentation_head.eval()
         model.base.decoder.eval()
-        if getattr(model, "center_adapter", None) is not None:
-            model.center_adapter.train()
-        model.center_head.train()
+        for module in model.center_branch_modules():
+            module.train()
         for module_path in list(getattr(model, "trainable_base_module_paths", []) or []):
             _resolve_named_module(model, module_path).train()
     else:
@@ -692,14 +719,14 @@ def _build_optimizer_groups(model: UnetPlusPlusSemanticCenterHead, cfg: dict, fr
 
     group_specs: list[dict] = []
     if freeze_base:
-        center_named = [(n, p) for n, p in model.named_parameters() if (n.startswith("center_head.") or n.startswith("center_adapter.")) and p.requires_grad]
-        decoder_named = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not n.startswith("center_head.")) and (not n.startswith("center_adapter."))]
+        center_named = [(n, p) for n, p in model.named_parameters() if _is_center_branch_param_name(model, n) and p.requires_grad]
+        decoder_named = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not _is_center_branch_param_name(model, n))]
         group_specs.append({"name": "center_head", "named_params": center_named, "lr": head_lr})
         if decoder_named:
             group_specs.append({"name": "unfrozen_decoder", "named_params": decoder_named, "lr": decoder_lr})
     else:
-        params_base = [(n, p) for n, p in model.named_parameters() if p.requires_grad and not (n.startswith("center_head.") or n.startswith("center_adapter.") or ".center_head." in n)]
-        params_head = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (n.startswith("center_head.") or n.startswith("center_adapter.") or ".center_head." in n)]
+        params_base = [(n, p) for n, p in model.named_parameters() if p.requires_grad and not _is_center_branch_param_name(model, n)]
+        params_head = [(n, p) for n, p in model.named_parameters() if p.requires_grad and _is_center_branch_param_name(model, n)]
         group_specs = [
             {"name": "base", "named_params": params_base, "lr": base_lr},
             {"name": "center_head", "named_params": params_head, "lr": head_lr},
@@ -835,8 +862,11 @@ def _forward_center_with_precision(
         "center_autocast_enabled": bool(center_autocast_enabled),
         "center_grad_scaler_enabled": bool(center_autocast_enabled),
         "decoder_features_dtype": _dtype_name(decoder_features),
+        "decoder_features_shape": list(decoder_features.shape) if torch.is_tensor(decoder_features) else None,
         "center_logits_dtype": _dtype_name(center_logits),
+        "center_logits_shape": list(center_logits.shape) if torch.is_tensor(center_logits) else None,
         "center_loss_dtype": _dtype_name(center_loss),
+        "center_feature_capture_info": dict(getattr(model, "center_feature_capture_info", lambda: {})() or {}),
     }
     return decoder_features, center_logits, payload, precision_info
 
@@ -1218,8 +1248,19 @@ def _threshold_sweep(
             "strict_marker_contract_pass_rate": m.get("strict_marker_contract_pass_rate"),
             "center_loc_err_px": m.get("center_loc_err_px"),
             "localization_error_px": m.get("center_loc_err_px"),
+            "localization_error_px_pooled_matches": m.get("localization_error_px_pooled_matches", m.get("center_loc_err_px")),
             "center_zero_cases": m.get("center_zero_cases"),
             "center_extra_cases": m.get("center_extra_cases"),
+            "raw_component_count_mean": m.get("raw_component_count_mean"),
+            "raw_component_count_median": m.get("raw_component_count_median"),
+            "fraction_raw_component_count_gt_3": m.get("fraction_raw_component_count_gt_3"),
+            "fraction_predicted_count_eq_3": m.get("fraction_predicted_count_eq_3"),
+            "duplicate_markers_total": m.get("duplicate_markers_total"),
+            "markers_outside_all_gt_instances_total": m.get("markers_outside_all_gt_instances_total"),
+            "missing_gt_markers_total": m.get("missing_gt_markers_total"),
+            "median_heatmap_margin": m.get("median_heatmap_margin"),
+            "fraction_heatmap_margin_gt_0": m.get("fraction_heatmap_margin_gt_0"),
+            "predicted_count_distribution": m.get("predicted_count_distribution"),
             "instance_exact_count_acc": m.get("instance_exact_count_acc"),
             "instance_merged_rate": m.get("instance_merged_rate"),
             "instance_fragmented_rate": m.get("instance_fragmented_rate"),
@@ -1238,6 +1279,7 @@ def _threshold_sweep(
         "rows": rows,
         "best": _select_best_threshold_row(rows, primary_metric="center_f1_mean_samples"),
         "best_center_f1": _select_best_threshold_row(rows, primary_metric="center_f1_mean_samples"),
+        "best_strict_marker_contract": _select_best_threshold_row(rows, primary_metric="strict_marker_contract_pass_rate"),
         "best_center_count_acc": _select_best_threshold_row(rows, primary_metric="exact_center_count_accuracy"),
         "best_instance_score": _select_best_threshold_row(rows, primary_metric="instance_score"),
     }
@@ -1345,12 +1387,14 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     bn_ref = _collect_batchnorm_stats(model.base) if freeze_base else []
-    center_named_params = [(n, p) for n, p in model.named_parameters() if n.startswith("center_head.") and p.requires_grad]
-    decoder_named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not n.startswith("center_head."))]
+    center_named_params = [(n, p) for n, p in model.named_parameters() if _is_center_branch_param_name(model, n) and p.requires_grad]
+    decoder_named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not _is_center_branch_param_name(model, n))]
     frozen_named_params = [(n, p) for n, p in model.named_parameters() if not p.requires_grad]
     encoder_frozen_named = [(n, p) for n, p in model.named_parameters() if n.startswith("base.encoder.") and not p.requires_grad]
     decoder_frozen_named = [(n, p) for n, p in model.named_parameters() if n.startswith("base.decoder.") and not p.requires_grad]
     semantic_head_frozen_named = [(n, p) for n, p in model.named_parameters() if n.startswith("base.segmentation_head.") and not p.requires_grad]
+    context_module_path = str((((cfg.get("model") or {}).get("center_feature") or {}).get("context_module_path", "")) or "").strip()
+    context_frozen_named = [(n, p) for n, p in model.named_parameters() if context_module_path and n.startswith(context_module_path + ".") and not p.requires_grad]
     for _ in range(int(steps)):
         batch = next(train_it)
         images = batch["image"].to(device)
@@ -1521,7 +1565,7 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             "encoder_eval_mode": bool(not model.encoder.training),
             "decoder_eval_mode": bool(not model.base.decoder.training),
             "segmentation_head_eval_mode": bool(not model.segmentation_head.training),
-            "center_train_mode": bool(model.center_head.training),
+            "center_train_mode": bool(all(module.training for module in model.center_branch_modules())),
             "selected_decoder_train_mode": bool(all(_resolve_named_module(model, mp).training for mp in freeze_info["trainable_base_modules"])) if freeze_base and partial_unfreeze else None,
             "semantic_logits_max_abs_delta_after_step": sem_delta,
             "frozen_bn_running_stats_max_abs_delta_after_step": frozen_bn_delta,
@@ -1542,6 +1586,7 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             "frozen_encoder_grad_count": int(_count_present_grads(encoder_frozen_named)),
             "frozen_decoder_grad_count": int(_count_present_grads(decoder_frozen_named)),
             "semantic_head_grad_count": int(_count_present_grads(semantic_head_frozen_named)),
+            "context_feature_frozen_grad_count": int(_count_present_grads(context_frozen_named)) if context_module_path else None,
             "selected_decoder_parameter_delta": float(selected_decoder_delta),
             "center_head_parameter_delta": float(center_head_delta),
             "frozen_parameter_max_delta": float(frozen_param_max_delta),
@@ -1579,6 +1624,13 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             raise SystemExit("Freeze smoke test failed: segmentation head is not in eval mode")
         if not bool(last.get("center_train_mode", False)):
             raise SystemExit("Freeze smoke test failed: center_head is not in train mode")
+        capture_info = dict(last.get("center_feature_capture_info") or {})
+        primary_capture_shape = capture_info.get("captured_shape")
+        context_capture_shape = ((capture_info.get("context") or {}).get("captured_shape") if isinstance(capture_info.get("context"), dict) else None)
+        if primary_capture_shape is None:
+            raise SystemExit("Freeze smoke test failed: primary center feature was not captured")
+        if context_module_path and context_capture_shape is None:
+            raise SystemExit("Freeze smoke test failed: contextual center feature was not captured")
         if partial_unfreeze and not bool(last.get("selected_decoder_train_mode", False)):
             raise SystemExit("Partial unfreeze smoke failed: selected decoder block is not in train mode")
         if (not partial_unfreeze) and ((last.get("semantic_logits_max_abs_delta_after_step") is None) or float(last["semantic_logits_max_abs_delta_after_step"]) != 0.0):
@@ -1591,6 +1643,8 @@ def smoke_test(cfg: dict, device: torch.device) -> dict:
             raise SystemExit("Partial unfreeze smoke failed: selected decoder did not update")
         if partial_unfreeze and float(last.get("center_head_parameter_delta", 0.0)) <= 0.0:
             raise SystemExit("Partial unfreeze smoke failed: center head did not update")
+        if context_module_path and int(last.get("context_feature_frozen_grad_count", -1)) != 0:
+            raise SystemExit("Partial unfreeze smoke failed: frozen contextual feature block received gradients")
         if float(last.get("frozen_parameter_max_delta", 0.0)) != 0.0:
             raise SystemExit(f"Partial unfreeze smoke failed: frozen parameter changed (delta={last.get('frozen_parameter_max_delta')})")
 
@@ -1825,15 +1879,18 @@ def train(cfg: dict, device: torch.device) -> None:
     best_center_count_acc = None
     best_instance = None
     best_primary_candidate = None
+    best_strict_candidate = None
     best_epoch_mean_fg = None
     best_epoch_center = None
     best_epoch_center_count_acc = None
     best_epoch_instance = None
     best_epoch_primary = None
+    best_epoch_strict = None
     no_improve = 0
 
     center_thr = float((cfg.get("center") or {}).get("marker_thr", 0.3))
     primary_metric_key = str((cfg.get("train") or {}).get("checkpoint_selection_metric", "center_f1_mean_samples"))
+    strict_metric_key = _strict_checkpoint_metric_key(cfg)
     semantic_mean_fg0 = None
     semantic_degradation_streak = 0
 
@@ -1993,8 +2050,8 @@ def train(cfg: dict, device: torch.device) -> None:
         last_precision_info = None
         t0 = time.perf_counter()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", unit="batch")
-        center_named_params = [(n, p) for n, p in model.named_parameters() if n.startswith("center_head.") and p.requires_grad]
-        decoder_named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not n.startswith("center_head."))]
+        center_named_params = [(n, p) for n, p in model.named_parameters() if _is_center_branch_param_name(model, n) and p.requires_grad]
+        decoder_named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad and (not _is_center_branch_param_name(model, n))]
         trainable_named_params = center_named_params + decoder_named_params
         center_grad_before_sum = 0.0
         decoder_grad_before_sum = 0.0
@@ -2047,8 +2104,11 @@ def train(cfg: dict, device: torch.device) -> None:
                     "center_autocast_enabled": bool(amp_enabled),
                     "center_grad_scaler_enabled": bool(amp_enabled),
                     "decoder_features_dtype": None,
+                    "decoder_features_shape": None,
                     "center_logits_dtype": _dtype_name(center_logits),
+                    "center_logits_shape": list(center_logits.shape) if torch.is_tensor(center_logits) else None,
                     "center_loss_dtype": _dtype_name(loss_center),
+                    "center_feature_capture_info": dict(getattr(model, "center_feature_capture_info", lambda: {})() or {}),
                 }
             last_precision_info = precision_info
             if not bool(torch.isfinite(loss.detach()).all().item()):
@@ -2163,9 +2223,17 @@ def train(cfg: dict, device: torch.device) -> None:
             instance_root=instance_root,
         ) if freeze_base else None
         sweep_best_center = (sweep_res or {}).get("best_center_f1") if isinstance(sweep_res, dict) else None
+        sweep_best_strict = (sweep_res or {}).get("best_strict_marker_contract") if isinstance(sweep_res, dict) else None
         sweep_best_count = (sweep_res or {}).get("best_center_count_acc") if isinstance(sweep_res, dict) else None
         sweep_best_inst = (sweep_res or {}).get("best_instance_score") if isinstance(sweep_res, dict) else None
         primary_candidate = sweep_best_center if isinstance(sweep_best_center, dict) else {
+            "threshold": float(center_thr),
+            "center_f1_mean_samples": _float_or_none(val_metrics.get("center_f1_mean_samples")),
+            "strict_marker_contract_pass_rate": _float_or_none(val_metrics.get("strict_marker_contract_pass_rate")),
+            "exact_center_count_accuracy": _float_or_none(val_metrics.get("center_count_acc")),
+            "localization_error_px": _float_or_none(val_metrics.get("center_loc_err_px")),
+        }
+        strict_candidate = sweep_best_strict if isinstance(sweep_best_strict, dict) else {
             "threshold": float(center_thr),
             "center_f1_mean_samples": _float_or_none(val_metrics.get("center_f1_mean_samples")),
             "strict_marker_contract_pass_rate": _float_or_none(val_metrics.get("strict_marker_contract_pass_rate")),
@@ -2246,7 +2314,28 @@ def train(cfg: dict, device: torch.device) -> None:
                     "epoch": int(epoch),
                     "selection_metric": primary_metric_key,
                     "tie_break_rule": "higher_strict_marker_contract_pass_rate_then_higher_exact_center_count_accuracy_then_lower_localization_error_then_earlier_epoch",
+                    "tie_break_rule_canonical": "higher_strict_marker_contract_pass_rate_then_higher_exact_center_count_accuracy_then_lower_localization_error_px_pooled_matches_then_earlier_epoch",
                     "best_threshold_metrics": primary_candidate,
+                    "locked_reference_threshold": float(center_thr),
+                    "locked_reference_metrics": next((row for row in list((sweep_res or {}).get("rows") or []) if abs(float(row["threshold"]) - float(center_thr)) < 1e-9), None),
+                },
+            )
+            improved = True
+        if _is_better_epoch_candidate(strict_candidate, best_strict_candidate, epoch=epoch, incumbent_epoch=best_epoch_strict, primary_metric=strict_metric_key):
+            best_strict_candidate = dict(strict_candidate)
+            best_epoch_strict = int(epoch)
+            best_strict_path = out_dir / "best_strict_marker_contract.pth"
+            _save_checkpoint(best_strict_path, model, optimizer, epoch, cfg, extra={"val": val_metrics, "threshold_sweep": sweep_res, "best_threshold_metrics": strict_candidate})
+            best_strict_sha = _sha256_file(best_strict_path)
+            _write_json_atomic(
+                out_dir / "best_strict_checkpoint_metadata.json",
+                {
+                    "checkpoint_path": str(best_strict_path.resolve()),
+                    "checkpoint_sha256": best_strict_sha,
+                    "epoch": int(epoch),
+                    "selection_metric": strict_metric_key,
+                    "tie_break_rule": "higher_center_f1_mean_samples_then_higher_exact_center_count_accuracy_then_lower_localization_error_px_pooled_matches_then_earlier_epoch",
+                    "best_threshold_metrics": strict_candidate,
                     "locked_reference_threshold": float(center_thr),
                     "locked_reference_metrics": next((row for row in list((sweep_res or {}).get("rows") or []) if abs(float(row["threshold"]) - float(center_thr)) < 1e-9), None),
                 },
@@ -2454,6 +2543,8 @@ def train(cfg: dict, device: torch.device) -> None:
                 "best_epoch_center_f1": best_epoch_center,
                 "best_primary_metric": best_primary_candidate,
                 "best_epoch_primary_metric": best_epoch_primary,
+                "best_strict_marker_contract_metric": best_strict_candidate,
+                "best_epoch_strict_marker_contract_metric": best_epoch_strict,
                 "best_center_count_acc": best_center_count_acc,
                 "best_epoch_center_count_acc": best_epoch_center_count_acc,
                 "best_instance_score": best_instance,
@@ -2475,11 +2566,14 @@ def train(cfg: dict, device: torch.device) -> None:
             "best_epoch_center_f1": best_epoch_center,
             "best_primary_metric": best_primary_candidate,
             "best_epoch_primary_metric": best_epoch_primary,
+            "best_strict_marker_contract_metric": best_strict_candidate,
+            "best_epoch_strict_marker_contract_metric": best_epoch_strict,
             "best_center_count_acc": best_center_count_acc,
             "best_epoch_center_count_acc": best_epoch_center_count_acc,
             "best_instance_score": best_instance,
             "best_epoch_instance_score": best_epoch_instance,
             "selection_metric": primary_metric_key,
+            "strict_selection_metric": strict_metric_key,
             "locked_reference_threshold": float(center_thr),
             "center_loss": center_loss_info,
             "lambda_center": lambda_center,

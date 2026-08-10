@@ -57,6 +57,32 @@ def _markers_from_center_map(center_prob: np.ndarray, leaf_union: np.ndarray, th
     return pts[: int(max_markers)]
 
 
+def _raw_connected_component_count(center_prob: np.ndarray, leaf_union: np.ndarray, thr: float) -> int:
+    c = center_prob.astype(np.float32).copy()
+    c[~leaf_union.astype(bool)] = 0.0
+    m = (c >= float(thr)).astype(np.uint8)
+    if int(m.sum()) == 0:
+        return 0
+    n, _labels = cv2.connectedComponents(m)
+    return max(0, int(n) - 1)
+
+
+def _heatmap_margin(center_prob: np.ndarray, gt_inst: np.ndarray, gt_pts: list[tuple[int, int]]) -> float | None:
+    gt_scores = []
+    for y, x in gt_pts:
+        yi = int(y)
+        xi = int(x)
+        if 0 <= yi < int(center_prob.shape[0]) and 0 <= xi < int(center_prob.shape[1]):
+            gt_scores.append(float(center_prob[yi, xi]))
+    if not gt_scores:
+        return None
+    far_mask = gt_inst.astype(np.uint8) == 0
+    if not bool(np.any(far_mask)):
+        return None
+    max_far = float(np.max(center_prob[far_mask]))
+    return float(min(gt_scores) - max_far)
+
+
 def _match_centers(pred_yx: list[tuple[int, int]], gt_yx: list[tuple[int, int]], max_dist_px: float = 16.0):
     used_gt = set()
     matches = []
@@ -151,10 +177,27 @@ def _aggregate_center_rows(rows: list[dict]) -> dict:
             "strict_marker_contract_pass_count": 0,
             "strict_marker_contract_pass_rate": None,
             "localization_error_px": None,
+            "localization_error_px_pooled_matches": None,
+            "raw_component_count_mean": None,
+            "raw_component_count_median": None,
+            "fraction_raw_component_count_gt_3": None,
+            "fraction_predicted_count_eq_3": None,
+            "missing_gt_markers_total": 0,
+            "duplicate_markers_total": 0,
+            "markers_outside_all_gt_instances_total": 0,
+            "median_heatmap_margin": None,
+            "fraction_heatmap_margin_gt_0": None,
+            "predicted_count_distribution": {},
         }
     tp = int(sum(int(row["tp"]) for row in rows))
     fp = int(sum(int(row["fp"]) for row in rows))
     fn = int(sum(int(row["fn"]) for row in rows))
+    raw_counts = [int(row["raw_component_count"]) for row in rows if row.get("raw_component_count") is not None]
+    pred_counts = [int(row["predicted_center_count"]) for row in rows if row.get("predicted_center_count") is not None]
+    margins = [float(row["heatmap_margin"]) for row in rows if row.get("heatmap_margin") is not None]
+    pred_dist = {}
+    for count in pred_counts:
+        pred_dist[str(int(count))] = int(pred_dist.get(str(int(count)), 0) + 1)
     return {
         "sample_count": int(len(rows)),
         "center_precision": float(tp / max(tp + fp, 1)),
@@ -167,6 +210,17 @@ def _aggregate_center_rows(rows: list[dict]) -> dict:
         "strict_marker_contract_pass_count": int(sum(1 for row in rows if bool(row["marker_contract_pass"]))),
         "strict_marker_contract_pass_rate": float(np.mean([1.0 if bool(row["marker_contract_pass"]) else 0.0 for row in rows])),
         "localization_error_px": float(np.mean([float(row["center_loc_err_px"]) for row in rows])),
+        "localization_error_px_pooled_matches": float(np.mean([float(row["center_loc_err_px"]) for row in rows])),
+        "raw_component_count_mean": float(np.mean(np.asarray(raw_counts, dtype=np.float64))) if raw_counts else None,
+        "raw_component_count_median": float(np.median(np.asarray(raw_counts, dtype=np.float64))) if raw_counts else None,
+        "fraction_raw_component_count_gt_3": float(np.mean([1.0 if int(v) > 3 else 0.0 for v in raw_counts])) if raw_counts else None,
+        "fraction_predicted_count_eq_3": float(np.mean([1.0 if int(v) == 3 else 0.0 for v in pred_counts])) if pred_counts else None,
+        "missing_gt_markers_total": int(sum(int(row["missing_gt_instance_markers"]) for row in rows)),
+        "duplicate_markers_total": int(sum(int(row["multiple_markers_inside_gt_instances"]) for row in rows)),
+        "markers_outside_all_gt_instances_total": int(sum(int(row["markers_outside_all_gt_instances"]) for row in rows)),
+        "median_heatmap_margin": float(np.median(np.asarray(margins, dtype=np.float64))) if margins else None,
+        "fraction_heatmap_margin_gt_0": float(np.mean([1.0 if float(v) > 0.0 else 0.0 for v in margins])) if margins else None,
+        "predicted_count_distribution": pred_dist,
     }
 
 
@@ -580,6 +634,8 @@ def validate_centerhead(
                 continue
 
             marker_contract = _marker_contract(gt_inst, pred_pts)
+            raw_component_count = _raw_connected_component_count(pred_center[i, 0], pred_sem[i] == 1, float(center_thr))
+            heatmap_margin = _heatmap_margin(pred_center[i, 0], gt_inst, gt_pts)
             center_rows.append(
                 {
                     "sample": str(sid),
@@ -598,6 +654,8 @@ def validate_centerhead(
                     "missing_gt_instance_markers": int(marker_contract["missing_gt_instance_markers"]),
                     "multiple_markers_inside_gt_instances": int(marker_contract["multiple_markers_inside_gt_instances"]),
                     "markers_outside_all_gt_instances": int(marker_contract["markers_outside_all_gt_instances"]),
+                    "raw_component_count": int(raw_component_count),
+                    "heatmap_margin": float(heatmap_margin) if heatmap_margin is not None else None,
                 }
             )
 
@@ -674,6 +732,7 @@ def validate_centerhead(
         "center_recall": recall,
         "center_f1": f1,
         "center_loc_err_px": loc_err,
+        "localization_error_px_pooled_matches": loc_err,
         "center_count_acc": count_acc,
         "center_pos_frac": center_pos_frac,
         "center_pred_count_mean": pred_count_mean,
@@ -696,6 +755,17 @@ def validate_centerhead(
         "center_f1_mean_samples": agg_all["center_f1_mean_samples"],
         "strict_marker_contract_pass_count": agg_all["strict_marker_contract_pass_count"],
         "strict_marker_contract_pass_rate": agg_all["strict_marker_contract_pass_rate"],
+        "localization_error_px_pooled_matches": loc_err,
+        "raw_component_count_mean": agg_all["raw_component_count_mean"],
+        "raw_component_count_median": agg_all["raw_component_count_median"],
+        "fraction_raw_component_count_gt_3": agg_all["fraction_raw_component_count_gt_3"],
+        "fraction_predicted_count_eq_3": agg_all["fraction_predicted_count_eq_3"],
+        "missing_gt_markers_total": agg_all["missing_gt_markers_total"],
+        "duplicate_markers_total": agg_all["duplicate_markers_total"],
+        "markers_outside_all_gt_instances_total": agg_all["markers_outside_all_gt_instances_total"],
+        "median_heatmap_margin": agg_all["median_heatmap_margin"],
+        "fraction_heatmap_margin_gt_0": agg_all["fraction_heatmap_margin_gt_0"],
+        "predicted_count_distribution": agg_all["predicted_count_distribution"],
         "per_gt_count_center_metrics": per_gt_count,
         "per_patient_center_metrics": per_patient,
         "per_sample_center_rows": center_rows,
