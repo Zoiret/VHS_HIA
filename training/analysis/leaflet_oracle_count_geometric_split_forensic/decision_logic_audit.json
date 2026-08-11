@@ -1,0 +1,20 @@
+{
+  "previous_classification": "GEOMETRY_INSUFFICIENT",
+  "mechanically_correct_classification": "WEAK_GEOMETRIC_SIGNAL",
+  "previous_next_step": "D. KEEP_CENTER_APPROACH",
+  "mechanically_correct_next_step": "B. IMPROVE_SEMANTIC_TOPOLOGY",
+  "implemented_logic": {
+    "classification_function": "original _classification requires gt_summary.exact_instance_count >= 0.70 before WEAK_GEOMETRIC_SIGNAL is allowed",
+    "next_step_function": "original _next_step_decision prioritizes center comparison before honoring WEAK_GEOMETRIC_SIGNAL"
+  },
+  "root_cause": [
+    "decision_logic_implementation_bug",
+    "reporting_bug",
+    "metric_interpretation_issue"
+  ],
+  "why_previous_report_returned_keep_center": [
+    "The implemented WEAK_GEOMETRIC_SIGNAL path was blocked by an extra gt exact-count >= 0.70 requirement that was not in the written contract.",
+    "The implemented next-step logic short-circuited to KEEP_CENTER whenever geometric exact-count and mean matched IoU were both below the center reference.",
+    "The GT-semantic headline row came from the independently selected best GT method (baseline_connected_components), not from the oracle-K watershed method described in prose."
+  ]
+}

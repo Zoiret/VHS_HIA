@@ -1,0 +1,191 @@
+{
+  "decision_logic_audit": {
+    "previous_classification": "GEOMETRY_INSUFFICIENT",
+    "mechanically_correct_classification": "WEAK_GEOMETRIC_SIGNAL",
+    "previous_next_step": "D. KEEP_CENTER_APPROACH",
+    "mechanically_correct_next_step": "B. IMPROVE_SEMANTIC_TOPOLOGY",
+    "implemented_logic": {
+      "classification_function": "original _classification requires gt_summary.exact_instance_count >= 0.70 before WEAK_GEOMETRIC_SIGNAL is allowed",
+      "next_step_function": "original _next_step_decision prioritizes center comparison before honoring WEAK_GEOMETRIC_SIGNAL"
+    },
+    "root_cause": [
+      "decision_logic_implementation_bug",
+      "reporting_bug",
+      "metric_interpretation_issue"
+    ],
+    "why_previous_report_returned_keep_center": [
+      "The implemented WEAK_GEOMETRIC_SIGNAL path was blocked by an extra gt exact-count >= 0.70 requirement that was not in the written contract.",
+      "The implemented next-step logic short-circuited to KEEP_CENTER whenever geometric exact-count and mean matched IoU were both below the center reference.",
+      "The GT-semantic headline row came from the independently selected best GT method (baseline_connected_components), not from the oracle-K watershed method described in prose."
+    ]
+  },
+  "exact_count_audit": {
+    "samples_total": 93,
+    "predicted_count_eq_k": 55,
+    "predicted_count_lt_k": 0,
+    "predicted_count_gt_k": 38,
+    "mismatch_reasons": {
+      "disconnected_component_policy": 38
+    },
+    "reported_gt_metric_method": "baseline_connected_components",
+    "forensic_gt_split_method": "global_distance_maxima_r09"
+  },
+  "gt_semantic_validity": {
+    "construction": "GT semantic union = (aligned 768x768 GT instance label map > 0), with no predicted semantic inputs",
+    "mean_connected_components_before": 3.010752688172043,
+    "mean_connected_components_after": 3.010752688172043,
+    "mean_seed_requested": 2.3225806451612905,
+    "mean_seed_created": 1.3978494623655915,
+    "mean_watershed_labels": 3.010752688172043,
+    "exact_k_seed_success_rate": 0.5913978494623656,
+    "watershed_label_success_rate": 0.5913978494623656
+  },
+  "predicted_semantic_topology": {
+    "correct": 7,
+    "false_bridges": 5,
+    "missing_tissue": 38,
+    "both": 39,
+    "other": 4
+  },
+  "pixel_vs_topology": {
+    "correct_topology_dice": 0.9143287688677925,
+    "correct_topology_iou": 0.8432336805058215,
+    "bridge_case_dice": 0.8932239011202466,
+    "bridge_case_iou": 0.8081175030176424,
+    "missing_case_dice": 0.8845934762106434,
+    "missing_case_iou": 0.7948853176979647
+  },
+  "postprocessing": {
+    "variant_aggregates": [
+      {
+        "variant_key": "current",
+        "all_iou_ge_0.50": 0.41935483870967744,
+        "mean_matched_iou": 0.5573108664968115,
+        "gt2_success": 0.5161290322580645,
+        "gt3_success": 0.15217391304347827,
+        "false_bridges_remaining": 44,
+        "missing_tissue_failures_introduced": 0,
+        "exact_count": 0.3548387096774194
+      },
+      {
+        "variant_key": "opening_k3",
+        "all_iou_ge_0.50": 0.44086021505376344,
+        "mean_matched_iou": 0.5668373302290729,
+        "gt2_success": 0.5161290322580645,
+        "gt3_success": 0.1956521739130435,
+        "false_bridges_remaining": 42,
+        "missing_tissue_failures_introduced": 1,
+        "exact_count": 0.41935483870967744
+      },
+      {
+        "variant_key": "opening_k5",
+        "all_iou_ge_0.50": 0.45161290322580644,
+        "mean_matched_iou": 0.5762176465956778,
+        "gt2_success": 0.5161290322580645,
+        "gt3_success": 0.21739130434782608,
+        "false_bridges_remaining": 41,
+        "missing_tissue_failures_introduced": 1,
+        "exact_count": 0.45161290322580644
+      },
+      {
+        "variant_key": "erode_restore_r1",
+        "all_iou_ge_0.50": 0.41935483870967744,
+        "mean_matched_iou": 0.5546214931155172,
+        "gt2_success": 0.5161290322580645,
+        "gt3_success": 0.15217391304347827,
+        "false_bridges_remaining": 44,
+        "missing_tissue_failures_introduced": 0,
+        "exact_count": 0.44086021505376344
+      },
+      {
+        "variant_key": "erode_restore_r2",
+        "all_iou_ge_0.50": 0.41935483870967744,
+        "mean_matched_iou": 0.5550535661212985,
+        "gt2_success": 0.5161290322580645,
+        "gt3_success": 0.15217391304347827,
+        "false_bridges_remaining": 44,
+        "missing_tissue_failures_introduced": 0,
+        "exact_count": 0.4946236559139785
+      },
+      {
+        "variant_key": "neck_cut_w2",
+        "all_iou_ge_0.50": 0.45161290322580644,
+        "mean_matched_iou": 0.5753519210543507,
+        "gt2_success": 0.5161290322580645,
+        "gt3_success": 0.21739130434782608,
+        "false_bridges_remaining": 41,
+        "missing_tissue_failures_introduced": 2,
+        "exact_count": 0.34408602150537637
+      },
+      {
+        "variant_key": "neck_cut_w3",
+        "all_iou_ge_0.50": 0.46236559139784944,
+        "mean_matched_iou": 0.5772192700413027,
+        "gt2_success": 0.5161290322580645,
+        "gt3_success": 0.2391304347826087,
+        "false_bridges_remaining": 40,
+        "missing_tissue_failures_introduced": 3,
+        "exact_count": 0.34408602150537637
+      }
+    ],
+    "best_variant": {
+      "variant_key": "neck_cut_w3",
+      "all_iou_ge_0.50": 0.46236559139784944,
+      "mean_matched_iou": 0.5772192700413027,
+      "gt2_success": 0.5161290322580645,
+      "gt3_success": 0.2391304347826087,
+      "false_bridges_remaining": 40,
+      "missing_tissue_failures_introduced": 3,
+      "exact_count": 0.34408602150537637
+    }
+  },
+  "metric_equivalence": {
+    "center_exact_count_definition": "literal pred_instance_count == gt_instance_count, where pred_instance_count is computed from reconstructed semantic+center instance labels after marker selection and watershed/connected-component reconstruction",
+    "geometric_exact_count_definition": "literal pred_instance_count == gt_instance_count, where pred_instance_count is computed from reconstructed semantic-mask geometry after oracle-K seed selection and watershed/connected-component reconstruction",
+    "directly_comparable": true,
+    "caveat": "The literal count metric is the same, but prior reporting mixed different mask conditions and different reconstruction methods in the headline comparison."
+  },
+  "revised_diagnosis": "WEAK_GEOMETRIC_SIGNAL",
+  "next_step": {
+    "decision": "B. IMPROVE_SEMANTIC_TOPOLOGY",
+    "reason": "GT-semantic geometry is strong, but predicted-semantic topology remains the bottleneck even after cheap deterministic cleanup."
+  },
+  "visual_review": [
+    {
+      "category": "high_dice_false_bridge",
+      "sample_id": "m05_p01_s18",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_forensic\\visual_review\\high_dice_false_bridge_m05_p01_s18.png",
+      "variant": "current"
+    },
+    {
+      "category": "high_dice_watershed_failure",
+      "sample_id": "m05_p01_s18",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_forensic\\visual_review\\high_dice_watershed_failure_m05_p01_s18.png",
+      "variant": "current"
+    },
+    {
+      "category": "mild_opening_fixes_bridge",
+      "sample_id": "m05_p01_s18",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_forensic\\visual_review\\mild_opening_fixes_bridge_m05_p01_s18.png",
+      "variant": "opening_k3"
+    },
+    {
+      "category": "neck_cut_fixes_bridge",
+      "sample_id": "m05_p01_s30",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_forensic\\visual_review\\neck_cut_fixes_bridge_m05_p01_s30.png",
+      "variant": "neck_cut_w2"
+    },
+    {
+      "category": "postprocess_damages_valid_leaflet",
+      "sample_id": "m05_p01_s17",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_forensic\\visual_review\\postprocess_damages_valid_leaflet_m05_p01_s17.png",
+      "variant": "opening_k5"
+    },
+    {
+      "category": "gt_semantic_succeeds_all_predicted_variants_fail",
+      "sample_id": "m04_p01_s01",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_forensic\\visual_review\\gt_semantic_succeeds_all_predicted_variants_fail_m04_p01_s01.png",
+      "variant": "neck_cut_w2"
+    }
+  ]
+}
