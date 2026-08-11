@@ -1,0 +1,203 @@
+{
+  "exact_k_contract": {
+    "samples": 93,
+    "best_gt_exact_k": 1.0,
+    "best_pred_exact_k": 1.0
+  },
+  "best_gt_semantic_method": {
+    "mask_condition": "GT_SEMANTIC",
+    "method_key": "centroid_distance_k_normalizer",
+    "method_family": "k_normalizer",
+    "n": 93,
+    "exact_k_rate": 1.0,
+    "mean_matched_iou": 0.961469652623085,
+    "all_iou_ge_0.50": 0.9247311827956989,
+    "all_iou_ge_0.70": 0.9247311827956989,
+    "all_iou_ge_0.80": 0.9139784946236559,
+    "merge_rate": 0.0,
+    "fragmentation_rate": 0.0,
+    "mean_merge_ops": 0.6881720430107527,
+    "mean_split_ops": 0.0
+  },
+  "best_predicted_semantic_method": {
+    "mask_condition": "PREDICTED_SEMANTIC",
+    "method_key": "centroid_distance_k_normalizer",
+    "method_family": "k_normalizer",
+    "n": 93,
+    "exact_k_rate": 1.0,
+    "mean_matched_iou": 0.5745997306284747,
+    "all_iou_ge_0.50": 0.4838709677419355,
+    "all_iou_ge_0.70": 0.3225806451612903,
+    "all_iou_ge_0.80": 0.15053763440860216,
+    "merge_rate": 0.0,
+    "fragmentation_rate": 0.0,
+    "mean_merge_ops": 1.4731182795698925,
+    "mean_split_ops": 0.22580645161290322
+  },
+  "previous_38_gt_over_k_cases": {
+    "recovered_exact_k": 38,
+    "recovered_all_iou_ge_0.50": 33,
+    "incorrectly_grouped": 0
+  },
+  "oracle_fragment_grouping": {
+    "gt_semantic": {
+      "mask_condition": "GT_SEMANTIC",
+      "method_key": "gt_fragment_grouping_oracle",
+      "method_family": "diagnostic_oracle",
+      "n": 93,
+      "exact_k_rate": 0.989247311827957,
+      "mean_matched_iou": 0.9896780083358258,
+      "all_iou_ge_0.50": 0.978494623655914,
+      "all_iou_ge_0.70": 0.978494623655914,
+      "all_iou_ge_0.80": 0.978494623655914,
+      "merge_rate": 0.010752688172043012,
+      "fragmentation_rate": 0.0,
+      "mean_merge_ops": 0.6989247311827957,
+      "mean_split_ops": 0.0
+    },
+    "predicted_semantic": {
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "gt_fragment_grouping_oracle",
+      "method_family": "diagnostic_oracle",
+      "n": 93,
+      "exact_k_rate": 0.6344086021505376,
+      "mean_matched_iou": 0.5604848495387826,
+      "all_iou_ge_0.50": 0.5376344086021505,
+      "all_iou_ge_0.70": 0.3655913978494624,
+      "all_iou_ge_0.80": 0.16129032258064516,
+      "merge_rate": 0.3655913978494624,
+      "fragmentation_rate": 0.0,
+      "mean_merge_ops": 1.6774193548387097,
+      "mean_split_ops": 0.0
+    },
+    "interpretation": "The oracle grouping upper bound isolates how much reconstruction is recoverable by regrouping existing foreground fragments without changing semantic pixels."
+  },
+  "vs_previous_geometry": {
+    "current": {
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "global_distance_maxima_r09",
+      "method_family": "previous_geometry",
+      "exact_k_rate": 0.3548387096774194,
+      "mean_matched_iou": 0.5573108664968115,
+      "all_iou_ge_0.50": 0.41935483870967744,
+      "all_iou_ge_0.70": 0.27956989247311825,
+      "all_iou_ge_0.80": 0.15053763440860216
+    },
+    "neck_cut_w3": {
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "previous_neck_cut_w3",
+      "method_family": "previous_geometry",
+      "exact_k_rate": 0.34408602150537637,
+      "mean_matched_iou": 0.5772192700413027,
+      "all_iou_ge_0.50": 0.46236559139784944,
+      "all_iou_ge_0.70": null,
+      "all_iou_ge_0.80": null
+    },
+    "k_normalized": {
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "centroid_distance_k_normalizer",
+      "method_family": "k_normalizer",
+      "n": 93,
+      "exact_k_rate": 1.0,
+      "mean_matched_iou": 0.5745997306284747,
+      "all_iou_ge_0.50": 0.4838709677419355,
+      "all_iou_ge_0.70": 0.3225806451612903,
+      "all_iou_ge_0.80": 0.15053763440860216,
+      "merge_rate": 0.0,
+      "fragmentation_rate": 0.0,
+      "mean_merge_ops": 1.4731182795698925,
+      "mean_split_ops": 0.22580645161290322
+    },
+    "delta_all_iou_ge_0.50_vs_current": 0.06451612903225806,
+    "delta_all_iou_ge_0.50_vs_neck_cut": 0.021505376344086058
+  },
+  "vs_center": {
+    "geometry": {
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "centroid_distance_k_normalizer",
+      "method_family": "k_normalizer",
+      "n": 93,
+      "exact_k_rate": 1.0,
+      "mean_matched_iou": 0.5745997306284747,
+      "all_iou_ge_0.50": 0.4838709677419355,
+      "all_iou_ge_0.70": 0.3225806451612903,
+      "all_iou_ge_0.80": 0.15053763440860216,
+      "merge_rate": 0.0,
+      "fragmentation_rate": 0.0,
+      "mean_merge_ops": 1.4731182795698925,
+      "mean_split_ops": 0.22580645161290322
+    },
+    "center": {
+      "strict_marker_contract": 0.3655913978494624,
+      "instance_exact_count": 0.5913978494623656,
+      "instance_mean_matched_iou": 0.572104696693949,
+      "instance_score": 0.5043627612100781
+    },
+    "interpretation": "Compare literal exact-K count and mean matched IoU directly; center all-instance IoU thresholds are not available from the saved local artifacts."
+  },
+  "best_predicted_failure_attribution": {
+    "ambiguous_geometry": 8,
+    "false_semantic_bridge_requiring_split": 15,
+    "insufficient_semantic_foreground": 24,
+    "other": 1,
+    "success": 45
+  },
+  "decision": {
+    "result": "C. IMPROVE_SEMANTIC_TOPOLOGY",
+    "reason": "Deterministic K-normalization fixed the count contract but only modestly improved reconstruction, and even oracle fragment grouping stays low enough that semantic pixel errors remain dominant."
+  },
+  "future_count_head_candidate": null,
+  "visual_review": [
+    {
+      "category": "gt_semantic_n_gt_k_correctly_merged",
+      "sample_id": "m04_p01_s06",
+      "mask_condition": "GT_SEMANTIC",
+      "method_key": "centroid_distance_k_normalizer",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_k_constrained_normalization_audit\\visual_review\\gt_semantic_n_gt_k_correctly_merged_m04_p01_s06.png"
+    },
+    {
+      "category": "predicted_fragment_correctly_regrouped",
+      "sample_id": "m05_p01_s45",
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "centroid_distance_k_normalizer",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_k_constrained_normalization_audit\\visual_review\\predicted_fragment_correctly_regrouped_m05_p01_s45.png"
+    },
+    {
+      "category": "gt2_recovered",
+      "sample_id": "m04_p01_s00",
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "centroid_distance_k_normalizer",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_k_constrained_normalization_audit\\visual_review\\gt2_recovered_m04_p01_s00.png"
+    },
+    {
+      "category": "gt3_recovered",
+      "sample_id": "m04_p01_s04",
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "centroid_distance_k_normalizer",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_k_constrained_normalization_audit\\visual_review\\gt3_recovered_m04_p01_s04.png"
+    },
+    {
+      "category": "bridge_requiring_watershed_split",
+      "sample_id": "m04_p01_s01",
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "centroid_distance_k_normalizer",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_k_constrained_normalization_audit\\visual_review\\bridge_requiring_watershed_split_m04_p01_s01.png"
+    },
+    {
+      "category": "semantic_pixels_missing_grouping_cannot_recover",
+      "sample_id": "m04_p01_s06",
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "centroid_distance_k_normalizer",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_k_constrained_normalization_audit\\visual_review\\semantic_pixels_missing_grouping_cannot_recover_m04_p01_s06.png"
+    },
+    {
+      "category": "oracle_grouping_succeeds_deterministic_fails",
+      "sample_id": "m04_p01_s06",
+      "mask_condition": "PREDICTED_SEMANTIC",
+      "method_key": "gt_fragment_grouping_oracle",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_k_constrained_normalization_audit\\visual_review\\oracle_grouping_succeeds_deterministic_fails_m04_p01_s06.png"
+    }
+  ],
+  "deployable_gt_signature": "(mask01: 'np.ndarray', k: 'int', method_key: 'str') -> 'dict[str, Any]'",
+  "oracle_signature": "(mask01: 'np.ndarray', gt_inst_u8: 'np.ndarray', k: 'int') -> 'dict[str, Any]'"
+}

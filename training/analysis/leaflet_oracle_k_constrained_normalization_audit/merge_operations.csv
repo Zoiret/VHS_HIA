@@ -1,0 +1,1026 @@
+sample_id,patient_id,gt_count,mask_condition,method_key,operation_index,left_group,right_group,left_component_ids,right_component_ids,left_area,right_area,minimum_boundary_distance,chosen_target_group,same_gt_leaflet,merge_stage
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,4,[3],[4],20931,1,2.196899890899658,3,,agglomeration
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,3,[1],"[3, 4]",28795,20932,21.772096633911133,1,,agglomeration
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,4,[3],[4],20931,1,2.196899890899658,3,,agglomeration
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,3,[1],"[3, 4]",28795,20932,21.772096633911133,1,,agglomeration
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],20931,1,2.196899890899658,3,,agglomeration
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,5,[2],[5],4094,2528,92.35661315917969,2,,agglomeration
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,4,[3],[4],20931,1,2.196899890899658,3,,obvious_fragment_assignment
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,3,[1],"[3, 4]",28795,20932,21.772096633911133,1,,agglomeration
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],20931,1,,1,1,gt_oracle_grouping
+m04_p01_s04,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,5,[2],[5],4094,2528,,3,1,gt_oracle_grouping
+m04_p01_s06,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],3623,12359,25.565895080566406,2,,agglomeration
+m04_p01_s06,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,2,3,[2],[3],3623,12359,25.565895080566406,2,,agglomeration
+m04_p01_s06,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],3623,12359,25.565895080566406,2,,agglomeration
+m04_p01_s06,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],3623,12359,25.565895080566406,2,,obvious_fragment_assignment
+m04_p01_s06,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],3623,12359,,1,1,gt_oracle_grouping
+m04_p01_s06,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],15171,11448,49.1968994140625,1,,agglomeration
+m04_p01_s06,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],15171,2369,67.3162841796875,1,,agglomeration
+m04_p01_s06,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],15171,11448,49.1968994140625,1,,agglomeration
+m04_p01_s06,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],15171,2369,67.3162841796875,1,,obvious_fragment_assignment
+m04_p01_s06,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,3,[1],[3],15171,2369,,2,1,gt_oracle_grouping
+m04_p01_s07,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],64630,1529,49.3782958984375,2,,agglomeration
+m04_p01_s07,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,3,[2],[3],64630,1529,49.3782958984375,2,,agglomeration
+m04_p01_s07,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],64630,1529,49.3782958984375,2,,agglomeration
+m04_p01_s07,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],15,64630,94.0,1,,obvious_fragment_assignment
+m04_p01_s07,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,3,[1],[3],15,1529,,1,1,gt_oracle_grouping
+m04_p01_s08,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],15540,15,2.0,1,,agglomeration
+m04_p01_s08,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],15540,15,2.0,1,,agglomeration
+m04_p01_s08,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],15540,15,2.0,1,,agglomeration
+m04_p01_s08,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],15540,15,2.0,1,,obvious_fragment_assignment
+m04_p01_s08,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],15540,15,,2,1,gt_oracle_grouping
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,2,4,[2],[4],4835,1,2.196899890899658,2,,agglomeration
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,2,1,3,[1],[3],32565,22006,9.1968994140625,1,,agglomeration
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,2,4,[2],[4],4835,1,2.196899890899658,2,,agglomeration
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,2,1,3,[1],[3],32565,22006,9.1968994140625,1,,agglomeration
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],1,2606,81.0,4,,agglomeration
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,2,2,4,[2],"[4, 5]",4835,2607,2.196899890899658,2,,agglomeration
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,2,4,[2],[4],4835,1,2.196899890899658,2,,obvious_fragment_assignment
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,2,1,3,[1],[3],32565,22006,9.1968994140625,1,,agglomeration
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,2,4,[2],[4],4835,1,,3,1,gt_oracle_grouping
+m04_p01_s09,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,2,2,5,[2],[5],4835,2606,,3,1,gt_oracle_grouping
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,6,7,[6],[7],8,12,2.196899890899658,6,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,5,6,[5],"[6, 7]",3,20,7.196899890899658,5,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,3,[1],[3],31428,17875,31.559694290161133,1,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,4,5,[4],"[5, 6, 7]",3543,23,40.5906982421875,4,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,6,7,[6],[7],8,12,2.196899890899658,6,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,5,6,[5],"[6, 7]",3,20,7.196899890899658,5,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,4,5,[4],"[5, 6, 7]",3543,23,40.5906982421875,4,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,1,3,[1],[3],31428,17875,31.559694290161133,1,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,6,7,[6],[7],8,12,2.196899890899658,6,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,5,6,[5],"[6, 7]",3,20,7.196899890899658,5,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,4,5,[4],"[5, 6, 7]",3543,23,40.5906982421875,4,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,2,4,[2],"[4, 5, 6, 7]",4027,3566,106.0,2,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,6,7,[6],[7],8,12,2.196899890899658,6,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,5,6,[5],"[6, 7]",3,20,7.196899890899658,5,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,3,[1],[3],31428,17875,31.559694290161133,1,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,4,4,5,[4],"[5, 6, 7]",3543,23,40.5906982421875,4,,agglomeration
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,3,5,[3],[5],17875,3,,1,1,gt_oracle_grouping
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,3,6,[3],[6],17875,8,,1,1,gt_oracle_grouping
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,3,7,[3],[7],17875,12,,1,1,gt_oracle_grouping
+m04_p01_s09,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,2,4,[2],[4],4027,3543,,3,1,gt_oracle_grouping
+m04_p01_s10,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],67452,36,,1,1,gt_oracle_grouping
+m04_p01_s13,m04_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],26676,12385,14.796897888183594,1,,agglomeration
+m04_p01_s13,m04_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],26676,12385,14.796897888183594,1,,agglomeration
+m04_p01_s13,m04_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],26676,12385,14.796897888183594,1,,agglomeration
+m04_p01_s13,m04_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],26676,12385,14.796897888183594,1,,agglomeration
+m04_p01_s13,m04_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],26676,12385,,1,1,gt_oracle_grouping
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],21344,8854,20.575197219848633,2,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,2,[1],"[2, 3]",1562,30198,23.0,1,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,4,"[1, 2, 3]",[4],31760,2181,43.59379959106445,1,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],1562,8854,23.0,1,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,2,"[1, 3]",[2],10416,21344,20.575197219848633,1,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,4,"[1, 2, 3]",[4],31760,2181,43.59379959106445,1,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,3,[1],[3],1562,8854,23.0,1,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,2,"[1, 3]",[2],10416,21344,20.575197219848633,1,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,4,5,[4],[5],2181,15070,148.59226989746094,4,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],1562,8854,23.0,1,,obvious_fragment_assignment
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,4,"[1, 3]",[4],10416,2181,43.59379959106445,1,,obvious_fragment_assignment
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,2,"[1, 3, 4]",[2],12597,21344,20.575197219848633,1,,agglomeration
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],1562,21344,,1,1,gt_oracle_grouping
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],1562,8854,,1,1,gt_oracle_grouping
+m04_p01_s13,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],1562,2181,,1,1,gt_oracle_grouping
+m04_p01_s14,m04_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],36625,40956,15.0,1,,agglomeration
+m04_p01_s14,m04_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],36625,40956,15.0,1,,agglomeration
+m04_p01_s14,m04_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],2628,40956,175.9890594482422,2,,agglomeration
+m04_p01_s14,m04_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],36625,2628,54.7720947265625,1,,obvious_fragment_assignment
+m04_p01_s14,m04_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],36625,2628,,1,1,gt_oracle_grouping
+m04_p01_s14,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],882,819,5.599999904632568,2,,agglomeration
+m04_p01_s14,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,3,[2],[3],882,819,5.599999904632568,2,,agglomeration
+m04_p01_s14,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],882,819,5.599999904632568,2,,agglomeration
+m04_p01_s14,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],882,819,5.599999904632568,2,,agglomeration
+m04_p01_s14,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],882,819,,1,1,gt_oracle_grouping
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,4,[2],[4],83,132,10.590700149536133,2,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,5,6,[5],[6],39677,804,10.984498977661133,5,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,3,5,[3],"[5, 6]",16862,40481,19.378297805786133,3,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,1,2,[1],"[2, 4]",205,215,50.181396484375,1,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,5,6,[5],[6],39677,804,10.984498977661133,5,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,2,4,[2],[4],83,132,10.590700149536133,2,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,3,5,[3],"[5, 6]",16862,40481,19.378297805786133,3,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,1,2,[1],"[2, 4]",205,215,50.181396484375,1,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,4,[2],[4],83,132,10.590700149536133,2,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,2,[1],"[2, 4]",205,215,50.181396484375,1,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,5,6,[5],[6],39677,804,10.984498977661133,5,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,1,3,"[1, 2, 4]",[3],420,16862,124.694580078125,1,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,4,[2],[4],83,132,10.590700149536133,2,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,5,6,[5],[6],39677,804,10.984498977661133,5,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,3,5,[3],"[5, 6]",16862,40481,19.378297805786133,3,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,4,1,2,[1],"[2, 4]",205,215,50.181396484375,1,,agglomeration
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],205,83,,1,1,gt_oracle_grouping
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,4,[1],[4],205,132,,1,1,gt_oracle_grouping
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,5,[1],[5],205,39677,,1,1,gt_oracle_grouping
+m04_p01_s15,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,1,6,[1],[6],205,804,,1,1,gt_oracle_grouping
+m04_p01_s16,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,4,[3],[4],3,170,16.378297805786133,3,,agglomeration
+m04_p01_s16,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,4,[3],[4],3,170,16.378297805786133,3,,agglomeration
+m04_p01_s16,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],3,170,16.378297805786133,3,,agglomeration
+m04_p01_s16,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,4,[3],[4],3,170,16.378297805786133,3,,obvious_fragment_assignment
+m04_p01_s16,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],31214,3,,1,1,gt_oracle_grouping
+m04_p01_s16,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],31214,170,,1,1,gt_oracle_grouping
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,4,5,[4],[5],3743,4,2.0,4,,agglomeration
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,2,1,3,[1],[3],33698,14145,38.393798828125,1,,agglomeration
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,4,5,[4],[5],3743,4,2.0,4,,agglomeration
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,2,1,3,[1],[3],33698,14145,38.393798828125,1,,agglomeration
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],3743,4,2.0,4,,agglomeration
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,2,2,4,[2],"[4, 5]",3658,3747,93.0,2,,agglomeration
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,4,5,[4],[5],3743,4,2.0,4,,obvious_fragment_assignment
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,2,1,3,[1],[3],33698,14145,38.393798828125,1,,agglomeration
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,2,4,[2],[4],3658,3743,,3,1,gt_oracle_grouping
+m04_p01_s17,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,2,2,5,[2],[5],3658,4,,3,1,gt_oracle_grouping
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,5,6,[5],[6],8,6,6.196899890899658,5,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,5,7,"[5, 6]",[7],14,2,20.5906982421875,5,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,3,5,[3],"[5, 6, 7]",13732,16,23.393798828125,3,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,1,3,[1],"[3, 5, 6, 7]",32780,13748,38.9534912109375,1,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,5,6,[5],[6],8,6,6.196899890899658,5,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,3,7,[3],[7],13732,2,23.393798828125,3,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,3,5,"[3, 7]","[5, 6]",13734,14,20.5906982421875,3,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,1,3,[1],"[3, 5, 6, 7]",32780,13748,38.9534912109375,1,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,5,6,[5],[6],8,6,6.196899890899658,5,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,5,7,"[5, 6]",[7],14,2,20.5906982421875,5,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,3,5,[3],"[5, 6, 7]",13732,16,23.393798828125,3,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,2,4,[2],[4],3533,4990,118.756591796875,2,,agglomeration
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,6,7,[6],[7],6,2,20.5906982421875,6,,obvious_fragment_assignment
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,3,5,[3],[5],13732,8,56.181396484375,3,,obvious_fragment_assignment
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,3,6,"[3, 5]","[6, 7]",13740,8,6.196899890899658,3,,obvious_fragment_assignment
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,4,1,2,[1],[2],32780,3533,97.5906982421875,1,,obvious_fragment_assignment
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,3,5,[3],[5],13732,8,,1,1,gt_oracle_grouping
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,3,6,[3],[6],13732,6,,1,1,gt_oracle_grouping
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,3,7,[3],[7],13732,2,,1,1,gt_oracle_grouping
+m04_p01_s17,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,2,4,[2],[4],3533,4990,,3,1,gt_oracle_grouping
+m04_p01_s18,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,4,[1],[4],24067,49704,7.1937994956970215,1,,agglomeration
+m04_p01_s18,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],24067,2266,9.39069938659668,1,,agglomeration
+m04_p01_s18,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],2266,5854,19.1968994140625,2,,agglomeration
+m04_p01_s18,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],24067,2266,9.39069938659668,1,,obvious_fragment_assignment
+m04_p01_s18,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],2266,5854,,3,1,gt_oracle_grouping
+m04_p01_s19,m04_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],32123,9799,6.0,1,,agglomeration
+m04_p01_s19,m04_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],32123,9799,6.0,1,,agglomeration
+m04_p01_s19,m04_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],32123,9799,6.0,1,,agglomeration
+m04_p01_s19,m04_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],32123,9799,6.0,1,,obvious_fragment_assignment
+m04_p01_s19,m04_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],32123,9799,,1,1,gt_oracle_grouping
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,4,5,[4],[5],29,17409,15.393798828125,4,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,3,[1],[3],9984,2169,20.393798828125,1,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,2,"[1, 3]",[2],12153,28036,34.7720947265625,1,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,4,5,[4],[5],29,17409,15.393798828125,4,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,3,[1],[3],9984,2169,20.393798828125,1,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,2,"[1, 3]",[2],12153,28036,34.7720947265625,1,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],29,17409,15.393798828125,4,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,2,[1],[2],9984,28036,34.7720947265625,1,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,3,4,[3],"[4, 5]",2169,17438,127.7255859375,3,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,4,5,[4],[5],29,17409,15.393798828125,4,,obvious_fragment_assignment
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,3,[1],[3],9984,2169,20.393798828125,1,,obvious_fragment_assignment
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,2,"[1, 3]",[2],12153,28036,34.7720947265625,1,,agglomeration
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],9984,28036,,1,1,gt_oracle_grouping
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],9984,2169,,1,1,gt_oracle_grouping
+m04_p01_s19,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],9984,29,,1,1,gt_oracle_grouping
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],28549,1,2.0,1,,agglomeration
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,3,"[1, 2]",[3],28550,4,2.196899890899658,1,,agglomeration
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],28549,1,2.0,1,,agglomeration
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,3,"[1, 2]",[3],28550,4,2.196899890899658,1,,agglomeration
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],1,4,2.196899890899658,2,,agglomeration
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,4,"[2, 3]",[4],5,2,8.399999618530273,2,,agglomeration
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],28549,1,2.0,1,,obvious_fragment_assignment
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,3,"[1, 2]",[3],28550,4,2.196899890899658,1,,agglomeration
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],28549,1,,2,1,gt_oracle_grouping
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],28549,4,,2,1,gt_oracle_grouping
+m04_p01_s20,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],28549,2,,2,1,gt_oracle_grouping
+m04_p01_s22,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],1448,9847,,2,1,gt_oracle_grouping
+m04_p01_s23,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,4,[3],[4],37,97,8.0,3,,agglomeration
+m04_p01_s23,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,4,[3],[4],37,97,8.0,3,,agglomeration
+m04_p01_s23,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],37,97,8.0,3,,agglomeration
+m04_p01_s23,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,4,[3],[4],37,97,8.0,3,,agglomeration
+m04_p01_s23,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],26989,37,,1,1,gt_oracle_grouping
+m04_p01_s23,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],26989,97,,1,1,gt_oracle_grouping
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],1441,385,5.599999904632568,1,,agglomeration
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,2,1,4,"[1, 2]",[4],1826,3264,64.78759765625,1,,agglomeration
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],1441,385,5.599999904632568,1,,agglomeration
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,area_aware_k_normalizer,2,1,4,"[1, 2]",[4],1826,3264,64.78759765625,1,,agglomeration
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],1441,385,5.599999904632568,1,,agglomeration
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,2,1,4,"[1, 2]",[4],1826,3264,64.78759765625,1,,agglomeration
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],1441,385,5.599999904632568,1,,obvious_fragment_assignment
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,hybrid_k_normalization,2,1,4,"[1, 2]",[4],1826,3264,64.78759765625,1,,agglomeration
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],1441,385,,2,1,gt_oracle_grouping
+m04_p01_s24,m04_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,2,1,4,[1],[4],1441,3264,,2,1,gt_oracle_grouping
+m04_p01_s25,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],24428,12750,4.996899604797363,1,,agglomeration
+m04_p01_s25,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],24428,12750,4.996899604797363,1,,agglomeration
+m04_p01_s25,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],12750,39146,18.9844970703125,3,,agglomeration
+m04_p01_s25,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],24428,7404,38.150390625,1,,obvious_fragment_assignment
+m04_p01_s25,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],12750,39146,,1,1,gt_oracle_grouping
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,5,[3],[5],1613,178,6.0,3,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,6,[1],[6],18954,12710,27.181396484375,1,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,3,"[1, 6]","[3, 5]",31664,1791,27.5906982421875,1,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,2,4,[2],[4],1450,3805,28.393798828125,2,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,5,[3],[5],1613,178,6.0,3,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,3,[1],"[3, 5]",18954,1791,27.5906982421875,1,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,2,"[1, 3, 5]",[2],20745,1450,33.38449478149414,1,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,1,4,"[1, 2, 3, 5]",[4],22195,3805,28.393798828125,1,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,5,[3],[5],1613,178,6.0,3,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,4,[2],[4],1450,3805,28.393798828125,2,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,3,6,"[3, 5]",[6],1791,12710,29.16279411315918,3,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,3,7,"[3, 5, 6]",[7],14501,37055,35.9534912109375,3,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,5,[3],[5],1613,178,6.0,3,,obvious_fragment_assignment
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,6,[1],[6],18954,12710,27.181396484375,1,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,3,"[1, 6]","[3, 5]",31664,1791,27.5906982421875,1,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,4,2,4,[2],[4],1450,3805,28.393798828125,2,,agglomeration
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,6,7,[6],[7],12710,37055,,1,1,gt_oracle_grouping
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],18954,1613,,2,1,gt_oracle_grouping
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,5,[1],[5],18954,178,,2,1,gt_oracle_grouping
+m04_p01_s25,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,2,4,[2],[4],1450,3805,,3,1,gt_oracle_grouping
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,4,5,[4],[5],1,3458,2.196899890899658,4,,agglomeration
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,2,1,3,[1],[3],32268,12085,8.590700149536133,1,,agglomeration
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,4,5,[4],[5],1,3458,2.196899890899658,4,,agglomeration
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,2,1,3,[1],[3],32268,12085,8.590700149536133,1,,agglomeration
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],1,3458,2.196899890899658,4,,agglomeration
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,2,2,4,[2],"[4, 5]",3315,3459,107.9844970703125,2,,agglomeration
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,4,5,[4],[5],1,3458,2.196899890899658,4,,obvious_fragment_assignment
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,2,1,2,[1],[2],32268,3315,97.78759765625,1,,obvious_fragment_assignment
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,2,4,[2],[4],3315,1,,3,1,gt_oracle_grouping
+m04_p01_s26,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,2,2,5,[2],[5],3315,3458,,3,1,gt_oracle_grouping
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],31605,11458,22.772096633911133,1,,agglomeration
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,4,5,[4],[5],39,3725,43.5906982421875,4,,agglomeration
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],31605,11458,22.772096633911133,1,,agglomeration
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,4,5,[4],[5],39,3725,43.5906982421875,4,,agglomeration
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],39,3725,43.5906982421875,4,,agglomeration
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,4,[2],"[4, 5]",3393,3764,122.0,2,,agglomeration
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,4,5,[4],[5],39,3725,43.5906982421875,4,,obvious_fragment_assignment
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,2,[1],[2],31605,3393,96.1968994140625,1,,obvious_fragment_assignment
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],11458,39,,1,1,gt_oracle_grouping
+m04_p01_s26,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,5,[2],[5],3393,3725,,3,1,gt_oracle_grouping
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,4,[3],[4],13,31,4.196899890899658,3,,agglomeration
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,3,[1],"[3, 4]",33162,44,6.0,1,,agglomeration
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,4,[3],[4],13,31,4.196899890899658,3,,agglomeration
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,3,[1],"[3, 4]",33162,44,6.0,1,,agglomeration
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],13,31,4.196899890899658,3,,agglomeration
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,3,[1],"[3, 4]",33162,44,6.0,1,,agglomeration
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,4,[3],[4],13,31,4.196899890899658,3,,agglomeration
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,3,[1],"[3, 4]",33162,44,6.0,1,,agglomeration
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,5,[2],[5],45364,27,,1,1,gt_oracle_grouping
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],33162,13,,3,1,gt_oracle_grouping
+m04_p01_s27,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],33162,31,,3,1,gt_oracle_grouping
+m04_p01_s28,m04_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],32043,7636,11.0,1,,agglomeration
+m04_p01_s28,m04_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],32043,7636,11.0,1,,agglomeration
+m04_p01_s28,m04_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],32043,7636,11.0,1,,agglomeration
+m04_p01_s28,m04_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],32043,7636,11.0,1,,obvious_fragment_assignment
+m04_p01_s28,m04_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],32043,7636,,1,1,gt_oracle_grouping
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],1182,1,2.0,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,4,"[1, 3]",[4],1183,29655,8.1968994140625,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,2,"[1, 3, 4]",[2],30838,7609,25.968996047973633,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,5,6,[5],[6],359,588,47.1968994140625,5,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,5,1,5,"[1, 2, 3, 4]","[5, 6]",38447,947,49.1348876953125,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],1182,1,2.0,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,4,"[1, 3]",[4],1183,29655,8.1968994140625,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,2,"[1, 3, 4]",[2],30838,7609,25.968996047973633,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,1,5,"[1, 2, 3, 4]",[5],38447,359,49.1348876953125,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,5,1,6,"[1, 2, 3, 4, 5]",[6],38806,588,47.1968994140625,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,3,[1],[3],1182,1,2.0,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,5,6,[5],[6],359,588,47.1968994140625,5,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,1,2,"[1, 3]",[2],1183,7609,25.968996047973633,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,1,4,"[1, 2, 3]",[4],8792,29655,8.1968994140625,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,5,5,7,"[5, 6]",[7],947,19051,129.968994140625,5,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],1182,1,2.0,1,,obvious_fragment_assignment
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,4,"[1, 3]",[4],1183,29655,8.1968994140625,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,2,"[1, 3, 4]",[2],30838,7609,25.968996047973633,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,4,5,6,[5],[6],359,588,47.1968994140625,5,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,5,1,5,"[1, 2, 3, 4]","[5, 6]",38447,947,49.1348876953125,1,,agglomeration
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],1182,7609,,1,1,gt_oracle_grouping
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],1182,1,,1,1,gt_oracle_grouping
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],1182,29655,,1,1,gt_oracle_grouping
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,1,5,[1],[5],1182,359,,1,1,gt_oracle_grouping
+m04_p01_s28,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,5,1,6,[1],[6],1182,588,,1,1,gt_oracle_grouping
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,6,[2],[6],8266,1,2.0,2,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,2,5,"[2, 6]",[5],8267,3,2.0,2,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,4,7,[4],[7],16745,38526,16.778297424316406,4,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,3,4,[3],"[4, 7]",98,55271,24.181396484375,3,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,5,1,3,[1],"[3, 4, 7]",688,55369,29.393798828125,1,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,6,[2],[6],8266,1,2.0,2,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,2,5,"[2, 6]",[5],8267,3,2.0,2,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,4,7,[4],[7],16745,38526,16.778297424316406,4,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,3,4,[3],"[4, 7]",98,55271,24.181396484375,3,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,5,1,3,[1],"[3, 4, 7]",688,55369,29.393798828125,1,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,5,6,[5],[6],3,1,35.19379425048828,5,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,5,[2],"[5, 6]",8266,4,2.0,2,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,1,3,[1],[3],688,98,29.393798828125,1,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,1,2,"[1, 3]","[2, 5, 6]",786,8270,61.347293853759766,1,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,5,1,4,"[1, 2, 3, 5, 6]",[4],9056,16745,24.181396484375,1,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,6,[2],[6],8266,1,2.0,2,,obvious_fragment_assignment
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,2,5,"[2, 6]",[5],8267,3,2.0,2,,obvious_fragment_assignment
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,3,4,[3],[4],98,16745,24.181396484375,3,,obvious_fragment_assignment
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,4,1,3,[1],"[3, 4]",688,16843,29.393798828125,1,,obvious_fragment_assignment
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,5,1,7,"[1, 3, 4]",[7],17531,38526,16.778297424316406,1,,agglomeration
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],688,8266,,1,1,gt_oracle_grouping
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],688,98,,1,1,gt_oracle_grouping
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,5,[1],[5],688,3,,1,1,gt_oracle_grouping
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,1,6,[1],[6],688,1,,1,1,gt_oracle_grouping
+m04_p01_s30,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,5,1,7,[1],[7],688,38526,,1,1,gt_oracle_grouping
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,5,6,[5],[6],87,2,3.0,5,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,4,5,[4],"[5, 6]",90,89,9.393799781799316,4,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,2,[1],[2],30885,4994,26.393798828125,1,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,5,6,[5],[6],87,2,3.0,5,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,4,5,[4],"[5, 6]",90,89,9.393799781799316,4,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,2,[1],[2],30885,4994,26.393798828125,1,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,5,6,[5],[6],87,2,3.0,5,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,4,5,[4],"[5, 6]",90,89,9.393799781799316,4,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,2,4,[2],"[4, 5, 6]",4994,179,93.30078125,2,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,5,6,[5],[6],87,2,3.0,5,,obvious_fragment_assignment
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,4,5,[4],"[5, 6]",90,89,9.393799781799316,4,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,2,[1],[2],30885,4994,26.393798828125,1,,agglomeration
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],25958,90,,1,1,gt_oracle_grouping
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,3,5,[3],[5],25958,87,,1,1,gt_oracle_grouping
+m04_p01_s32,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,3,6,[3],[6],25958,2,,1,1,gt_oracle_grouping
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,1,4,[1],[4],20690,13192,18.0,1,,agglomeration
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,2,2,3,[2],[3],1262,3196,27.9844970703125,2,,agglomeration
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,1,4,[1],[4],20690,13192,18.0,1,,agglomeration
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,2,1,2,"[1, 4]",[2],33882,1262,37.196895599365234,1,,agglomeration
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],1262,3196,27.9844970703125,2,,agglomeration
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,2,4,5,[4],[5],13192,33441,46.9844970703125,4,,agglomeration
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,1,4,[1],[4],20690,13192,18.0,1,,agglomeration
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,2,2,3,[2],[3],1262,3196,27.9844970703125,2,,agglomeration
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,4,5,[4],[5],13192,33441,,1,1,gt_oracle_grouping
+m04_p01_s33,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,2,2,3,[2],[3],1262,3196,,3,1,gt_oracle_grouping
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],22016,17607,5.599999904632568,1,,agglomeration
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,3,"[1, 2]",[3],39623,954,20.396896362304688,1,,agglomeration
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],22016,17607,5.599999904632568,1,,agglomeration
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,3,"[1, 2]",[3],39623,954,20.396896362304688,1,,agglomeration
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],954,2102,34.0,3,,agglomeration
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,5,[2],[5],17607,33485,44.937992095947266,2,,agglomeration
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],22016,954,20.396896362304688,1,,obvious_fragment_assignment
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,4,"[1, 3]",[4],22970,2102,34.0,1,,obvious_fragment_assignment
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,5,[2],[5],17607,33485,,1,1,gt_oracle_grouping
+m04_p01_s33,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,3,4,[3],[4],954,2102,,3,1,gt_oracle_grouping
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],13153,12863,29.0,1,,agglomeration
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,2,3,4,[3],[4],5328,5738,73.1658935546875,3,,agglomeration
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],13153,12863,29.0,1,,agglomeration
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,area_aware_k_normalizer,2,1,3,"[1, 2]",[3],26016,5328,75.1658935546875,1,,agglomeration
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],13153,12863,29.0,1,,agglomeration
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,2,3,4,[3],[4],5328,5738,73.1658935546875,3,,agglomeration
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],13153,12863,29.0,1,,agglomeration
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,hybrid_k_normalization,2,3,4,[3],[4],5328,5738,73.1658935546875,3,,agglomeration
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],13153,12863,,1,1,gt_oracle_grouping
+m04_p01_s34,m04_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,2,3,4,[3],[4],5328,5738,,2,1,gt_oracle_grouping
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,4,[2],[4],14111,1,2.0,2,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,2,5,"[2, 4]",[5],14112,7324,5.793799877166748,2,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,2,[1],"[2, 4, 5]",15943,21436,20.772096633911133,1,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,1,6,"[1, 2, 4, 5]",[6],37379,6753,38.5751953125,1,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,4,[2],[4],14111,1,2.0,2,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,2,5,"[2, 4]",[5],14112,7324,5.793799877166748,2,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,2,[1],"[2, 4, 5]",15943,21436,20.772096633911133,1,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,1,6,"[1, 2, 4, 5]",[6],37379,6753,38.5751953125,1,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],1,7324,5.793799877166748,4,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,2,[1],[2],15943,14111,20.772096633911133,1,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,3,6,[3],[6],3410,6753,103.1348876953125,3,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,3,4,"[3, 6]","[4, 5]",10163,7325,38.5751953125,3,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,4,[2],[4],14111,1,2.0,2,,obvious_fragment_assignment
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,3,[1],[3],15943,3410,75.5596923828125,1,,obvious_fragment_assignment
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,2,5,"[2, 4]",[5],14112,7324,5.793799877166748,2,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,4,1,2,"[1, 3]","[2, 4, 5]",19353,21436,20.772096633911133,1,,agglomeration
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],15943,14111,,1,1,gt_oracle_grouping
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,4,[1],[4],15943,1,,1,1,gt_oracle_grouping
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,5,[1],[5],15943,7324,,1,1,gt_oracle_grouping
+m04_p01_s34,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,3,6,[3],[6],3410,6753,,2,1,gt_oracle_grouping
+m04_p01_s36,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],25297,2756,2.0,1,,agglomeration
+m04_p01_s36,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],25297,2756,2.0,1,,agglomeration
+m04_p01_s36,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],2756,7169,13.999998092651367,2,,agglomeration
+m04_p01_s36,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],25297,2756,2.0,1,,obvious_fragment_assignment
+m04_p01_s36,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],25297,2756,,1,1,gt_oracle_grouping
+m04_p01_s36,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],42043,4,,1,1,gt_oracle_grouping
+m04_p01_s37,m04_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],93511,666,,1,1,gt_oracle_grouping
+m04_p01_s39,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,4,[3],[4],649,11,16.393798828125,3,,agglomeration
+m04_p01_s39,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,4,[3],[4],649,11,16.393798828125,3,,agglomeration
+m04_p01_s39,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],649,11,16.393798828125,3,,agglomeration
+m04_p01_s39,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,4,[3],[4],649,11,16.393798828125,3,,obvious_fragment_assignment
+m04_p01_s39,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],23797,649,,1,1,gt_oracle_grouping
+m04_p01_s39,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],23797,11,,1,1,gt_oracle_grouping
+m04_p01_s40,m04_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],1767,5659,63.1658935546875,2,,agglomeration
+m04_p01_s40,m04_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,2,3,[2],[3],1767,5659,63.1658935546875,2,,agglomeration
+m04_p01_s40,m04_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],1767,5659,63.1658935546875,2,,agglomeration
+m04_p01_s40,m04_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],1767,5659,63.1658935546875,2,,obvious_fragment_assignment
+m04_p01_s40,m04_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],5659,6736,,3,1,gt_oracle_grouping
+m04_p01_s40,m04_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,4,[1],[4],15277,11448,31.393798828125,1,,agglomeration
+m04_p01_s40,m04_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,4,[1],[4],15277,11448,31.393798828125,1,,agglomeration
+m04_p01_s40,m04_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],2356,4049,63.710086822509766,2,,agglomeration
+m04_p01_s40,m04_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,4,[1],[4],15277,11448,31.393798828125,1,,agglomeration
+m04_p01_s40,m04_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],4049,11448,,3,1,gt_oracle_grouping
+m04_p01_s41,m04_p01,1,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],27005,58537,40.0,1,,agglomeration
+m04_p01_s41,m04_p01,1,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],27005,58537,40.0,1,,agglomeration
+m04_p01_s41,m04_p01,1,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],27005,58537,40.0,1,,agglomeration
+m04_p01_s41,m04_p01,1,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],27005,58537,40.0,1,,agglomeration
+m04_p01_s41,m04_p01,1,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],27005,58537,,1,1,gt_oracle_grouping
+m04_p01_s41,m04_p01,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],28490,61667,23.0,1,,agglomeration
+m04_p01_s41,m04_p01,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],28490,61667,23.0,1,,agglomeration
+m04_p01_s41,m04_p01,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],28490,61667,23.0,1,,agglomeration
+m04_p01_s41,m04_p01,1,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],28490,61667,23.0,1,,agglomeration
+m04_p01_s41,m04_p01,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],28490,61667,,1,1,gt_oracle_grouping
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],8,1632,4.0,2,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,4,[1],[4],35624,19645,14.181398391723633,1,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,5,"[1, 4]",[5],55269,3053,30.362794876098633,1,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,3,[2],[3],8,1632,4.0,2,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,4,[1],[4],35624,19645,14.181398391723633,1,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,5,"[1, 4]",[5],55269,3053,30.362794876098633,1,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],8,1632,4.0,2,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,4,5,[4],[5],19645,3053,30.362794876098633,4,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,1,4,[1],"[4, 5]",35624,22698,14.181398391723633,1,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],8,1632,4.0,2,,obvious_fragment_assignment
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,4,[1],[4],35624,19645,14.181398391723633,1,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,5,"[1, 4]",[5],55269,3053,30.362794876098633,1,,agglomeration
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],8,1632,,1,1,gt_oracle_grouping
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],8,19645,,1,1,gt_oracle_grouping
+m05_p01_s00,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,2,5,[2],[5],8,3053,,1,1,gt_oracle_grouping
+m05_p01_s03,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],54008,606,8.593799591064453,1,,agglomeration
+m05_p01_s03,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],54008,606,8.593799591064453,1,,agglomeration
+m05_p01_s03,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],606,3039,90.1038818359375,2,,agglomeration
+m05_p01_s03,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],54008,606,8.593799591064453,1,,obvious_fragment_assignment
+m05_p01_s03,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],606,3039,,1,1,gt_oracle_grouping
+m05_p01_s05,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],6228,37466,6.393799781799316,1,,agglomeration
+m05_p01_s05,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],6228,37466,6.393799781799316,1,,agglomeration
+m05_p01_s05,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,3,[1],[3],6228,37466,6.393799781799316,1,,agglomeration
+m05_p01_s05,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],6228,37466,6.393799781799316,1,,agglomeration
+m05_p01_s05,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],6228,2524,,2,1,gt_oracle_grouping
+m05_p01_s05,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],42797,833,128.0,1,,agglomeration
+m05_p01_s05,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],42797,833,128.0,1,,agglomeration
+m05_p01_s05,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],833,674,132.0,2,,agglomeration
+m05_p01_s05,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],42797,833,128.0,1,,agglomeration
+m05_p01_s05,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,3,[1],[3],42797,674,,1,1,gt_oracle_grouping
+m05_p01_s06,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],6568,36249,23.368995666503906,1,,agglomeration
+m05_p01_s06,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],6568,36249,23.368995666503906,1,,agglomeration
+m05_p01_s06,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],6568,237,89.0,1,,agglomeration
+m05_p01_s06,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],6568,237,89.0,1,,obvious_fragment_assignment
+m05_p01_s06,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],6568,237,,2,1,gt_oracle_grouping
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],16,1,5.0,2,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,2,4,"[2, 3]",[4],17,6,55.0,2,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,2,[1],"[2, 3, 4]",43465,23,141.0,1,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,3,[2],[3],16,1,5.0,2,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,2,4,"[2, 3]",[4],17,6,55.0,2,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,2,[1],"[2, 3, 4]",43465,23,141.0,1,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],16,1,5.0,2,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,4,"[2, 3]",[4],17,6,55.0,2,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,2,5,"[2, 3, 4]",[5],23,559,201.3162841796875,2,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],16,1,5.0,2,,obvious_fragment_assignment
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,2,4,"[2, 3]",[4],17,6,55.0,2,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,2,[1],"[2, 3, 4]",43465,23,141.0,1,,agglomeration
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],43465,16,,1,1,gt_oracle_grouping
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],43465,1,,1,1,gt_oracle_grouping
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],43465,6,,1,1,gt_oracle_grouping
+m05_p01_s06,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,1,5,[1],[5],43465,559,,1,1,gt_oracle_grouping
+m05_p01_s08,m05_p01,1,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],5234,20409,8.0,1,,agglomeration
+m05_p01_s08,m05_p01,1,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],5234,20409,8.0,1,,agglomeration
+m05_p01_s08,m05_p01,1,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],5234,20409,8.0,1,,agglomeration
+m05_p01_s08,m05_p01,1,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],5234,20409,8.0,1,,obvious_fragment_assignment
+m05_p01_s08,m05_p01,1,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],5234,20409,,1,1,gt_oracle_grouping
+m05_p01_s09,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],4,10,,1,1,gt_oracle_grouping
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],20709,1,2.0,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,2,5,6,[5],[6],2,1,2.196899890899658,5,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,3,7,8,[7],[8],1,1,2.196899890899658,7,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,4,7,9,"[7, 8]",[9],2,2,2.196899890899658,7,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,5,4,5,[4],"[5, 6]",7,3,2.196899890899658,4,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,6,1,4,"[1, 3]","[4, 5, 6]",20710,10,2.799999952316284,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,7,1,7,"[1, 3, 4, 5, 6]","[7, 8, 9]",20720,4,3.59689998626709,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],20709,1,2.0,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,2,1,4,"[1, 3]",[4],20710,7,2.799999952316284,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,3,1,5,"[1, 3, 4]",[5],20717,2,2.196899890899658,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,4,1,6,"[1, 3, 4, 5]",[6],20719,1,2.196899890899658,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,5,8,9,[8],[9],1,2,2.196899890899658,8,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,6,7,8,[7],"[8, 9]",1,3,2.196899890899658,7,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,7,1,7,"[1, 3, 4, 5, 6]","[7, 8, 9]",20720,4,3.59689998626709,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,5,6,[5],[6],2,1,2.196899890899658,5,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,2,7,8,[7],[8],1,1,2.196899890899658,7,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,3,7,9,"[7, 8]",[9],2,2,2.196899890899658,7,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,4,4,5,[4],"[5, 6]",7,3,2.196899890899658,4,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,5,3,4,[3],"[4, 5, 6]",1,10,2.799999952316284,3,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,6,3,7,"[3, 4, 5, 6]","[7, 8, 9]",11,4,3.59689998626709,3,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,7,2,3,[2],"[3, 4, 5, 6, 7, 8, 9]",30108,15,11.984498977661133,2,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],20709,1,2.0,1,,obvious_fragment_assignment
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,2,5,6,[5],[6],2,1,2.196899890899658,5,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,3,7,8,[7],[8],1,1,2.196899890899658,7,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,4,7,9,"[7, 8]",[9],2,2,2.196899890899658,7,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,5,4,5,[4],"[5, 6]",7,3,2.196899890899658,4,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,6,1,4,"[1, 3]","[4, 5, 6]",20710,10,2.799999952316284,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,7,1,7,"[1, 3, 4, 5, 6]","[7, 8, 9]",20720,4,3.59689998626709,1,,agglomeration
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,3,[1],[3],20709,1,,2,1,gt_oracle_grouping
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,2,1,4,[1],[4],20709,7,,2,1,gt_oracle_grouping
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,3,1,5,[1],[5],20709,2,,2,1,gt_oracle_grouping
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,4,1,6,[1],[6],20709,1,,2,1,gt_oracle_grouping
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,5,1,7,[1],[7],20709,1,,2,1,gt_oracle_grouping
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,6,1,8,[1],[8],20709,1,,2,1,gt_oracle_grouping
+m05_p01_s10,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,7,1,9,[1],[9],20709,2,,2,1,gt_oracle_grouping
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],7,2,2.0,2,,agglomeration
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,4,[1],[4],21145,32037,24.5906982421875,1,,agglomeration
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,3,[2],[3],7,2,2.0,2,,agglomeration
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,2,[1],"[2, 3]",21145,9,25.0,1,,agglomeration
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],7,2,2.0,2,,agglomeration
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,4,[1],[4],21145,32037,24.5906982421875,1,,agglomeration
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],7,2,2.0,2,,obvious_fragment_assignment
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,2,[1],"[2, 3]",21145,9,25.0,1,,obvious_fragment_assignment
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],7,2,,1,1,gt_oracle_grouping
+m05_p01_s10,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],7,32037,,1,1,gt_oracle_grouping
+m05_p01_s11,m05_p01,1,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],27031,10751,27.9844970703125,1,,agglomeration
+m05_p01_s11,m05_p01,1,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],27031,10751,27.9844970703125,1,,agglomeration
+m05_p01_s11,m05_p01,1,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],27031,10751,27.9844970703125,1,,agglomeration
+m05_p01_s11,m05_p01,1,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],27031,10751,27.9844970703125,1,,agglomeration
+m05_p01_s11,m05_p01,1,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],27031,10751,,1,1,gt_oracle_grouping
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],30545,79,2.196899890899658,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,3,"[1, 2]",[3],30624,146,4.393799781799316,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,4,"[1, 2, 3]",[4],30770,12681,25.781394958496094,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,1,5,"[1, 2, 3, 4]",[5],43451,848,96.5751953125,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],30545,79,2.196899890899658,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,3,"[1, 2]",[3],30624,146,4.393799781799316,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,4,"[1, 2, 3]",[4],30770,12681,25.781394958496094,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,1,5,"[1, 2, 3, 4]",[5],43451,848,96.5751953125,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],30545,79,2.196899890899658,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,3,"[1, 2]",[3],30624,146,4.393799781799316,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,1,4,"[1, 2, 3]",[4],30770,12681,25.781394958496094,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,1,5,"[1, 2, 3, 4]",[5],43451,848,96.5751953125,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],30545,79,2.196899890899658,1,,obvious_fragment_assignment
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,3,"[1, 2]",[3],30624,146,4.393799781799316,1,,obvious_fragment_assignment
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,hybrid_k_normalization,3,4,5,[4],[5],12681,848,96.5751953125,4,,obvious_fragment_assignment
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,hybrid_k_normalization,4,1,4,"[1, 2, 3]","[4, 5]",30770,13529,25.781394958496094,1,,agglomeration
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],30545,79,,1,1,gt_oracle_grouping
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],30545,146,,1,1,gt_oracle_grouping
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],30545,12681,,1,1,gt_oracle_grouping
+m05_p01_s11,m05_p01,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,1,5,[1],[5],30545,848,,1,1,gt_oracle_grouping
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,4,[2],[4],20214,4,2.196899890899658,2,,agglomeration
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,2,5,"[2, 4]",[5],20218,100,3.0,2,,agglomeration
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,4,[2],[4],20214,4,2.196899890899658,2,,agglomeration
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,2,5,"[2, 4]",[5],20218,100,3.0,2,,agglomeration
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],4,100,3.0,4,,agglomeration
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,4,[2],"[4, 5]",20214,104,2.196899890899658,2,,agglomeration
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,4,[2],[4],20214,4,2.196899890899658,2,,obvious_fragment_assignment
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,2,5,"[2, 4]",[5],20218,100,3.0,2,,obvious_fragment_assignment
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,4,[2],[4],20214,4,,3,1,gt_oracle_grouping
+m05_p01_s12,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,5,[2],[5],20214,100,,3,1,gt_oracle_grouping
+m05_p01_s15,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],5909,34670,3.196899890899658,1,,agglomeration
+m05_p01_s15,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],5909,34670,3.196899890899658,1,,agglomeration
+m05_p01_s15,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],5909,431,79.0,1,,agglomeration
+m05_p01_s15,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],5909,431,79.0,1,,obvious_fragment_assignment
+m05_p01_s15,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],5909,431,,2,1,gt_oracle_grouping
+m05_p01_s15,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],5189,39,19.575197219848633,1,,agglomeration
+m05_p01_s15,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],5189,39,19.575197219848633,1,,agglomeration
+m05_p01_s15,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,3,[1],[3],5189,39,19.575197219848633,1,,agglomeration
+m05_p01_s15,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],5189,39,19.575197219848633,1,,obvious_fragment_assignment
+m05_p01_s15,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],32168,39,,1,1,gt_oracle_grouping
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,nearest_component_k_normalizer,1,1,4,[1],[4],9620,1,2.196899890899658,1,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,nearest_component_k_normalizer,2,1,3,"[1, 4]",[3],9621,2,2.196899890899658,1,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,nearest_component_k_normalizer,3,1,2,"[1, 3, 4]",[2],9623,14887,2.196899890899658,1,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,area_aware_k_normalizer,1,1,4,[1],[4],9620,1,2.196899890899658,1,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,area_aware_k_normalizer,2,2,3,[2],[3],14887,2,2.196899890899658,2,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,area_aware_k_normalizer,3,1,2,"[1, 4]","[2, 3]",9621,14889,2.196899890899658,1,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],2,1,2.196899890899658,3,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,centroid_distance_k_normalizer,2,1,3,[1],"[3, 4]",9620,3,2.196899890899658,1,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,centroid_distance_k_normalizer,3,1,2,"[1, 3, 4]",[2],9623,14887,2.196899890899658,1,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,hybrid_k_normalization,1,1,4,[1],[4],9620,1,2.196899890899658,1,,obvious_fragment_assignment
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,hybrid_k_normalization,2,1,3,"[1, 4]",[3],9621,2,2.196899890899658,1,,obvious_fragment_assignment
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,hybrid_k_normalization,3,1,2,"[1, 3, 4]",[2],9623,14887,2.196899890899658,1,,agglomeration
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],9620,14887,,1,1,gt_oracle_grouping
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],9620,2,,1,1,gt_oracle_grouping
+m05_p01_s17,m05_p01,1,GT_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],9620,1,,1,1,gt_oracle_grouping
+m05_p01_s19,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],32806,849,15.59379768371582,1,,agglomeration
+m05_p01_s19,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],32806,849,15.59379768371582,1,,agglomeration
+m05_p01_s19,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],849,12035,43.544193267822266,2,,agglomeration
+m05_p01_s19,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],32806,849,15.59379768371582,1,,obvious_fragment_assignment
+m05_p01_s19,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],32806,849,,2,1,gt_oracle_grouping
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,4,[1],[4],20941,38286,23.3782958984375,1,,agglomeration
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,2,"[1, 4]",[2],59227,129,24.165895462036133,1,,agglomeration
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],20941,129,24.165895462036133,1,,agglomeration
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,3,"[1, 2]",[3],21070,17,24.1968994140625,1,,agglomeration
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],129,17,24.1968994140625,2,,agglomeration
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,4,[1],[4],20941,38286,23.3782958984375,1,,agglomeration
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],129,17,24.1968994140625,2,,obvious_fragment_assignment
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,2,[1],"[2, 3]",20941,146,24.165895462036133,1,,obvious_fragment_assignment
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],129,17,,1,1,gt_oracle_grouping
+m05_p01_s20,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],129,38286,,1,1,gt_oracle_grouping
+m05_p01_s21,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],16681,2889,3.59689998626709,1,,agglomeration
+m05_p01_s21,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],16681,2889,3.59689998626709,1,,agglomeration
+m05_p01_s21,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],16681,2889,3.59689998626709,1,,agglomeration
+m05_p01_s21,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],16681,2889,3.59689998626709,1,,obvious_fragment_assignment
+m05_p01_s21,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],16681,2889,,2,1,gt_oracle_grouping
+m05_p01_s22,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],66917,3,2.0,1,,agglomeration
+m05_p01_s22,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],66917,3,2.0,1,,agglomeration
+m05_p01_s22,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],66917,3,2.0,1,,agglomeration
+m05_p01_s22,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],66917,3,2.0,1,,obvious_fragment_assignment
+m05_p01_s22,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,4,[2],[4],3,11811,,1,1,gt_oracle_grouping
+m05_p01_s23,m05_p01,1,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],18692,11252,6.0,1,,agglomeration
+m05_p01_s23,m05_p01,1,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],18692,11252,6.0,1,,agglomeration
+m05_p01_s23,m05_p01,1,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],18692,11252,6.0,1,,agglomeration
+m05_p01_s23,m05_p01,1,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],18692,11252,6.0,1,,agglomeration
+m05_p01_s23,m05_p01,1,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],18692,11252,,1,1,gt_oracle_grouping
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,3,5,[3],[5],40502,8102,6.590699672698975,3,,agglomeration
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,2,2,3,[2],"[3, 5]",1570,48604,24.772096633911133,2,,agglomeration
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,3,5,[3],[5],40502,8102,6.590699672698975,3,,agglomeration
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,area_aware_k_normalizer,2,2,3,[2],"[3, 5]",1570,48604,24.772096633911133,2,,agglomeration
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],3468,1570,52.0,1,,agglomeration
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,2,4,5,[4],[5],8957,8102,79.19693756103516,4,,agglomeration
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],1570,40502,24.772096633911133,2,,obvious_fragment_assignment
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,hybrid_k_normalization,2,1,2,[1],"[2, 3]",3468,42072,52.0,1,,obvious_fragment_assignment
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,4,5,[4],[5],8957,8102,,1,1,gt_oracle_grouping
+m05_p01_s24,m05_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,2,1,2,[1],[2],3468,1570,,2,1,gt_oracle_grouping
+m05_p01_s24,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,4,[2],[4],41231,7899,23.968996047973633,2,,agglomeration
+m05_p01_s24,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,4,[2],[4],41231,7899,23.968996047973633,2,,agglomeration
+m05_p01_s24,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],7432,7899,61.60002517700195,3,,agglomeration
+m05_p01_s24,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],2445,7432,46.544189453125,1,,obvious_fragment_assignment
+m05_p01_s24,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],7432,7899,,1,1,gt_oracle_grouping
+m05_p01_s25,m05_p01,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],22908,981,29.959693908691406,1,,agglomeration
+m05_p01_s25,m05_p01,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],22908,981,29.959693908691406,1,,agglomeration
+m05_p01_s25,m05_p01,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],22908,981,29.959693908691406,1,,agglomeration
+m05_p01_s25,m05_p01,1,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],22908,981,29.959693908691406,1,,obvious_fragment_assignment
+m05_p01_s25,m05_p01,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],22908,981,,1,1,gt_oracle_grouping
+m05_p01_s26,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],4782,33475,13.0,1,,agglomeration
+m05_p01_s26,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],4782,33475,13.0,1,,agglomeration
+m05_p01_s26,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,3,[1],[3],4782,33475,13.0,1,,agglomeration
+m05_p01_s26,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],4782,1003,152.0,1,,obvious_fragment_assignment
+m05_p01_s26,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],4782,1003,,2,1,gt_oracle_grouping
+m05_p01_s27,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],12568,2752,6.0,1,,agglomeration
+m05_p01_s27,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],12568,2752,6.0,1,,agglomeration
+m05_p01_s27,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],12568,2752,6.0,1,,agglomeration
+m05_p01_s27,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],12568,2752,6.0,1,,obvious_fragment_assignment
+m05_p01_s27,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],12568,2752,,2,1,gt_oracle_grouping
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,4,5,[4],[5],1,134,2.0,4,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,2,[1],[2],12181,310,7.0,1,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,3,4,[3],"[4, 5]",37,135,12.599998474121094,3,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,1,3,"[1, 2]","[3, 4, 5]",12491,172,14.78759765625,1,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,4,5,[4],[5],1,134,2.0,4,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,2,[1],[2],12181,310,7.0,1,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,3,"[1, 2]",[3],12491,37,14.78759765625,1,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,1,4,"[1, 2, 3]","[4, 5]",12528,135,12.599998474121094,1,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],1,134,2.0,4,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,3,4,[3],"[4, 5]",37,135,12.599998474121094,3,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,2,3,[2],"[3, 4, 5]",310,172,14.78759765625,2,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,1,2,[1],"[2, 3, 4, 5]",12181,482,7.0,1,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,4,5,[4],[5],1,134,2.0,4,,obvious_fragment_assignment
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,3,4,[3],"[4, 5]",37,135,12.599998474121094,3,,obvious_fragment_assignment
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,2,[1],[2],12181,310,7.0,1,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,4,1,3,"[1, 2]","[3, 4, 5]",12491,172,14.78759765625,1,,agglomeration
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],12181,310,,2,1,gt_oracle_grouping
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],12181,37,,2,1,gt_oracle_grouping
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],12181,1,,2,1,gt_oracle_grouping
+m05_p01_s27,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,1,5,[1],[5],12181,134,,2,1,gt_oracle_grouping
+m05_p01_s28,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],44080,6187,61.119388580322266,1,,agglomeration
+m05_p01_s28,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],44080,6187,61.119388580322266,1,,agglomeration
+m05_p01_s28,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],3298,6187,122.59698486328125,2,,agglomeration
+m05_p01_s28,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],44080,6187,61.119388580322266,1,,agglomeration
+m05_p01_s28,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],3298,6187,,1,1,gt_oracle_grouping
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],91,1610,5.393799781799316,2,,agglomeration
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,1,4,[1],[4],41462,62,19.78759765625,1,,agglomeration
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,5,"[1, 4]",[5],41524,5938,63.00002670288086,1,,agglomeration
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,3,[2],[3],91,1610,5.393799781799316,2,,agglomeration
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,4,[1],[4],41462,62,19.78759765625,1,,agglomeration
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,5,"[1, 4]",[5],41524,5938,63.00002670288086,1,,agglomeration
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,2,3,[2],[3],91,1610,5.393799781799316,2,,agglomeration
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,4,5,[4],[5],62,5938,63.00002670288086,4,,agglomeration
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,2,4,"[2, 3]","[4, 5]",1701,6000,130.32872009277344,2,,agglomeration
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,4,[1],[4],41462,62,19.78759765625,1,,obvious_fragment_assignment
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,2,3,[2],[3],91,1610,5.393799781799316,2,,obvious_fragment_assignment
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,2,5,"[2, 3]",[5],1701,5938,130.32872009277344,2,,obvious_fragment_assignment
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],91,1610,,1,1,gt_oracle_grouping
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],91,62,,1,1,gt_oracle_grouping
+m05_p01_s28,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,2,5,[2],[5],91,5938,,1,1,gt_oracle_grouping
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,4,5,[4],[5],2,1,2.0,4,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,7,8,[7],[8],8,9,2.0,7,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,2,6,[2],[6],829,64,2.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,4,7,"[4, 5]","[7, 8]",3,17,2.799999952316284,4,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,5,1,9,[1],[9],15913,41,5.599999904632568,1,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,6,2,3,"[2, 6]",[3],893,119,9.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,7,2,4,"[2, 3, 6]","[4, 5, 7, 8]",1012,20,10.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,8,1,10,"[1, 9]",[10],15954,36860,28.5906982421875,1,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,6,[2],[6],829,64,2.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,4,5,[4],[5],2,1,2.0,4,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,7,8,[7],[8],8,9,2.0,7,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,4,7,"[4, 5]","[7, 8]",3,17,2.799999952316284,4,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,5,1,9,[1],[9],15913,41,5.599999904632568,1,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,6,2,3,"[2, 6]",[3],893,119,9.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,7,2,4,"[2, 3, 6]","[4, 5, 7, 8]",1012,20,10.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,8,1,10,"[1, 9]",[10],15954,36860,28.5906982421875,1,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],2,1,2.0,4,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,7,8,[7],[8],8,9,2.0,7,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,4,7,"[4, 5]","[7, 8]",3,17,2.799999952316284,4,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,3,4,[3],"[4, 5, 7, 8]",119,20,10.0,3,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,5,2,6,[2],[6],829,64,2.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,6,2,3,"[2, 6]","[3, 4, 5, 7, 8]",893,139,9.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,7,2,9,"[2, 3, 4, 5, 6, 7, 8]",[9],1032,41,50.181396484375,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,8,1,10,[1],[10],15913,36860,28.5906982421875,1,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,4,5,[4],[5],2,1,2.0,4,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,7,8,[7],[8],8,9,2.0,7,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,2,6,[2],[6],829,64,2.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,4,4,7,"[4, 5]","[7, 8]",3,17,2.799999952316284,4,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,5,1,9,[1],[9],15913,41,5.599999904632568,1,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,6,2,3,"[2, 6]",[3],893,119,9.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,7,2,4,"[2, 3, 6]","[4, 5, 7, 8]",1012,20,10.0,2,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,8,1,10,"[1, 9]",[10],15954,36860,28.5906982421875,1,,agglomeration
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],829,119,,1,1,gt_oracle_grouping
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],829,2,,1,1,gt_oracle_grouping
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,2,5,[2],[5],829,1,,1,1,gt_oracle_grouping
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,2,6,[2],[6],829,64,,1,1,gt_oracle_grouping
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,5,2,7,[2],[7],829,8,,1,1,gt_oracle_grouping
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,6,2,8,[2],[8],829,9,,1,1,gt_oracle_grouping
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,7,2,9,[2],[9],829,41,,1,1,gt_oracle_grouping
+m05_p01_s29,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,8,2,10,[2],[10],829,36860,,1,1,gt_oracle_grouping
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,3,5,[3],[5],38862,8563,8.787599563598633,3,,agglomeration
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,2,2,3,[2],"[3, 5]",694,47425,14.1968994140625,2,,agglomeration
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,3,5,[3],[5],38862,8563,8.787599563598633,3,,agglomeration
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,area_aware_k_normalizer,2,2,3,[2],"[3, 5]",694,47425,14.1968994140625,2,,agglomeration
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],6719,8563,44.196903228759766,4,,agglomeration
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,2,1,2,[1],[2],3399,694,132.756591796875,1,,agglomeration
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],694,38862,14.1968994140625,2,,obvious_fragment_assignment
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,hybrid_k_normalization,2,2,5,"[2, 3]",[5],39556,8563,8.787599563598633,2,,agglomeration
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,4,5,[4],[5],6719,8563,,1,1,gt_oracle_grouping
+m05_p01_s31,m05_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,2,1,2,[1],[2],3399,694,,2,1,gt_oracle_grouping
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,5,[3],[5],5061,1,2.196899890899658,3,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,3,6,"[3, 5]",[6],5062,1,7.990699768066406,3,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,2,4,[2],[4],38423,7536,16.181398391723633,2,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,3,7,"[3, 5, 6]",[7],5063,7,42.19379806518555,3,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,5,[3],[5],5061,1,2.196899890899658,3,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,3,6,"[3, 5]",[6],5062,1,7.990699768066406,3,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,2,4,[2],[4],38423,7536,16.181398391723633,2,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,3,7,"[3, 5, 6]",[7],5063,7,42.19379806518555,3,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,5,6,[5],[6],1,1,7.990699768066406,5,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,5,7,"[5, 6]",[7],2,7,42.19379806518555,5,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,3,5,[3],"[5, 6, 7]",5061,9,2.196899890899658,3,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,3,4,"[3, 5, 6, 7]",[4],5070,7536,48.35348892211914,3,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,5,[3],[5],5061,1,2.196899890899658,3,,obvious_fragment_assignment
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,3,6,"[3, 5]",[6],5062,1,7.990699768066406,3,,obvious_fragment_assignment
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,3,7,"[3, 5, 6]",[7],5063,7,42.19379806518555,3,,obvious_fragment_assignment
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,4,2,4,[2],[4],38423,7536,16.181398391723633,2,,agglomeration
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],5061,7536,,1,1,gt_oracle_grouping
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,3,5,[3],[5],5061,1,,1,1,gt_oracle_grouping
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,3,6,[3],[6],5061,1,,1,1,gt_oracle_grouping
+m05_p01_s31,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,3,7,[3],[7],5061,7,,1,1,gt_oracle_grouping
+m05_p01_s34,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],5348,35602,11.0,1,,agglomeration
+m05_p01_s34,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],5348,35602,11.0,1,,agglomeration
+m05_p01_s34,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,3,[1],[3],5348,35602,11.0,1,,agglomeration
+m05_p01_s34,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],5348,1250,126.0,1,,obvious_fragment_assignment
+m05_p01_s34,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],5348,1250,,2,1,gt_oracle_grouping
+m05_p01_s35,m05_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],11799,2239,2.0,1,,agglomeration
+m05_p01_s35,m05_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],11799,2239,2.0,1,,agglomeration
+m05_p01_s35,m05_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],11799,2239,2.0,1,,agglomeration
+m05_p01_s35,m05_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],11799,2239,2.0,1,,obvious_fragment_assignment
+m05_p01_s35,m05_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],11799,2239,,2,1,gt_oracle_grouping
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,5,[3],[5],5912,1,2.0,3,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,6,7,[6],[7],4,71,2.799999952316284,6,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,2,[1],[2],14486,37,3.59689998626709,1,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,6,8,"[6, 7]",[8],75,188,16.778297424316406,6,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,5,1,4,"[1, 2]",[4],14523,34154,18.17829704284668,1,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,5,[3],[5],5912,1,2.0,3,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,6,7,[6],[7],4,71,2.799999952316284,6,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,2,[1],[2],14486,37,3.59689998626709,1,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,3,6,"[3, 5]","[6, 7]",5913,75,21.772096633911133,3,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,5,3,8,"[3, 5, 6, 7]",[8],5988,188,16.778297424316406,3,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,6,7,[6],[7],4,71,2.799999952316284,6,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,2,[1],[2],14486,37,3.59689998626709,1,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,5,6,[5],"[6, 7]",1,75,23.368995666503906,5,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,5,8,"[5, 6, 7]",[8],76,188,16.778297424316406,5,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,5,3,5,[3],"[5, 6, 7, 8]",5912,264,2.0,3,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,5,[3],[5],5912,1,2.0,3,,obvious_fragment_assignment
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,6,7,[6],[7],4,71,2.799999952316284,6,,obvious_fragment_assignment
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,2,[1],[2],14486,37,3.59689998626709,1,,obvious_fragment_assignment
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,4,6,8,"[6, 7]",[8],75,188,16.778297424316406,6,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,5,1,4,"[1, 2]",[4],14523,34154,18.17829704284668,1,,agglomeration
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,4,[2],[4],37,34154,,1,1,gt_oracle_grouping
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,3,5,[3],[5],5912,1,,3,1,gt_oracle_grouping
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,3,6,[3],[6],5912,4,,3,1,gt_oracle_grouping
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,3,7,[3],[7],5912,71,,3,1,gt_oracle_grouping
+m05_p01_s35,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,5,3,8,[3],[8],5912,188,,3,1,gt_oracle_grouping
+m05_p01_s39,m05_p01,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],24723,83,36.1968994140625,1,,agglomeration
+m05_p01_s39,m05_p01,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],24723,83,36.1968994140625,1,,agglomeration
+m05_p01_s39,m05_p01,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],24723,83,36.1968994140625,1,,agglomeration
+m05_p01_s39,m05_p01,1,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],24723,83,36.1968994140625,1,,obvious_fragment_assignment
+m05_p01_s39,m05_p01,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],24723,83,,1,1,gt_oracle_grouping
+m05_p01_s40,m05_p01,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],35203,6,2.0,1,,agglomeration
+m05_p01_s40,m05_p01,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],35203,6,2.0,1,,agglomeration
+m05_p01_s40,m05_p01,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],35203,6,2.0,1,,agglomeration
+m05_p01_s40,m05_p01,1,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],35203,6,2.0,1,,obvious_fragment_assignment
+m05_p01_s40,m05_p01,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],35203,6,,1,1,gt_oracle_grouping
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,1,5,6,[5],[6],35881,1,2.0,5,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,2,3,4,[3],[4],1,1,2.196899890899658,3,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,3,3,5,"[3, 4]","[5, 6]",2,35882,2.196899890899658,3,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,nearest_component_k_normalizer,4,1,3,[1],"[3, 4, 5, 6]",5067,35884,5.0,1,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,1,5,6,[5],[6],35881,1,2.0,5,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,2,4,5,[4],"[5, 6]",1,35882,2.196899890899658,4,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,3,3,4,[3],"[4, 5, 6]",1,35883,2.196899890899658,3,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,area_aware_k_normalizer,4,1,3,[1],"[3, 4, 5, 6]",5067,35884,5.0,1,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],1,1,2.196899890899658,3,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,2,3,6,"[3, 4]",[6],2,1,2.196899890899658,3,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,3,1,3,[1],"[3, 4, 6]",5067,3,5.0,1,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,centroid_distance_k_normalizer,4,1,5,"[1, 3, 4, 6]",[5],5070,35881,2.0,1,,agglomeration
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,1,3,5,[3],[5],1,35881,4.0,3,,obvious_fragment_assignment
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,2,3,4,"[3, 5]",[4],35882,1,2.196899890899658,3,,obvious_fragment_assignment
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,3,3,6,"[3, 4, 5]",[6],35883,1,2.0,3,,obvious_fragment_assignment
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,hybrid_k_normalization,4,1,2,[1],[2],5067,1013,134.1658935546875,1,,obvious_fragment_assignment
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],1,1,,1,1,gt_oracle_grouping
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,2,3,5,[3],[5],1,35881,,1,1,gt_oracle_grouping
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,3,3,6,[3],[6],1,1,,1,1,gt_oracle_grouping
+m05_p01_s41,m05_p01,2,GT_SEMANTIC,gt_fragment_grouping_oracle,4,1,2,[1],[2],5067,1013,,2,1,gt_oracle_grouping
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,4,[3],[4],1,9,4.0,3,,agglomeration
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,2,3,[2],"[3, 4]",25,10,16.0,2,,agglomeration
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,4,[3],[4],1,9,4.0,3,,agglomeration
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,2,3,[2],"[3, 4]",25,10,16.0,2,,agglomeration
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],1,9,4.0,3,,agglomeration
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,3,[2],"[3, 4]",25,10,16.0,2,,agglomeration
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,4,[3],[4],1,9,4.0,3,,obvious_fragment_assignment
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,2,3,[2],"[3, 4]",25,10,16.0,2,,agglomeration
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],40939,25,,1,1,gt_oracle_grouping
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],40939,1,,1,1,gt_oracle_grouping
+m05_p01_s41,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],40939,9,,1,1,gt_oracle_grouping
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,1,1,4,[1],[4],51450,7710,8.590700149536133,1,,agglomeration
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,nearest_component_k_normalizer,2,3,5,[3],[5],6499,974,21.79689598083496,3,,agglomeration
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,area_aware_k_normalizer,1,1,4,[1],[4],51450,7710,8.590700149536133,1,,agglomeration
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,area_aware_k_normalizer,2,3,5,[3],[5],6499,974,21.79689598083496,3,,agglomeration
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,3,5,[3],[5],6499,974,21.79689598083496,3,,agglomeration
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,centroid_distance_k_normalizer,2,3,4,"[3, 5]",[4],7473,7710,43.141090393066406,3,,agglomeration
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,hybrid_k_normalization,1,3,5,[3],[5],6499,974,21.79689598083496,3,,obvious_fragment_assignment
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,hybrid_k_normalization,2,1,4,[1],[4],51450,7710,8.590700149536133,1,,agglomeration
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,3,4,[3],[4],6499,7710,,1,1,gt_oracle_grouping
+m05_p01_s42,m05_p01,3,GT_SEMANTIC,gt_fragment_grouping_oracle,2,3,5,[3],[5],6499,974,,1,1,gt_oracle_grouping
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,3,[1],[3],7,2222,2.0,1,,agglomeration
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,2,5,[2],[5],47929,6969,25.165895462036133,2,,agglomeration
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,4,6,[4],[6],4705,914,32.3782958984375,4,,agglomeration
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,3,[1],[3],7,2222,2.0,1,,agglomeration
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,2,5,[2],[5],47929,6969,25.165895462036133,2,,agglomeration
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,4,6,[4],[6],4705,914,32.3782958984375,4,,agglomeration
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,3,[1],[3],7,2222,2.0,1,,agglomeration
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,4,6,[4],[6],4705,914,32.3782958984375,4,,agglomeration
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,4,5,"[4, 6]",[5],5619,6969,47.34109115600586,4,,agglomeration
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,3,[1],[3],7,2222,2.0,1,,obvious_fragment_assignment
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,4,6,[4],[6],4705,914,32.3782958984375,4,,obvious_fragment_assignment
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,2,"[1, 3]",[2],2229,47929,75.0,1,,obvious_fragment_assignment
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,4,[1],[4],7,4705,,1,1,gt_oracle_grouping
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,5,[1],[5],7,6969,,1,1,gt_oracle_grouping
+m05_p01_s42,m05_p01,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,6,[1],[6],7,914,,1,1,gt_oracle_grouping
+m05_p01_s44,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],34990,3,,1,1,gt_oracle_grouping
+m05_p01_s45,m05_p01,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],63508,17,54.922489166259766,1,,agglomeration
+m05_p01_s45,m05_p01,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],63508,17,54.922489166259766,1,,agglomeration
+m05_p01_s45,m05_p01,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],63508,17,54.922489166259766,1,,agglomeration
+m05_p01_s45,m05_p01,1,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],63508,17,54.922489166259766,1,,obvious_fragment_assignment
+m05_p01_s45,m05_p01,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],63508,17,,1,1,gt_oracle_grouping
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,4,[1],[4],10082,267,2.0,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,6,7,[6],[7],1,4,3.0,6,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,3,"[1, 4]",[3],10349,14,7.0,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,1,5,"[1, 3, 4]",[5],10363,102,7.990699768066406,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,nearest_component_k_normalizer,5,1,6,"[1, 3, 4, 5]","[6, 7]",10465,5,37.9844970703125,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,4,[1],[4],10082,267,2.0,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,6,7,[6],[7],1,4,3.0,6,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,3,"[1, 4]",[3],10349,14,7.0,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,1,5,"[1, 3, 4]",[5],10363,102,7.990699768066406,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,area_aware_k_normalizer,5,1,6,"[1, 3, 4, 5]","[6, 7]",10465,5,37.9844970703125,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,6,7,[6],[7],1,4,3.0,6,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,4,5,[4],[5],267,102,7.990699768066406,4,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,3,4,[3],"[4, 5]",14,369,47.5906982421875,3,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,3,6,"[3, 4, 5]","[6, 7]",383,5,37.9844970703125,3,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,5,1,3,[1],"[3, 4, 5, 6, 7]",10082,388,2.0,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,1,6,7,[6],[7],1,4,3.0,6,,obvious_fragment_assignment
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,2,5,6,[5],"[6, 7]",102,5,37.9844970703125,5,,obvious_fragment_assignment
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,3,[1],[3],10082,14,7.0,1,,obvious_fragment_assignment
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,4,1,4,"[1, 3]",[4],10096,267,2.0,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,hybrid_k_normalization,5,1,5,"[1, 3, 4]","[5, 6, 7]",10363,107,7.990699768066406,1,,agglomeration
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],41290,14,,1,1,gt_oracle_grouping
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,4,[1],[4],10082,267,,3,1,gt_oracle_grouping
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,5,[1],[5],10082,102,,3,1,gt_oracle_grouping
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,1,6,[1],[6],10082,1,,3,1,gt_oracle_grouping
+m05_p01_s47,m05_p01,2,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,5,1,7,[1],[7],10082,4,,3,1,gt_oracle_grouping
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,1,7,8,[7],[8],1,85,2.196899890899658,7,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,2,5,6,[5],[6],2,2,2.196899890899658,5,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,3,2,3,[2],[3],1,13761,6.0,2,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,4,4,7,[4],"[7, 8]",31146,86,6.0,4,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,5,4,5,"[4, 7, 8]","[5, 6]",31232,4,12.190698623657227,4,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,1,7,8,[7],[8],1,85,2.196899890899658,7,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,2,5,6,[5],[6],2,2,2.196899890899658,5,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,3,2,3,[2],[3],1,13761,6.0,2,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,4,4,7,[4],"[7, 8]",31146,86,6.0,4,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,5,4,5,"[4, 7, 8]","[5, 6]",31232,4,12.190698623657227,4,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,5,6,[5],[6],2,2,2.196899890899658,5,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,2,7,8,[7],[8],1,85,2.196899890899658,7,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,3,4,7,[4],"[7, 8]",31146,86,6.0,4,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,4,4,5,"[4, 7, 8]","[5, 6]",31232,4,12.190698623657227,4,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,5,2,3,[2],[3],1,13761,6.0,2,,agglomeration
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],1,13761,6.0,2,,obvious_fragment_assignment
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,2,7,8,[7],[8],1,85,2.196899890899658,7,,obvious_fragment_assignment
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,3,4,5,[4],[5],31146,2,12.384498596191406,4,,obvious_fragment_assignment
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,4,4,6,"[4, 5]",[6],31148,2,2.196899890899658,4,,obvious_fragment_assignment
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,5,4,7,"[4, 5, 6]","[7, 8]",31150,86,6.0,4,,obvious_fragment_assignment
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],1,13761,,1,1,gt_oracle_grouping
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,2,4,5,[4],[5],31146,2,,3,1,gt_oracle_grouping
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,3,4,6,[4],[6],31146,2,,3,1,gt_oracle_grouping
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,4,4,7,[4],[7],31146,1,,3,1,gt_oracle_grouping
+m12_p02_s00,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,5,4,8,[4],[8],31146,85,,3,1,gt_oracle_grouping
+m12_p02_s00,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,4,[2],[4],13235,1,2.799999952316284,2,,agglomeration
+m12_p02_s00,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,4,[2],[4],13235,1,2.799999952316284,2,,agglomeration
+m12_p02_s00,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],73,1,84.51318359375,3,,agglomeration
+m12_p02_s00,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,4,[2],[4],13235,1,2.799999952316284,2,,obvious_fragment_assignment
+m12_p02_s00,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],13235,73,,3,1,gt_oracle_grouping
+m12_p02_s00,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],13235,1,,3,1,gt_oracle_grouping
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,1,3,6,[3],[6],28182,873,2.799999952316284,3,,agglomeration
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,2,2,4,[2],[4],42410,1,3.59689998626709,2,,agglomeration
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,3,3,5,"[3, 6]",[5],29055,57,4.393799781799316,3,,agglomeration
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,1,3,6,[3],[6],28182,873,2.799999952316284,3,,agglomeration
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,2,2,4,[2],[4],42410,1,3.59689998626709,2,,agglomeration
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,3,3,5,"[3, 6]",[5],29055,57,4.393799781799316,3,,agglomeration
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,4,6,[4],[6],1,873,55.396915435791016,4,,agglomeration
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,2,3,5,[3],[5],28182,57,4.393799781799316,3,,agglomeration
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,3,3,4,"[3, 5]","[4, 6]",28239,874,2.799999952316284,3,,agglomeration
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,1,2,4,[2],[4],42410,1,3.59689998626709,2,,obvious_fragment_assignment
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,2,3,5,[3],[5],28182,57,4.393799781799316,3,,obvious_fragment_assignment
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,3,3,6,"[3, 5]",[6],28239,873,2.799999952316284,3,,obvious_fragment_assignment
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,3,5,[3],[5],28182,57,,1,1,gt_oracle_grouping
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,2,3,6,[3],[6],28182,873,,1,1,gt_oracle_grouping
+m12_p02_s02,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,3,2,4,[2],[4],42410,1,,3,1,gt_oracle_grouping
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],102320,1,2.0,1,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,3,4,[3],[4],3,1,2.0,3,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,7,"[1, 2]",[7],102321,1,2.196899890899658,1,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,6,8,[6],[8],35,1,3.0,6,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,5,1,9,"[1, 2, 7]",[9],102322,1,4.996899604797363,1,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,6,3,5,"[3, 4]",[5],4,153,5.393799781799316,3,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],102320,1,2.0,1,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,1,7,"[1, 2]",[7],102321,1,2.196899890899658,1,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,3,4,[3],[4],3,1,2.0,3,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,6,8,[6],[8],35,1,3.0,6,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,5,1,9,"[1, 2, 7]",[9],102322,1,4.996899604797363,1,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,6,3,5,"[3, 4]",[5],4,153,5.393799781799316,3,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,3,4,[3],[4],3,1,2.0,3,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,6,8,[6],[8],35,1,3.0,6,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,6,7,"[6, 8]",[7],36,1,10.590700149536133,6,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,3,5,"[3, 4]",[5],4,153,5.393799781799316,3,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,5,3,6,"[3, 4, 5]","[6, 7, 8]",157,37,98.66358184814453,3,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,6,1,2,[1],[2],102320,1,2.0,1,,agglomeration
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],102320,1,2.0,1,,obvious_fragment_assignment
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,3,4,[3],[4],3,1,2.0,3,,obvious_fragment_assignment
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,1,7,"[1, 2]",[7],102321,1,2.196899890899658,1,,obvious_fragment_assignment
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,4,6,8,[6],[8],35,1,3.0,6,,obvious_fragment_assignment
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,5,1,9,"[1, 2, 7]",[9],102322,1,4.996899604797363,1,,obvious_fragment_assignment
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,6,3,5,"[3, 4]",[5],4,153,5.393799781799316,3,,obvious_fragment_assignment
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],102320,1,,2,1,gt_oracle_grouping
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,3,4,[3],[4],3,1,,3,1,gt_oracle_grouping
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,3,5,[3],[5],3,153,,3,1,gt_oracle_grouping
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,3,6,[3],[6],3,35,,3,1,gt_oracle_grouping
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,5,3,7,[3],[7],3,1,,3,1,gt_oracle_grouping
+m12_p02_s02,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,6,3,8,[3],[8],3,1,,3,1,gt_oracle_grouping
+m12_p02_s03,m12_p02,1,GT_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],158543,57252,10.787599563598633,1,,agglomeration
+m12_p02_s03,m12_p02,1,GT_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],158543,57252,10.787599563598633,1,,agglomeration
+m12_p02_s03,m12_p02,1,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],158543,57252,10.787599563598633,1,,agglomeration
+m12_p02_s03,m12_p02,1,GT_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],158543,57252,10.787599563598633,1,,agglomeration
+m12_p02_s03,m12_p02,1,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],158543,57252,,1,1,gt_oracle_grouping
+m12_p02_s03,m12_p02,1,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,1,2,[1],[2],197158,1,2.0,1,,agglomeration
+m12_p02_s03,m12_p02,1,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,1,2,[1],[2],197158,1,2.0,1,,agglomeration
+m12_p02_s03,m12_p02,1,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],197158,1,2.0,1,,agglomeration
+m12_p02_s03,m12_p02,1,PREDICTED_SEMANTIC,hybrid_k_normalization,1,1,2,[1],[2],197158,1,2.0,1,,obvious_fragment_assignment
+m12_p02_s03,m12_p02,1,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],197158,1,,1,1,gt_oracle_grouping
+m12_p02_s04,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,1,3,4,[3],[4],59810,41219,21.172096252441406,3,,agglomeration
+m12_p02_s04,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,1,3,4,[3],[4],59810,41219,21.172096252441406,3,,agglomeration
+m12_p02_s04,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,1,2,[1],[2],53177,9402,40.0,1,,agglomeration
+m12_p02_s04,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,1,2,4,[2],[4],9402,41219,32.3782958984375,2,,obvious_fragment_assignment
+m12_p02_s04,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],53177,9402,,2,1,gt_oracle_grouping
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,2,3,[2],[3],116071,4,2.0,2,,agglomeration
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,2,6,"[2, 3]",[6],116075,2920,16.584497451782227,2,,agglomeration
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,1,2,[1],"[2, 3, 6]",57609,118995,25.587594985961914,1,,agglomeration
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,2,3,[2],[3],116071,4,2.0,2,,agglomeration
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,2,6,"[2, 3]",[6],116075,2920,16.584497451782227,2,,agglomeration
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,1,2,[1],"[2, 3, 6]",57609,118995,25.587594985961914,1,,agglomeration
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,4,5,[4],[5],809,25,48.150390625,4,,agglomeration
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,2,6,[2],[6],116071,2920,16.584497451782227,2,,agglomeration
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,1,4,[1],"[4, 5]",57609,834,80.4883804321289,1,,agglomeration
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,2,3,[2],[3],116071,4,2.0,2,,obvious_fragment_assignment
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,4,5,[4],[5],809,25,48.150390625,4,,obvious_fragment_assignment
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,2,4,"[2, 3]","[4, 5]",116075,834,40.7720947265625,2,,obvious_fragment_assignment
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,4,[2],[4],116071,809,,1,1,gt_oracle_grouping
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,5,[2],[5],116071,25,,1,1,gt_oracle_grouping
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,2,6,[2],[6],116071,2920,,1,1,gt_oracle_grouping
+m12_p02_s04,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,1,3,[1],[3],57609,4,,2,1,gt_oracle_grouping
+m12_p02_s05,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],127354,7,,2,1,gt_oracle_grouping
+m12_p02_s05,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,3,[1],[3],127354,1,,2,1,gt_oracle_grouping
+m12_p02_s07,m12_p02,3,GT_SEMANTIC,nearest_component_k_normalizer,1,3,4,[3],[4],69274,45613,12.0,3,,agglomeration
+m12_p02_s07,m12_p02,3,GT_SEMANTIC,area_aware_k_normalizer,1,3,4,[3],[4],69274,45613,12.0,3,,agglomeration
+m12_p02_s07,m12_p02,3,GT_SEMANTIC,centroid_distance_k_normalizer,1,2,4,[2],[4],11010,45613,19.393798828125,2,,agglomeration
+m12_p02_s07,m12_p02,3,GT_SEMANTIC,hybrid_k_normalization,1,2,4,[2],[4],11010,45613,19.393798828125,2,,obvious_fragment_assignment
+m12_p02_s07,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],48783,11010,,2,1,gt_oracle_grouping
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,4,5,[4],[5],5306,2,2.0,4,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,4,6,"[4, 5]",[6],5308,1,2.196899890899658,4,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,2,7,[2],[7],124524,1884,8.787599563598633,2,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,4,2,4,"[2, 7]","[4, 5, 6]",126408,5309,9.39069938659668,2,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,4,5,[4],[5],5306,2,2.0,4,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,4,6,"[4, 5]",[6],5308,1,2.196899890899658,4,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,2,7,[2],[7],124524,1884,8.787599563598633,2,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,4,2,4,"[2, 7]","[4, 5, 6]",126408,5309,9.39069938659668,2,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,5,6,[5],[6],2,1,4.393799781799316,5,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,4,5,[4],"[5, 6]",5306,3,2.0,4,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,2,7,[2],[7],124524,1884,8.787599563598633,2,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,4,1,3,[1],[3],48489,163,83.0,1,,agglomeration
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,4,6,[4],[6],5306,1,2.196899890899658,4,,obvious_fragment_assignment
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,4,5,"[4, 6]",[5],5307,2,2.0,4,,obvious_fragment_assignment
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,2,3,[2],[3],124524,163,64.9162826538086,2,,obvious_fragment_assignment
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,4,2,7,"[2, 3]",[7],124687,1884,8.787599563598633,2,,obvious_fragment_assignment
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,2,3,[2],[3],124524,163,,1,1,gt_oracle_grouping
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,2,4,[2],[4],124524,5306,,1,1,gt_oracle_grouping
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,2,5,[2],[5],124524,2,,1,1,gt_oracle_grouping
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,2,6,[2],[6],124524,1,,1,1,gt_oracle_grouping
+m12_p02_s07,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,5,2,7,[2],[7],124524,1884,,1,1,gt_oracle_grouping
+m12_p02_s09,m12_p02,3,GT_SEMANTIC,gt_fragment_grouping_oracle,1,1,2,[1],[2],51437,8950,,2,1,gt_oracle_grouping
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,1,3,5,[3],[5],140988,3,2.0,3,,agglomeration
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,2,3,6,"[3, 5]",[6],140991,5,2.0,3,,agglomeration
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,nearest_component_k_normalizer,3,3,4,"[3, 5, 6]",[4],140996,1,2.196899890899658,3,,agglomeration
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,1,3,5,[3],[5],140988,3,2.0,3,,agglomeration
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,2,3,6,"[3, 5]",[6],140991,5,2.0,3,,agglomeration
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,area_aware_k_normalizer,3,3,4,"[3, 5, 6]",[4],140996,1,2.196899890899658,3,,agglomeration
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,1,4,6,[4],[6],1,5,79.756591796875,4,,agglomeration
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,2,1,2,[1],[2],2,44667,3.0,1,,agglomeration
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,centroid_distance_k_normalizer,3,1,5,"[1, 2]",[5],44669,3,52.790706634521484,1,,agglomeration
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,1,3,4,[3],[4],140988,1,2.196899890899658,3,,obvious_fragment_assignment
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,2,1,2,[1],[2],2,44667,3.0,1,,obvious_fragment_assignment
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,hybrid_k_normalization,3,3,5,"[3, 4]",[5],140989,3,2.0,3,,obvious_fragment_assignment
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,1,3,5,[3],[5],140988,3,,1,1,gt_oracle_grouping
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,2,1,2,[1],[2],2,44667,,2,1,gt_oracle_grouping
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,3,1,4,[1],[4],2,1,,2,1,gt_oracle_grouping
+m12_p02_s09,m12_p02,3,PREDICTED_SEMANTIC,gt_fragment_grouping_oracle,4,1,6,[1],[6],2,5,,2,1,gt_oracle_grouping
