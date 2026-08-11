@@ -1,0 +1,47 @@
+{
+  "semantic_class_ids": [
+    0,
+    1,
+    2
+  ],
+  "leaflet_class": 1,
+  "ring_class": 2,
+  "gt_instance_format": "uint8 PNG label map with 0=background and positive integer IDs for individual leaflets",
+  "gt_count_source": {
+    "oracle_field_used_for_audit": "manifest.gt_instance_count",
+    "metadata_full_image_fields_observed": [
+      "leaflet_selected_instances",
+      "instance_mask_stats.present",
+      "leaflet_selected"
+    ],
+    "instance_mask_positive_ids": 2,
+    "metadata_instance_count": 2,
+    "visible_crop_contract": "manifest gt_instance_count matches positive IDs in the 768x768 center-cropped instance mask",
+    "crop_visible_mismatch_count": 0,
+    "metadata_fullimage_mismatch_count": 1
+  },
+  "instance_ids_are_individual_leaflets": true,
+  "image_resolution": [
+    768,
+    768
+  ],
+  "gt_instance_native_resolution": [
+    1024,
+    1024
+  ],
+  "semantic_prediction_resolution": [
+    768,
+    768
+  ],
+  "validation_preprocessing": {
+    "spatial": "deterministic center crop to 768x768",
+    "image_scale": "uint8 RGB -> float32 / 255.0",
+    "semantic_argmax": true,
+    "semantic_threshold_tuning": false
+  },
+  "alignment": "GT instance masks are center-cropped to 768x768 to match semantic validation coordinates; predicted semantic and GT masks are then aligned in the same 768x768 image space.",
+  "dataset_roots": {
+    "instance_root": "E:\\3d_visual\\ml\\datasets\\converted_leaflet_instances",
+    "semantic_root": "E:\\3d_visual\\ml\\datasets\\converted_full_multiclass"
+  }
+}

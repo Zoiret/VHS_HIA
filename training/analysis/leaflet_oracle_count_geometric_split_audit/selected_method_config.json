@@ -1,0 +1,12 @@
+{
+  "method_key": "global_distance_maxima_r09",
+  "mask_condition": "PREDICTED_SEMANTIC",
+  "selection_rule": "maximize all_iou_ge_0.50, then exact_instance_count, then mean_matched_iou",
+  "method_variant": "radius9_rel0p08",
+  "method_family": "global_distance_maxima",
+  "params": {
+    "min_distance_px": 9,
+    "suppression_scale": 1.0,
+    "peak_floor_rel": 0.08
+  }
+}

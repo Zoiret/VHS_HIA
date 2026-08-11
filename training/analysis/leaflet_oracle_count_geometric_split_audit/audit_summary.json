@@ -1,0 +1,196 @@
+{
+  "manifest_path": "E:\\3d_visual\\ml\\training\\manifests\\center_full_val_manifest.jsonl",
+  "manifest_sha256": "42ce62dbe7316c898dc4c2a7849972a62b974c3941b88c4f1d9ae3502cb55940",
+  "semantic_checkpoint_path": "E:\\3d_visual\\ml\\training\\runs\\unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep\\best_mean_fg.pth",
+  "semantic_checkpoint_sha256": "ea19846a35da02cc0cb6041d814f206719eb1926f3b02cfd6fbf448d39834c48",
+  "semantic_contract": {
+    "semantic_class_ids": [
+      0,
+      1,
+      2
+    ],
+    "leaflet_class": 1,
+    "ring_class": 2,
+    "gt_instance_format": "uint8 PNG label map with 0=background and positive integer IDs for individual leaflets",
+    "gt_count_source": {
+      "oracle_field_used_for_audit": "manifest.gt_instance_count",
+      "metadata_full_image_fields_observed": [
+        "leaflet_selected_instances",
+        "instance_mask_stats.present",
+        "leaflet_selected"
+      ],
+      "instance_mask_positive_ids": 2,
+      "metadata_instance_count": 2,
+      "visible_crop_contract": "manifest gt_instance_count matches positive IDs in the 768x768 center-cropped instance mask",
+      "crop_visible_mismatch_count": 0,
+      "metadata_fullimage_mismatch_count": 1
+    },
+    "instance_ids_are_individual_leaflets": true,
+    "image_resolution": [
+      768,
+      768
+    ],
+    "gt_instance_native_resolution": [
+      1024,
+      1024
+    ],
+    "semantic_prediction_resolution": [
+      768,
+      768
+    ],
+    "validation_preprocessing": {
+      "spatial": "deterministic center crop to 768x768",
+      "image_scale": "uint8 RGB -> float32 / 255.0",
+      "semantic_argmax": true,
+      "semantic_threshold_tuning": false
+    },
+    "alignment": "GT instance masks are center-cropped to 768x768 to match semantic validation coordinates; predicted semantic and GT masks are then aligned in the same 768x768 image space.",
+    "dataset_roots": {
+      "instance_root": "E:\\3d_visual\\ml\\datasets\\converted_leaflet_instances",
+      "semantic_root": "E:\\3d_visual\\ml\\datasets\\converted_full_multiclass"
+    }
+  },
+  "methods": [
+    {
+      "method_key": "baseline_connected_components",
+      "method_family": "connected_components",
+      "method_variant": "raw_cc",
+      "params": {}
+    },
+    {
+      "method_key": "global_distance_maxima_r09",
+      "method_family": "global_distance_maxima",
+      "method_variant": "radius9_rel0p08",
+      "params": {
+        "min_distance_px": 9,
+        "suppression_scale": 1.0,
+        "peak_floor_rel": 0.08
+      }
+    },
+    {
+      "method_key": "global_distance_maxima_r15",
+      "method_family": "global_distance_maxima",
+      "method_variant": "radius15_rel0p12",
+      "params": {
+        "min_distance_px": 15,
+        "suppression_scale": 1.1,
+        "peak_floor_rel": 0.12
+      }
+    },
+    {
+      "method_key": "prominent_maxima_rel20",
+      "method_family": "prominent_maxima",
+      "method_variant": "prominence0p20_radius12",
+      "params": {
+        "min_distance_px": 12,
+        "suppression_scale": 1.0,
+        "peak_floor_rel": 0.2
+      }
+    },
+    {
+      "method_key": "prominent_maxima_rel30",
+      "method_family": "prominent_maxima",
+      "method_variant": "prominence0p30_radius15",
+      "params": {
+        "min_distance_px": 15,
+        "suppression_scale": 1.1,
+        "peak_floor_rel": 0.3
+      }
+    },
+    {
+      "method_key": "component_aware_maxima",
+      "method_family": "component_aware_maxima",
+      "method_variant": "per_component_greedy",
+      "params": {
+        "min_distance_px": 12,
+        "suppression_scale": 1.0,
+        "peak_floor_rel": 0.08
+      }
+    }
+  ],
+  "best_gt_semantic_method": {
+    "mask_condition": "GT_SEMANTIC",
+    "method_key": "baseline_connected_components",
+    "method_family": "connected_components",
+    "method_variant": "raw_cc",
+    "n": 93,
+    "exact_instance_count": 0.5913978494623656,
+    "mean_matched_iou": 0.930113320875453,
+    "median_matched_iou": 0.9424469221151359,
+    "all_iou_ge_0.50": 0.978494623655914,
+    "all_iou_ge_0.70": 0.8279569892473119,
+    "all_iou_ge_0.80": 0.7419354838709677,
+    "merge_rate": 0.0,
+    "fragmentation_rate": 0.40860215053763443,
+    "perfect_rate": 0.5698924731182796
+  },
+  "best_predicted_semantic_method": {
+    "mask_condition": "PREDICTED_SEMANTIC",
+    "method_key": "global_distance_maxima_r09",
+    "method_family": "global_distance_maxima",
+    "method_variant": "radius9_rel0p08",
+    "n": 93,
+    "exact_instance_count": 0.3548387096774194,
+    "mean_matched_iou": 0.5573108664968115,
+    "median_matched_iou": 0.5764206716509744,
+    "all_iou_ge_0.50": 0.41935483870967744,
+    "all_iou_ge_0.70": 0.27956989247311825,
+    "all_iou_ge_0.80": 0.15053763440860216,
+    "merge_rate": 0.053763440860215055,
+    "fragmentation_rate": 0.5913978494623656,
+    "perfect_rate": 0.0
+  },
+  "classification": "GEOMETRY_INSUFFICIENT",
+  "center_reference": {
+    "strict_marker_contract": 0.3655913978494624,
+    "instance_exact_count": 0.5913978494623656,
+    "instance_mean_matched_iou": 0.572104696693949,
+    "instance_score": 0.5043627612100781
+  },
+  "vs_center_interpretation": "Compare reconstruction metrics directly; strict marker contract is reported only as reference because geometric outputs do not emit center markers.",
+  "failure_attribution_best_predicted_method": {
+    "false_semantic_bridges": 50,
+    "missing_semantic_tissue": 19,
+    "seed_failures": 11
+  },
+  "next_step": {
+    "decision": "D. KEEP_CENTER_APPROACH",
+    "reason": "Oracle-K geometry underperformed the current center reference on both count reconstruction and matched IoU."
+  },
+  "visual_review": [
+    {
+      "category": "good_gt1",
+      "sample_id": "m05_p01_s07",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_audit\\visual_review\\good_gt1_m05_p01_s07.png"
+    },
+    {
+      "category": "good_gt2",
+      "sample_id": "m04_p01_s00",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_audit\\visual_review\\good_gt2_m04_p01_s00.png"
+    },
+    {
+      "category": "good_gt3",
+      "sample_id": "m05_p01_s03",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_audit\\visual_review\\good_gt3_m05_p01_s03.png"
+    },
+    {
+      "category": "gt_semantic_success_predicted_failure",
+      "sample_id": "m04_p01_s01",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_audit\\visual_review\\gt_semantic_success_predicted_failure_m04_p01_s01.png"
+    },
+    {
+      "category": "watershed_merge_failure",
+      "sample_id": "m05_p01_s30",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_audit\\visual_review\\watershed_merge_failure_m05_p01_s30.png"
+    },
+    {
+      "category": "watershed_oversplit_failure",
+      "sample_id": "m04_p01_s08",
+      "file": "E:\\3d_visual\\ml\\training\\analysis\\leaflet_oracle_count_geometric_split_audit\\visual_review\\watershed_oversplit_failure_m04_p01_s08.png"
+    }
+  ],
+  "center_visual_availability": {
+    "retry1_checkpoint_present_locally": false,
+    "note": "The requested retry1 center checkpoint is not present locally, so center-failure exemplar categories could not be rendered from per-sample center predictions in this audit."
+  }
+}
