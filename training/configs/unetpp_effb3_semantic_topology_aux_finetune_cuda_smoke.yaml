@@ -1,0 +1,89 @@
+seed: 1337
+dataset:
+  root: datasets/converted_full_multiclass
+  train_txt: datasets/converted_full_multiclass_curated/train.txt
+  val_txt: datasets/converted_full_multiclass_curated/val.txt
+  test_txt: datasets/converted_full_multiclass_curated/test.txt
+  instance_root: datasets/converted_leaflet_instances
+  research_val_manifest: training/manifests/center_full_val_manifest.jsonl
+  research_image_root: datasets/converted_leaflet_instances
+model:
+  name: unetplusplus
+  architecture: UnetPlusPlus
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+loss:
+  ce_class_weights:
+  - 0.2
+  - 1.0
+  - 2.5
+  ce_coef: 0.3
+  dice_coef: 0.7
+topology_aux:
+  enabled: true
+  hidden_channels: 16
+  lambda_topology: 0.2
+  topology_bce_weight: 1.0
+  topology_dice_weight: 1.0
+  attachment_module_path: base.decoder.blocks.x_0_4
+  deployable_inference_requires_topology_head: false
+  checkpoint_monitor_label: oracle_k_reconstruction_analysis_only
+augment:
+  rotate90: true
+  hflip: true
+  vflip: true
+  brightness_contrast: true
+  gamma: true
+scheduler:
+  type: reduce_on_plateau
+  monitor: mean_dice_fg
+  mode: max
+  factor: 0.5
+  patience: 8
+  min_lr: 1.0e-06
+early_stopping:
+  monitor: mean_dice_fg
+  mode: max
+  patience: 20
+train:
+  save_dir: training/runs/unetpp_effb3_semantic_topology_aux_finetune_100ep_cuda_smoke
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth
+  epochs: 1
+  batch_size: 16
+  lr: 1.0e-05
+  lr_decoder: 1.0e-05
+  lr_segmentation_head: 1.0e-05
+  lr_topology_head: 0.0001
+  weight_decay: 1.0e-05
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  amp: true
+  cudnn_benchmark: true
+  tensorboard: true
+  log_every: 10
+  dry_run_steps: 1
+  trainable_decoder_modules:
+  - base.decoder.blocks.x_0_4
+baseline_references:
+  semantic_mean_fg_iou: 0.8023093175
+  predicted_semantic_oracle_k:
+    exact_k: 1.0
+    mean_matched_iou: 0.5746
+    all_iou_ge_0.50: 0.4839
+    gt2_success: 0.4194
+    gt3_success: 0.3478
+  gt_semantic_oracle_k:
+    mean_matched_iou: 0.9615
+    all_iou_ge_0.50: 0.9247
+experiment_notes:
+  purpose: Preserve semantic argmax output while adding auxiliary instance-aware topology
+    supervision.
+  no_authoritative_holdout: true
+  no_centerhead_weights: true
+  no_count_classifier_training: true
+  full_training_launched_in_prep: false

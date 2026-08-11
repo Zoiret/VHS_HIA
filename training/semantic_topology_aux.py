@@ -1300,7 +1300,7 @@ def prepare_experiment(
     }
     validation_contract = build_validation_contract(research_manifest)
     readiness = {
-        "status": "ready_for_training"
+        "status": "prep_complete_pending_preflight"
         if (
             smoke_summary["semantic_forward"]
             and smoke_summary["semantic_loss_finite"]
