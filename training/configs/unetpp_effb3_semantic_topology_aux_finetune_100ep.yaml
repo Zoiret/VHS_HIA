@@ -6,8 +6,8 @@ dataset:
   val_txt: datasets/converted_full_multiclass_curated/val.txt
   test_txt: datasets/converted_full_multiclass_curated/test.txt
   instance_root: datasets/converted_leaflet_instances
-  research_val_manifest: training/manifests/center_full_val_manifest.jsonl
-  research_image_root: datasets/converted_leaflet_instances
+  research_eval_split_txt: datasets/converted_full_multiclass_curated/test.txt
+  research_eval_name: semantic_topology_research_eval
 
 model:
   name: unetplusplus
@@ -34,7 +34,6 @@ topology_aux:
   topology_dice_weight: 1.0
   attachment_module_path: base.decoder.blocks.x_0_4
   deployable_inference_requires_topology_head: false
-  checkpoint_monitor_label: oracle_k_reconstruction_analysis_only
 
 augment:
   rotate90: true
@@ -96,3 +95,4 @@ experiment_notes:
   no_centerhead_weights: true
   no_count_classifier_training: true
   full_training_launched_in_prep: false
+  post_training_research_eval_only: true

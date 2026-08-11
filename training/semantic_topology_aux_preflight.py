@@ -25,32 +25,15 @@ def _split_identity(split_txt: Path) -> dict[str, Any]:
     samples: list[str] = []
     with split_txt.open("r", encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            if not line.strip():
                 continue
-            image_rel, _mask_rel = line.split("\t")
+            image_rel, _mask_rel = line.strip().split("\t")
             samples.append(Path(image_rel).stem)
     patients = sorted({_patient_id_from_sample(sample) for sample in samples})
     return {
         "path": str(split_txt.resolve()),
         "sha256": topo_aux._sha256_file(split_txt.resolve()),
         "samples": sorted(samples),
-        "patients": patients,
-        "sample_count": int(len(samples)),
-        "patient_count": int(len(patients)),
-    }
-
-
-def _manifest_identity(manifest_path: Path) -> dict[str, Any]:
-    rows = topo_aux._read_jsonl(manifest_path.resolve())
-    if any(bool(row.get("present_in_authoritative_106_holdout", False)) for row in rows):
-        raise SystemExit("Authoritative holdout samples are not allowed in topology reconstruction validation")
-    samples = sorted(str(row["sample"]) for row in rows)
-    patients = sorted({str(row["patient_id"]) for row in rows})
-    return {
-        "path": str(manifest_path.resolve()),
-        "sha256": topo_aux._sha256_file(manifest_path.resolve()),
-        "samples": samples,
         "patients": patients,
         "sample_count": int(len(samples)),
         "patient_count": int(len(patients)),
@@ -70,196 +53,172 @@ def _pair_overlap(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def audit_data_isolation(cfg: dict[str, Any]) -> dict[str, Any]:
+def audit_research_eval_isolation(cfg: dict[str, Any]) -> dict[str, Any]:
     dataset_cfg = cfg.get("dataset") or {}
     train_txt = topo_aux._resolve_repo_path(dataset_cfg.get("train_txt", topo_aux.DEFAULT_SEMANTIC_TRAIN_SPLIT), topo_aux.DEFAULT_SEMANTIC_TRAIN_SPLIT)
     val_txt = topo_aux._resolve_repo_path(dataset_cfg.get("val_txt", topo_aux.DEFAULT_SEMANTIC_VAL_SPLIT), topo_aux.DEFAULT_SEMANTIC_VAL_SPLIT)
-    test_txt = topo_aux._resolve_repo_path(dataset_cfg.get("test_txt", topo_aux.REPO_ROOT / "datasets" / "converted_full_multiclass_curated" / "test.txt"), topo_aux.REPO_ROOT / "datasets" / "converted_full_multiclass_curated" / "test.txt")
-    research_manifest = topo_aux._resolve_repo_path(dataset_cfg.get("research_val_manifest", topo_aux.DEFAULT_RESEARCH_MANIFEST), topo_aux.DEFAULT_RESEARCH_MANIFEST)
+    research_eval_split_txt = topo_aux._resolve_repo_path(dataset_cfg.get("research_eval_split_txt", topo_aux.DEFAULT_SEMANTIC_TEST_SPLIT), topo_aux.DEFAULT_SEMANTIC_TEST_SPLIT)
+    instance_root = topo_aux._resolve_repo_path(dataset_cfg.get("instance_root", topo_aux.DEFAULT_INSTANCE_ROOT), topo_aux.DEFAULT_INSTANCE_ROOT)
 
     semantic_train = _split_identity(train_txt)
     semantic_val = _split_identity(val_txt)
-    semantic_test = _split_identity(test_txt)
-    topology_reconstruction_val = _manifest_identity(research_manifest)
+    research_eval = _split_identity(research_eval_split_txt)
 
-    train_val = _pair_overlap(semantic_train, semantic_val)
-    train_topology = _pair_overlap(semantic_train, topology_reconstruction_val)
-    val_topology = _pair_overlap(semantic_val, topology_reconstruction_val)
+    instance_mask_available = 0
+    gt_counts: dict[int, int] = {1: 0, 2: 0, 3: 0}
+    gt_count_available = 0
+    missing_instance_masks: list[str] = []
+    for sample_id in research_eval["samples"]:
+        instance_path = instance_root / "instance_masks" / f"{sample_id}.png"
+        if not instance_path.exists():
+            missing_instance_masks.append(sample_id)
+            continue
+        instance_mask_available += 1
+        inst = topo_aux._read_u8(instance_path)
+        gt_count = len(topo_aux._positive_instance_ids(inst))
+        if gt_count in gt_counts:
+            gt_counts[int(gt_count)] += 1
+        gt_count_available += 1
 
-    center_val_rows = topo_aux._read_jsonl(research_manifest.resolve())
-    center_val_minus_train = sorted(str(row["sample"]) for row in center_val_rows if str(row["sample"]) not in set(semantic_train["samples"]))
-    center_val_minus_train_patients = sorted({_patient_id_from_sample(sample) for sample in center_val_minus_train})
-    semantic_test_vs_train = _pair_overlap(semantic_train, semantic_test)
-    semantic_test_vs_topology = _pair_overlap(semantic_test, topology_reconstruction_val)
-
-    proposal = {
-        "blocked_due_to_sample_overlap": bool(train_topology["sample_overlap_count"] > 0),
-        "smallest_valid_adjustment": (
-            "Do not use training/manifests/center_full_val_manifest.jsonl for checkpoint selection because it overlaps 43 train samples. "
-            "Keep semantic checkpointing on semantic val, and if an oracle-K selection set is still required, build a new research-only manifest from the existing semantic test.txt IDs "
-            "(20 samples, 0 sample overlap with semantic train) rather than inventing a new split silently."
-        ),
-        "existing_disjoint_repository_data": {
-            "semantic_test": semantic_test,
-            "semantic_test_vs_train": semantic_test_vs_train,
-            "semantic_test_vs_current_topology_manifest": semantic_test_vs_topology,
-            "current_topology_manifest_minus_semantic_train_samples": {
-                "sample_count": int(len(center_val_minus_train)),
-                "samples": center_val_minus_train,
-                "patient_count": int(len(center_val_minus_train_patients)),
-                "patients": center_val_minus_train_patients,
-            },
-        },
-    }
+    train_overlap = _pair_overlap(semantic_train, research_eval)
+    val_overlap = _pair_overlap(semantic_val, research_eval)
     return {
-        "semantic_train": semantic_train,
-        "semantic_val": semantic_val,
-        "topology_reconstruction_val": topology_reconstruction_val,
-        "pairs": {
-            "train_vs_val": train_val,
-            "train_vs_topology_reconstruction_val": train_topology,
-            "val_vs_topology_reconstruction_val": val_topology,
+        "research_eval_name": "semantic_topology_research_eval",
+        "research_eval": research_eval,
+        "train_overlap": train_overlap,
+        "val_overlap": val_overlap,
+        "instance_mask_available_count": int(instance_mask_available),
+        "instance_mask_available_fraction": float(instance_mask_available / max(research_eval["sample_count"], 1)),
+        "missing_instance_masks": missing_instance_masks,
+        "gt_instance_count_available_count": int(gt_count_available),
+        "gt_distribution": {
+            "gt1": int(gt_counts[1]),
+            "gt2": int(gt_counts[2]),
+            "gt3": int(gt_counts[3]),
         },
-        "proposal": proposal,
+        "analysis_only_contract": {
+            "optimizer": False,
+            "scheduler": False,
+            "early_stopping": False,
+            "checkpoint_selection": False,
+            "lambda_selection": False,
+            "target_parameter_selection": False,
+        },
+        "verdict": "blocked" if int(train_overlap["sample_overlap_count"]) > 0 else "analysis_only_frozen",
     }
 
 
-def _target_component_row(sample_id: str, gt_count: int, instance_mask: np.ndarray, parts: dict[str, np.ndarray], image_shape: tuple[int, int]) -> dict[str, Any]:
-    boundary = parts["boundary"] > 0
-    separation = parts["separation"] > 0
-    narrow = parts["narrow"] > 0
+def _target_component_row(sample_id: str, gt_count: int, parts: dict[str, np.ndarray], image_shape: tuple[int, int]) -> dict[str, Any]:
+    critical_fg = parts["critical_foreground"] > 0
+    separation = parts["inter_instance_separation"] > 0
     total_px = int(image_shape[0] * image_shape[1])
-    outer_boundary = int(np.count_nonzero(boundary & (instance_mask == 0)))
-    separation_count = int(np.count_nonzero(separation))
-    narrow_count = int(np.count_nonzero(narrow))
-    boundary_sep = int(np.count_nonzero(boundary & separation))
-    boundary_narrow = int(np.count_nonzero(boundary & narrow))
-    separation_narrow = int(np.count_nonzero(separation & narrow))
-    unique_separation = int(np.count_nonzero(separation & ~boundary & ~narrow))
-    unique_narrow = int(np.count_nonzero(narrow & ~boundary & ~separation))
-    union_count = int(np.count_nonzero(boundary | separation | narrow))
 
     def frac(value: int) -> float:
         return float(value / max(total_px, 1))
 
+    critical_count = int(np.count_nonzero(critical_fg))
+    separation_count = int(np.count_nonzero(separation))
+    union_count = int(np.count_nonzero(critical_fg | separation))
+    overlap_count = int(np.count_nonzero(critical_fg & separation))
     return {
         "sample_id": sample_id,
         "gt_count": int(gt_count),
         "image_pixel_count": total_px,
-        "outer_boundary_count": outer_boundary,
-        "outer_boundary_fraction": frac(outer_boundary),
-        "separation_count": separation_count,
-        "separation_fraction": frac(separation_count),
-        "narrow_count": narrow_count,
-        "narrow_fraction": frac(narrow_count),
-        "boundary_and_separation_count": boundary_sep,
-        "boundary_and_separation_fraction": frac(boundary_sep),
-        "boundary_and_narrow_count": boundary_narrow,
-        "boundary_and_narrow_fraction": frac(boundary_narrow),
-        "separation_and_narrow_count": separation_narrow,
-        "separation_and_narrow_fraction": frac(separation_narrow),
-        "unique_separation_count": unique_separation,
-        "unique_separation_fraction": frac(unique_separation),
-        "unique_narrow_count": unique_narrow,
-        "unique_narrow_fraction": frac(unique_narrow),
+        "critical_foreground_count": critical_count,
+        "critical_foreground_fraction": frac(critical_count),
+        "inter_instance_separation_count": separation_count,
+        "inter_instance_separation_fraction": frac(separation_count),
+        "overlap_count": overlap_count,
+        "overlap_fraction": frac(overlap_count),
         "union_count": union_count,
         "union_fraction": frac(union_count),
+        "has_nonzero_separation": int(separation_count > 0),
     }
 
 
-def _aggregate_component_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {"sample_count": 0}
-    keys = [
-        "outer_boundary_count",
-        "separation_count",
-        "narrow_count",
-        "boundary_and_separation_count",
-        "boundary_and_narrow_count",
-        "separation_and_narrow_count",
-        "unique_separation_count",
-        "unique_narrow_count",
-        "union_count",
-    ]
     image_pixels = int(sum(int(row["image_pixel_count"]) for row in rows))
-    out: dict[str, Any] = {
+    out = {
         "sample_count": int(len(rows)),
-        "image_pixels_total": int(image_pixels),
+        "image_pixels_total": image_pixels,
     }
-    for key in keys:
+    for key in ["critical_foreground_count", "inter_instance_separation_count", "overlap_count", "union_count"]:
         total = int(sum(int(row[key]) for row in rows))
         out[key] = total
         out[key.replace("_count", "_fraction")] = float(total / max(image_pixels, 1))
     return out
 
 
-def _select_target_examples(rows: list[dict[str, Any]]) -> dict[str, str]:
+def _select_visual_examples(rows: list[dict[str, Any]]) -> dict[str, str]:
     candidates: dict[str, tuple[float, str]] = {
         "gt1": (float("-inf"), ""),
-        "gt2": (float("-inf"), ""),
-        "gt3": (float("-inf"), ""),
+        "gt2_close_neighbors": (float("-inf"), ""),
+        "gt3_close_neighbors": (float("-inf"), ""),
         "narrow_leaflet": (float("-inf"), ""),
-        "close_neighbors": (float("-inf"), ""),
         "disconnected_same_leaflet": (float("-inf"), ""),
+        "no_separation_target": (float("-inf"), ""),
     }
     for row in rows:
         sample_id = str(row["sample_id"])
         gt_count = int(row["gt_count"])
-        if gt_count == 1 and float(row["outer_boundary_fraction"]) > candidates["gt1"][0]:
-            candidates["gt1"] = (float(row["outer_boundary_fraction"]), sample_id)
-        if gt_count == 2 and float(row["separation_fraction"]) > candidates["gt2"][0]:
-            candidates["gt2"] = (float(row["separation_fraction"]), sample_id)
-        if gt_count == 3 and float(row["separation_fraction"]) > candidates["gt3"][0]:
-            candidates["gt3"] = (float(row["separation_fraction"]), sample_id)
-        if float(row["unique_narrow_fraction"]) > candidates["narrow_leaflet"][0]:
-            candidates["narrow_leaflet"] = (float(row["unique_narrow_fraction"]), sample_id)
-        if float(row["unique_separation_fraction"]) > candidates["close_neighbors"][0]:
-            candidates["close_neighbors"] = (float(row["unique_separation_fraction"]), sample_id)
+        if gt_count == 1 and float(row["critical_foreground_fraction"]) > candidates["gt1"][0]:
+            candidates["gt1"] = (float(row["critical_foreground_fraction"]), sample_id)
+        if gt_count == 2 and float(row["inter_instance_separation_fraction"]) > candidates["gt2_close_neighbors"][0]:
+            candidates["gt2_close_neighbors"] = (float(row["inter_instance_separation_fraction"]), sample_id)
+        if gt_count == 3 and float(row["inter_instance_separation_fraction"]) > candidates["gt3_close_neighbors"][0]:
+            candidates["gt3_close_neighbors"] = (float(row["inter_instance_separation_fraction"]), sample_id)
+        if float(row["critical_foreground_fraction"]) > candidates["narrow_leaflet"][0]:
+            candidates["narrow_leaflet"] = (float(row["critical_foreground_fraction"]), sample_id)
         if float(row.get("disconnected_same_leaflet", 0.0)) > candidates["disconnected_same_leaflet"][0]:
             candidates["disconnected_same_leaflet"] = (float(row.get("disconnected_same_leaflet", 0.0)), sample_id)
+        if int(row["has_nonzero_separation"]) == 0 and float(row["critical_foreground_fraction"]) > candidates["no_separation_target"][0]:
+            candidates["no_separation_target"] = (float(row["critical_foreground_fraction"]), sample_id)
     return {key: sample_id for key, (_score, sample_id) in candidates.items() if sample_id}
 
 
-def audit_target_composition(cfg: dict[str, Any], contract: topo_aux.TopologyTargetContract, output_dir: Path) -> dict[str, Any]:
+def audit_target_targets(cfg: dict[str, Any], contract: topo_aux.TopologyTargetContract, output_dir: Path) -> dict[str, Any]:
     dataset_cfg = cfg.get("dataset") or {}
     dataset_root = topo_aux._resolve_repo_path(dataset_cfg.get("root", topo_aux.DEFAULT_SEMANTIC_DATASET_ROOT), topo_aux.DEFAULT_SEMANTIC_DATASET_ROOT)
     train_split_txt = topo_aux._resolve_repo_path(dataset_cfg.get("train_txt", topo_aux.DEFAULT_SEMANTIC_TRAIN_SPLIT), topo_aux.DEFAULT_SEMANTIC_TRAIN_SPLIT)
     instance_root = topo_aux._resolve_repo_path(dataset_cfg.get("instance_root", topo_aux.DEFAULT_INSTANCE_ROOT), topo_aux.DEFAULT_INSTANCE_ROOT)
     items = topo_aux.read_split_file(dataset_root.resolve(), train_split_txt.resolve())
     rows: list[dict[str, Any]] = []
-    rows_by_sample: dict[str, dict[str, Any]] = {}
     for item in items:
         sample_id = Path(item.image_path).stem
         instance_mask = topo_aux._read_u8(instance_root / "instance_masks" / f"{sample_id}.png")
         gt_count = len(topo_aux._positive_instance_ids(instance_mask))
-        target, parts = topo_aux.generate_topology_target(instance_mask, contract, return_parts=True)
+        _target, parts = topo_aux.generate_topology_target(instance_mask, contract, return_parts=True)
         comp_counts = topo_aux._instance_component_counts(instance_mask)
-        row = _target_component_row(sample_id, gt_count, instance_mask, parts, instance_mask.shape[:2])
+        row = _target_component_row(sample_id, gt_count, parts, instance_mask.shape[:2])
         row["disconnected_same_leaflet"] = int(any(int(v) > 1 for v in comp_counts.values()))
         rows.append(row)
-        rows_by_sample[sample_id] = row
 
-    aggregate = _aggregate_component_rows(rows)
+    aggregate = _aggregate_rows(rows)
     gt1_rows = [row for row in rows if int(row["gt_count"]) == 1]
     gt2_rows = [row for row in rows if int(row["gt_count"]) == 2]
     gt3_rows = [row for row in rows if int(row["gt_count"]) == 3]
+    gt2_nonzero = int(sum(int(row["has_nonzero_separation"]) for row in gt2_rows))
+    gt3_nonzero = int(sum(int(row["has_nonzero_separation"]) for row in gt3_rows))
 
-    examples_dir = output_dir / "target_composition_examples"
+    examples_dir = output_dir / "target_visual_audit"
     examples_dir.mkdir(parents=True, exist_ok=True)
-    selected = _select_target_examples(rows)
+    selected = _select_visual_examples(rows)
     saved_files: list[str] = []
+    sample_lookup = {Path(item.image_path).stem: item for item in items}
     for category, sample_id in selected.items():
-        matching = next(item for item in items if Path(item.image_path).stem == sample_id)
-        rgb = topo_aux._center_crop_like_validation(topo_aux._read_image_rgb(matching.image_path), 768, 768, is_mask=False)
+        item = sample_lookup[sample_id]
+        rgb = topo_aux._center_crop_like_validation(topo_aux._read_image_rgb(item.image_path), 768, 768, is_mask=False)
+        semantic_mask = topo_aux._center_crop_like_validation(topo_aux._read_u8(item.mask_path), 768, 768, is_mask=True)
         instance_mask = topo_aux._center_crop_like_validation(topo_aux._read_u8(instance_root / "instance_masks" / f"{sample_id}.png"), 768, 768, is_mask=True)
-        target, parts = topo_aux.generate_topology_target(instance_mask, contract, return_parts=True)
-        boundary = (parts["boundary"] > 0).astype(np.uint8)
-        separation = (parts["separation"] > 0).astype(np.uint8)
-        narrow = (parts["narrow"] > 0).astype(np.uint8)
+        _target, parts = topo_aux.generate_topology_target(instance_mask, contract, return_parts=True)
+        critical_fg = parts["critical_foreground"].astype(np.uint8)
+        separation = parts["inter_instance_separation"].astype(np.uint8)
+        semantic_union = (semantic_mask == 1).astype(np.uint8)
         overlay = rgb.copy().astype(np.float32)
-        overlay[boundary.astype(bool)] = overlay[boundary.astype(bool)] * 0.5 + np.asarray([255.0, 255.0, 0.0], dtype=np.float32) * 0.5
-        overlay[separation.astype(bool)] = overlay[separation.astype(bool)] * 0.4 + np.asarray([255.0, 0.0, 255.0], dtype=np.float32) * 0.6
-        overlay[narrow.astype(bool)] = overlay[narrow.astype(bool)] * 0.4 + np.asarray([255.0, 0.0, 0.0], dtype=np.float32) * 0.6
+        overlay[critical_fg > 0] = overlay[critical_fg > 0] * 0.45 + np.asarray([255.0, 0.0, 0.0], dtype=np.float32) * 0.55
+        overlay[separation > 0] = overlay[separation > 0] * 0.35 + np.asarray([0.0, 255.0, 255.0], dtype=np.float32) * 0.65
         overlay = overlay.astype(np.uint8)
 
         def _mask_rgb(mask01: np.ndarray, color: tuple[int, int, int]) -> np.ndarray:
@@ -268,20 +227,15 @@ def audit_target_composition(cfg: dict[str, Any], contract: topo_aux.TopologyTar
             return out
 
         inst_vis = cv2.applyColorMap(((instance_mask.astype(np.float32) / max(float(instance_mask.max()), 1.0)) * 255.0 + 0.5).astype(np.uint8), cv2.COLORMAP_TURBO)
+        semantic_vis = _mask_rgb(semantic_union, (0, 255, 0))
+        critical_vis = _mask_rgb(critical_fg, (255, 0, 0))
+        separation_vis = _mask_rgb(separation, (0, 255, 255))
         panel_top = np.concatenate(
-            [
-                cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
-                inst_vis,
-                cv2.cvtColor(_mask_rgb(boundary, (255, 255, 0)), cv2.COLOR_RGB2BGR),
-            ],
+            [cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), inst_vis, cv2.cvtColor(semantic_vis, cv2.COLOR_RGB2BGR)],
             axis=1,
         )
         panel_bottom = np.concatenate(
-            [
-                cv2.cvtColor(_mask_rgb(separation, (255, 0, 255)), cv2.COLOR_RGB2BGR),
-                cv2.cvtColor(_mask_rgb(narrow, (255, 0, 0)), cv2.COLOR_RGB2BGR),
-                cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR),
-            ],
+            [cv2.cvtColor(critical_vis, cv2.COLOR_RGB2BGR), cv2.cvtColor(separation_vis, cv2.COLOR_RGB2BGR), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)],
             axis=1,
         )
         grid = np.concatenate([panel_top, panel_bottom], axis=0)
@@ -291,12 +245,16 @@ def audit_target_composition(cfg: dict[str, Any], contract: topo_aux.TopologyTar
 
     return {
         "aggregate": aggregate,
-        "gt1": _aggregate_component_rows(gt1_rows),
-        "gt2": _aggregate_component_rows(gt2_rows),
-        "gt3": _aggregate_component_rows(gt3_rows),
-        "per_sample_rows": rows,
-        "selected_examples": selected,
+        "gt1": _aggregate_rows(gt1_rows),
+        "gt2": _aggregate_rows(gt2_rows),
+        "gt3": _aggregate_rows(gt3_rows),
+        "gt2_nonzero_separation_count": gt2_nonzero,
+        "gt2_nonzero_separation_fraction": float(gt2_nonzero / max(len(gt2_rows), 1)),
+        "gt3_nonzero_separation_count": gt3_nonzero,
+        "gt3_nonzero_separation_fraction": float(gt3_nonzero / max(len(gt3_rows), 1)),
+        "rows": rows,
         "saved_files": saved_files,
+        "selected_examples": selected,
     }
 
 
@@ -304,11 +262,7 @@ def _median_range(values: list[float]) -> dict[str, float | None]:
     if not values:
         return {"median": None, "min": None, "max": None}
     arr = np.asarray(values, dtype=np.float64)
-    return {
-        "median": float(np.median(arr)),
-        "min": float(arr.min()),
-        "max": float(arr.max()),
-    }
+    return {"median": float(np.median(arr)), "min": float(arr.min()), "max": float(arr.max())}
 
 
 def _grad_norm(named_params: list[tuple[str, torch.nn.Parameter]]) -> float:
@@ -349,7 +303,7 @@ def _single_lambda_gradient_audit(cfg: dict[str, Any], contract: topo_aux.Topolo
     freeze_info = topo_aux.apply_training_policy(model, cfg)
     topo_aux.set_train_modes(model, freeze_info)
     semantic_loss = topo_aux.build_semantic_loss_from_cfg(cfg, device)
-    raw_topology_loss = topo_aux.BinaryBCEDiceLoss(
+    binary_loss = topo_aux.BinaryBCEDiceLoss(
         bce_weight=float((cfg.get("topology_aux") or {}).get("topology_bce_weight", 1.0)),
         dice_weight=float((cfg.get("topology_aux") or {}).get("topology_dice_weight", 1.0)),
     ).to(device)
@@ -372,15 +326,17 @@ def _single_lambda_gradient_audit(cfg: dict[str, Any], contract: topo_aux.Topolo
             with topo_aux._autocast_ctx(device, enabled=use_amp):
                 outputs = model(images)
                 sem = semantic_loss(outputs["semantic_logits"], semantic_target)
-                topo = raw_topology_loss(outputs["topology_logits"], topology_target)
+                topo_fg = binary_loss(outputs["topology_logits"][:, 0:1], topology_target[:, 0:1])
+                topo_sep = binary_loss(outputs["topology_logits"][:, 1:2], topology_target[:, 1:2])
+                topo_mean = 0.5 * (topo_fg + topo_sep)
                 if which == "semantic":
                     loss = sem
                 elif which == "raw_topology":
-                    loss = topo
+                    loss = topo_mean
                 elif which == "weighted_topology":
-                    loss = float(lambda_topology) * topo
+                    loss = float(lambda_topology) * topo_mean
                 elif which == "combined":
-                    loss = sem + float(lambda_topology) * topo
+                    loss = sem + float(lambda_topology) * topo_mean
                 else:
                     raise KeyError(which)
             loss.backward()
@@ -389,7 +345,9 @@ def _single_lambda_gradient_audit(cfg: dict[str, Any], contract: topo_aux.Topolo
                 "segmentation_head_grad_norm": _grad_norm(seg_named),
                 "topology_head_grad_norm": _grad_norm(topo_named),
                 "semantic_loss": float(sem.detach().cpu().item()),
-                "raw_topology_loss": float(topo.detach().cpu().item()),
+                "topology_fg_loss": float(topo_fg.detach().cpu().item()),
+                "topology_separation_loss": float(topo_sep.detach().cpu().item()),
+                "raw_topology_loss": float(topo_mean.detach().cpu().item()),
             }
 
         semantic_stats = _run("semantic")
@@ -409,16 +367,16 @@ def _single_lambda_gradient_audit(cfg: dict[str, Any], contract: topo_aux.Topolo
                 "combined_segmentation_head_grad_norm": combined_stats["segmentation_head_grad_norm"],
                 "combined_topology_head_grad_norm": combined_stats["topology_head_grad_norm"],
                 "semantic_loss": semantic_stats["semantic_loss"],
-                "raw_topology_loss": semantic_stats["raw_topology_loss"],
+                "raw_topology_loss": raw_topology_stats["raw_topology_loss"],
+                "topology_fg_loss": raw_topology_stats["topology_fg_loss"],
+                "topology_separation_loss": raw_topology_stats["topology_separation_loss"],
                 "weighted_topology_to_semantic_x0_4_ratio": ratio,
             }
         )
 
-    ratio_stats = _median_range([float(row["weighted_topology_to_semantic_x0_4_ratio"]) for row in rows])
     return {
         "lambda_topology": float(lambda_topology),
         "batch_count": int(len(rows)),
-        "batch_size": 4,
         "rows": rows,
         "semantic_x0_4_grad_norm": _median_range([float(row["semantic_x0_4_grad_norm"]) for row in rows]),
         "semantic_segmentation_head_grad_norm": _median_range([float(row["semantic_segmentation_head_grad_norm"]) for row in rows]),
@@ -428,41 +386,36 @@ def _single_lambda_gradient_audit(cfg: dict[str, Any], contract: topo_aux.Topolo
         "combined_x0_4_grad_norm": _median_range([float(row["combined_x0_4_grad_norm"]) for row in rows]),
         "combined_segmentation_head_grad_norm": _median_range([float(row["combined_segmentation_head_grad_norm"]) for row in rows]),
         "combined_topology_head_grad_norm": _median_range([float(row["combined_topology_head_grad_norm"]) for row in rows]),
-        "weighted_topology_to_semantic_x0_4_ratio": ratio_stats,
+        "weighted_topology_to_semantic_x0_4_ratio": _median_range([float(row["weighted_topology_to_semantic_x0_4_ratio"]) for row in rows]),
     }
+
+
+def select_lambda_from_gradient_summaries(primary_lambda: float, primary_summary: dict[str, Any], alternative_summary: dict[str, Any] | None) -> tuple[float, str]:
+    primary_ratio = float(primary_summary["weighted_topology_to_semantic_x0_4_ratio"]["median"] or 0.0)
+    if primary_ratio <= 0.30:
+        return float(primary_lambda), "Retained lambda=0.2 because the two-channel auxiliary shared-decoder median ratio stayed <= 0.30."
+    if alternative_summary is None:
+        return float(primary_lambda), "Retained lambda because no conservative alternative summary was available."
+    alt_ratio = float(alternative_summary["weighted_topology_to_semantic_x0_4_ratio"]["median"] or 0.0)
+    if alt_ratio <= 0.30:
+        return 0.1, "Selected lambda=0.1 because lambda=0.2 exceeded the auxiliary gradient budget, while 0.1 restored the shared-decoder median ratio to <= 0.30."
+    return float(primary_lambda), "Retained lambda=0.2 because lambda=0.1 did not restore the requested gradient budget."
 
 
 def audit_gradient_contribution(cfg: dict[str, Any], contract: topo_aux.TopologyTargetContract, device: torch.device) -> dict[str, Any]:
     primary_lambda = float((cfg.get("topology_aux") or {}).get("lambda_topology", 0.2))
     primary = _single_lambda_gradient_audit(cfg, contract, device, lambda_topology=primary_lambda)
-    dominance_rule = "If median(weighted_topology_x0_4_grad_norm / semantic_x0_4_grad_norm) > 1.0, test exactly one conservative alternative lambda=0.1."
     alternative = None
-    if float(primary["weighted_topology_to_semantic_x0_4_ratio"]["median"] or 0.0) > 1.0:
+    if float(primary["weighted_topology_to_semantic_x0_4_ratio"]["median"] or 0.0) > 0.30:
         alternative = _single_lambda_gradient_audit(cfg, contract, device, lambda_topology=0.1)
     selected_lambda, reason = select_lambda_from_gradient_summaries(primary_lambda, primary, alternative)
     return {
-        "selection_rule": dominance_rule,
+        "selection_rule": "Keep lambda=0.2 if median(weighted_auxiliary_x0_4_grad / semantic_x0_4_grad) <= 0.30 and no pathological batch dominates; otherwise test exactly one alternative lambda=0.1.",
         "lambda_0p2": primary,
         "lambda_0p1": alternative,
         "selected_lambda": float(selected_lambda),
         "reason": reason,
     }
-
-
-def select_lambda_from_gradient_summaries(
-    primary_lambda: float,
-    primary_summary: dict[str, Any],
-    alternative_summary: dict[str, Any] | None,
-) -> tuple[float, str]:
-    primary_ratio = float(primary_summary["weighted_topology_to_semantic_x0_4_ratio"]["median"] or 0.0)
-    if primary_ratio <= 1.0:
-        return float(primary_lambda), "Retained configured lambda because weighted topology and semantic x_0_4 gradients remained comparable."
-    if alternative_summary is None:
-        return float(primary_lambda), "Retained configured lambda because no conservative alternative audit was available."
-    alt_ratio = float(alternative_summary["weighted_topology_to_semantic_x0_4_ratio"]["median"] or 0.0)
-    if alt_ratio <= 1.0:
-        return 0.1, "Selected lambda=0.1 because lambda=0.2 made weighted topology dominate the shared x_0_4 median gradient, while 0.1 kept topology influential but not dominant."
-    return float(primary_lambda), "Retained lambda=0.2 because lambda=0.1 did not restore a comparable shared-decoder gradient balance."
 
 
 def audit_freeze_mode(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -515,6 +468,7 @@ def trace_schedule_contract(baseline_cfg: dict[str, Any], topology_cfg: dict[str
             "optimizer": "AdamW(model.parameters(), lr=train.lr, weight_decay=train.weight_decay)",
             "scheduler": baseline_cfg.get("scheduler"),
             "early_stopping": baseline_cfg.get("early_stopping"),
+            "checkpoint_selection": "best_mean_fg.pth by highest semantic mean_dice_fg",
             "epochs": int((baseline_cfg.get("train") or {}).get("epochs", 0)),
         },
         "topology_config": {
@@ -529,6 +483,7 @@ def trace_schedule_contract(baseline_cfg: dict[str, Any], topology_cfg: dict[str
             },
             "scheduler": topology_cfg.get("scheduler"),
             "early_stopping": topology_cfg.get("early_stopping"),
+            "checkpoint_selection": "best_mean_fg.pth by highest semantic mean_dice_fg",
             "epochs": int((topology_cfg.get("train") or {}).get("epochs", 0)),
         },
     }
@@ -543,8 +498,8 @@ def write_smoke_config(cfg: dict[str, Any], selected_lambda: float, smoke_config
     smoke_cfg = json.loads(json.dumps(cfg))
     smoke_cfg.setdefault("topology_aux", {})["lambda_topology"] = float(selected_lambda)
     smoke_cfg.setdefault("train", {})["save_dir"] = "training/runs/unetpp_effb3_semantic_topology_aux_finetune_100ep_cuda_smoke"
-    smoke_cfg["train"]["dry_run_steps"] = 1
     smoke_cfg["train"]["epochs"] = 1
+    smoke_cfg["train"]["dry_run_steps"] = 1
     smoke_config_path.parent.mkdir(parents=True, exist_ok=True)
     smoke_config_path.write_text(yaml.safe_dump(smoke_cfg, sort_keys=False), encoding="utf-8")
     return {
@@ -556,47 +511,55 @@ def write_smoke_config(cfg: dict[str, Any], selected_lambda: float, smoke_config
 
 def run_preflight(cfg: dict[str, Any], baseline_cfg: dict[str, Any], output_dir: Path, device: torch.device) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    dataset_isolation = audit_data_isolation(cfg)
+    research_eval = audit_research_eval_isolation(cfg)
     dataset_cfg = cfg.get("dataset") or {}
+    train_split_txt = topo_aux._resolve_repo_path(dataset_cfg.get("train_txt", topo_aux.DEFAULT_SEMANTIC_TRAIN_SPLIT), topo_aux.DEFAULT_SEMANTIC_TRAIN_SPLIT)
+    instance_root = topo_aux._resolve_repo_path(dataset_cfg.get("instance_root", topo_aux.DEFAULT_INSTANCE_ROOT), topo_aux.DEFAULT_INSTANCE_ROOT)
+    dataset_root = topo_aux._resolve_repo_path(dataset_cfg.get("root", topo_aux.DEFAULT_SEMANTIC_DATASET_ROOT), topo_aux.DEFAULT_SEMANTIC_DATASET_ROOT)
     contract, contract_audit = topo_aux.choose_topology_target_contract(
-        dataset_root=topo_aux._resolve_repo_path(dataset_cfg.get("root", topo_aux.DEFAULT_SEMANTIC_DATASET_ROOT), topo_aux.DEFAULT_SEMANTIC_DATASET_ROOT),
-        train_split_txt=topo_aux._resolve_repo_path(dataset_cfg.get("train_txt", topo_aux.DEFAULT_SEMANTIC_TRAIN_SPLIT), topo_aux.DEFAULT_SEMANTIC_TRAIN_SPLIT),
-        instance_root=topo_aux._resolve_repo_path(dataset_cfg.get("instance_root", topo_aux.DEFAULT_INSTANCE_ROOT), topo_aux.DEFAULT_INSTANCE_ROOT),
+        dataset_root=dataset_root,
+        train_split_txt=train_split_txt,
+        instance_root=instance_root,
     )
-    target_composition = audit_target_composition(cfg, contract, output_dir)
-    gradient_contribution = audit_gradient_contribution(cfg, contract, device)
+    target_audit = audit_target_targets(cfg, contract, output_dir)
+    gradient = audit_gradient_contribution(cfg, contract, device)
     freeze_mode = audit_freeze_mode(cfg)
-    schedule_contract = trace_schedule_contract(baseline_cfg, cfg)
-    smoke_config = write_smoke_config(cfg, float(gradient_contribution["selected_lambda"]), DEFAULT_SMOKE_CONFIG_PATH)
+    schedule = trace_schedule_contract(baseline_cfg, cfg)
+    smoke_config = write_smoke_config(cfg, float(gradient["selected_lambda"]), DEFAULT_SMOKE_CONFIG_PATH)
+    validation_contract = topo_aux.build_validation_contract(
+        topo_aux._resolve_repo_path(dataset_cfg.get("research_eval_split_txt", topo_aux.DEFAULT_SEMANTIC_TEST_SPLIT), topo_aux.DEFAULT_SEMANTIC_TEST_SPLIT)
+    )
 
-    train_save_dir = topo_aux._resolve_repo_path((cfg.get("train") or {}).get("save_dir"), topo_aux.REPO_ROOT / "training" / "runs" / "semantic_topology_aux")
-    full_run_dir_exists = bool(train_save_dir.exists())
-    train_topology_overlap = int(dataset_isolation["pairs"]["train_vs_topology_reconstruction_val"]["sample_overlap_count"])
-    readiness = "blocked" if train_topology_overlap > 0 else "ready_for_A100_smoke"
-
+    full_run_dir = topo_aux._resolve_repo_path((cfg.get("train") or {}).get("save_dir"), topo_aux.REPO_ROOT / "training" / "runs" / "semantic_topology_aux")
+    readiness = "blocked" if research_eval["verdict"] == "blocked" else "ready_for_A100_smoke"
     summary = {
-        "dataset_isolation": dataset_isolation,
+        "research_eval_isolation": research_eval,
         "target_contract": topo_aux.asdict(contract),
         "target_contract_audit": contract_audit,
-        "target_composition": target_composition,
-        "gradient_contribution": gradient_contribution,
-        "schedule_contract": schedule_contract,
+        "target_audit": target_audit,
+        "gradient_contribution": gradient,
+        "schedule_contract": schedule,
         "freeze_mode": freeze_mode,
-        "semantic_checkpoint_sha256": topo_aux._sha256_file(topo_aux._resolve_repo_path((cfg.get("train") or {}).get("init_checkpoint", topo_aux.DEFAULT_SEMANTIC_CHECKPOINT), topo_aux.DEFAULT_SEMANTIC_CHECKPOINT)),
-        "smoke_config": smoke_config,
+        "validation_contract": validation_contract,
+        "semantic_checkpoint_sha256": topo_aux._sha256_file(
+            topo_aux._resolve_repo_path((cfg.get("train") or {}).get("init_checkpoint", topo_aux.DEFAULT_SEMANTIC_CHECKPOINT), topo_aux.DEFAULT_SEMANTIC_CHECKPOINT)
+        ),
         "full_run_save_dir": str((cfg.get("train") or {}).get("save_dir")),
-        "full_run_dir_exists": full_run_dir_exists,
-        "a100_smoke_command": f"py -3 training/train_semantic_topology_aux.py --config {Path(smoke_config['path']).relative_to(topo_aux.REPO_ROOT)} --smoke-test",
+        "full_run_dir_exists": bool(full_run_dir.exists()),
+        "smoke_config": smoke_config,
+        "ubuntu_a100_smoke_command": f"python -u training/train_semantic_topology_aux.py --config {Path(smoke_config['path']).relative_to(topo_aux.REPO_ROOT).as_posix()} --smoke-test",
         "training_readiness": readiness,
     }
-    topo_aux._write_json(output_dir / "dataset_isolation.json", dataset_isolation)
+
+    topo_aux._write_json(output_dir / "research_eval_isolation.json", research_eval)
     topo_aux._write_json(output_dir / "target_contract.json", topo_aux.asdict(contract))
     topo_aux._write_json(output_dir / "target_contract_audit.json", contract_audit)
-    topo_aux._write_json(output_dir / "target_composition.json", {k: v for k, v in target_composition.items() if k != "per_sample_rows"})
-    topo_aux._write_csv(output_dir / "target_composition_rows.csv", target_composition["per_sample_rows"])
-    topo_aux._write_json(output_dir / "gradient_contribution.json", gradient_contribution)
+    topo_aux._write_json(output_dir / "target_audit.json", {k: v for k, v in target_audit.items() if k != "rows"})
+    topo_aux._write_csv(output_dir / "target_audit_rows.csv", target_audit["rows"])
+    topo_aux._write_json(output_dir / "gradient_contribution.json", gradient)
     topo_aux._write_json(output_dir / "freeze_mode.json", freeze_mode)
-    topo_aux._write_json(output_dir / "schedule_contract.json", schedule_contract)
+    topo_aux._write_json(output_dir / "schedule_contract.json", schedule)
+    topo_aux._write_json(output_dir / "validation_contract.json", validation_contract)
     topo_aux._write_json(output_dir / "preflight_summary.json", summary)
     return summary
 
@@ -622,8 +585,7 @@ def main() -> None:
 
     cfg = topo_aux._read_yaml(args.config.resolve())
     baseline_cfg = topo_aux._read_yaml(args.baseline_config.resolve())
-    device = torch.device("cpu")
-    summary = run_preflight(cfg=cfg, baseline_cfg=baseline_cfg, output_dir=args.output_dir.resolve(), device=device)
+    summary = run_preflight(cfg=cfg, baseline_cfg=baseline_cfg, output_dir=args.output_dir.resolve(), device=torch.device("cpu"))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

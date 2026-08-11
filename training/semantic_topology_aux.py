@@ -36,16 +36,16 @@ DEFAULT_SEMANTIC_CHECKPOINT = (
 DEFAULT_SEMANTIC_DATASET_ROOT = REPO_ROOT / "datasets" / "converted_full_multiclass"
 DEFAULT_SEMANTIC_TRAIN_SPLIT = REPO_ROOT / "datasets" / "converted_full_multiclass_curated" / "train.txt"
 DEFAULT_SEMANTIC_VAL_SPLIT = REPO_ROOT / "datasets" / "converted_full_multiclass_curated" / "val.txt"
+DEFAULT_SEMANTIC_TEST_SPLIT = REPO_ROOT / "datasets" / "converted_full_multiclass_curated" / "test.txt"
 DEFAULT_INSTANCE_ROOT = REPO_ROOT / "datasets" / "converted_leaflet_instances"
-DEFAULT_RESEARCH_MANIFEST = REPO_ROOT / "training" / "manifests" / "center_full_val_manifest.jsonl"
 DEFAULT_PREP_OUTPUT_DIR = REPO_ROOT / "training" / "analysis" / "semantic_topology_aux_finetune_prep"
 
 
 @dataclass(frozen=True)
 class TopologyTargetContract:
-    boundary_width_px: int
-    separation_width_px: int
+    separation_radius_px: int
     narrow_width_threshold_px: int
+    include_foreground_boundary: bool
     source_split_txt: str
     source_instance_root: str
     selection_rule: str
@@ -220,6 +220,77 @@ def _quantiles(values: np.ndarray | list[float], qs: list[float]) -> dict[str, f
     return {f"p{int(q)}": float(np.percentile(arr, q)) for q in qs}
 
 
+def _compute_separation_channel(instance_mask_u8: np.ndarray, radius_px: int) -> np.ndarray:
+    ids = _positive_instance_ids(instance_mask_u8)
+    h, w = instance_mask_u8.shape[:2]
+    if int(radius_px) <= 0 or len(ids) < 2:
+        return np.zeros((h, w), dtype=np.uint8)
+    union_fg = (instance_mask_u8 > 0).astype(np.uint8)
+    kernel = _ellipse_kernel(int(radius_px))
+    dilations = [cv2.dilate((instance_mask_u8 == int(inst_id)).astype(np.uint8), kernel, iterations=1) for inst_id in ids]
+    coverage = np.zeros((h, w), dtype=np.uint8)
+    for dil in dilations:
+        coverage += (dil > 0).astype(np.uint8)
+    return (((union_fg == 0) & (coverage >= 2))).astype(np.uint8)
+
+
+def _audit_separation_radius_on_masks(
+    instance_masks: list[tuple[str, np.ndarray]],
+    radius_px: int,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    gt2_nonzero = 0
+    gt3_nonzero = 0
+    gt2_total = 0
+    gt3_total = 0
+    applicable_pixels: list[int] = []
+    accidental_connection_samples: list[str] = []
+    for sample_id, inst in instance_masks:
+        gt_count = len(_positive_instance_ids(inst))
+        gaps = _pairwise_gap_distances(inst)
+        sep = _compute_separation_channel(inst, int(radius_px))
+        sep_count = int(np.count_nonzero(sep))
+        has_close_pair = bool(any(float(gap) <= float(2 * radius_px) for gap in gaps))
+        if sep_count > 0:
+            applicable_pixels.append(sep_count)
+        if gt_count == 2:
+            gt2_total += 1
+            if sep_count > 0:
+                gt2_nonzero += 1
+        if gt_count == 3:
+            gt3_total += 1
+            if sep_count > 0:
+                gt3_nonzero += 1
+        if sep_count > 0 and not has_close_pair:
+            accidental_connection_samples.append(sample_id)
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "gt_count": int(gt_count),
+                "separation_positive_pixels": sep_count,
+                "separation_positive_fraction": float(np.mean(sep > 0)),
+                "has_close_pair_within_2r": int(has_close_pair),
+                "accidental_connection": int(sep_count > 0 and not has_close_pair),
+            }
+        )
+    applicable_arr = np.asarray(applicable_pixels, dtype=np.float32)
+    return {
+        "radius_px": int(radius_px),
+        "sample_count": int(len(rows)),
+        "separation_positive_fraction": float(np.mean([float(row["separation_positive_fraction"]) for row in rows])) if rows else 0.0,
+        "gt2_nonzero_separation_count": int(gt2_nonzero),
+        "gt2_nonzero_separation_fraction": float(gt2_nonzero / max(gt2_total, 1)),
+        "gt3_nonzero_separation_count": int(gt3_nonzero),
+        "gt3_nonzero_separation_fraction": float(gt3_nonzero / max(gt3_total, 1)),
+        "applicable_sample_count": int(len(applicable_pixels)),
+        "median_separation_pixels_per_applicable_sample": float(np.median(applicable_arr)) if applicable_arr.size else 0.0,
+        "p95_separation_pixels_per_applicable_sample": float(np.percentile(applicable_arr, 95)) if applicable_arr.size else 0.0,
+        "accidental_connection_sample_count": int(len(accidental_connection_samples)),
+        "accidental_connection_samples": accidental_connection_samples,
+        "rows": rows,
+    }
+
+
 def choose_topology_target_contract(
     *,
     dataset_root: Path,
@@ -231,11 +302,13 @@ def choose_topology_target_contract(
     width_values: list[float] = []
     sample_rows: list[dict[str, Any]] = []
     disconnected_examples = 0
+    instance_masks: list[tuple[str, np.ndarray]] = []
 
     for item in items:
         sample_id = Path(item.image_path).stem
         instance_path = instance_root.resolve() / "instance_masks" / f"{sample_id}.png"
         inst = _read_u8(instance_path)
+        instance_masks.append((sample_id, inst))
         ids = _positive_instance_ids(inst)
         gaps = _pairwise_gap_distances(inst)
         widths = _local_widths(inst)
@@ -259,24 +332,28 @@ def choose_topology_target_contract(
 
     gap_arr = np.asarray(gap_values, dtype=np.float32)
     width_arr = np.asarray(width_values, dtype=np.float32)
-    gap_p10 = float(np.percentile(gap_arr, 10)) if gap_arr.size else 8.0
-    width_p25 = float(np.percentile(width_arr, 25)) if width_arr.size else 8.0
-    width_p20 = float(np.percentile(width_arr, 20)) if width_arr.size else 6.0
-
-    boundary_width_px = int(np.clip(round(min(gap_p10 / 3.0, width_p25 / 4.0)), 2, 4))
-    separation_width_px = int(boundary_width_px)
-    narrow_width_threshold_px = int(np.clip(round(max(width_p20, float(2 * boundary_width_px + 1))), 5, 12))
+    radius8 = _audit_separation_radius_on_masks(instance_masks, radius_px=8)
+    radius6 = _audit_separation_radius_on_masks(instance_masks, radius_px=6)
+    choose_radius_8 = (
+        int(radius8["accidental_connection_sample_count"]) == 0
+        and (
+            float(radius8["gt2_nonzero_separation_fraction"]) + float(radius8["gt3_nonzero_separation_fraction"])
+            >= float(radius6["gt2_nonzero_separation_fraction"]) + float(radius6["gt3_nonzero_separation_fraction"])
+        )
+    )
+    separation_radius_px = 8 if choose_radius_8 else 6
+    narrow_width_threshold_px = 12
 
     contract = TopologyTargetContract(
-        boundary_width_px=int(boundary_width_px),
-        separation_width_px=int(separation_width_px),
+        separation_radius_px=int(separation_radius_px),
         narrow_width_threshold_px=int(narrow_width_threshold_px),
+        include_foreground_boundary=False,
         source_split_txt=str(train_split_txt.resolve()),
         source_instance_root=str(instance_root.resolve()),
         selection_rule=(
-            "boundary_width_px = clamp(round(min(p10_inter_instance_gap/3, p25_local_width/4)), 2, 4); "
-            "separation_width_px = boundary_width_px; "
-            "narrow_width_threshold_px = clamp(round(max(p20_local_width, 2*boundary_width_px+1)), 5, 12)"
+            "Use fixed critical_foreground local width <= 12 px; "
+            "compare separation corridor radius R in {8,6} on train masks only; "
+            "pick R=8 if it has zero accidental distant connections and at least as much GT2+GT3 nonzero-separation coverage as R=6, else pick R=6."
         ),
         train_only=True,
     )
@@ -295,6 +372,10 @@ def choose_topology_target_contract(
             **_quantiles(width_arr, [5, 10, 20, 25, 50, 75, 90, 95]),
         },
         "disconnected_same_leaflet_samples": int(disconnected_examples),
+        "separation_radius_candidates": {
+            "radius_8": {k: v for k, v in radius8.items() if k != "rows"},
+            "radius_6": {k: v for k, v in radius6.items() if k != "rows"},
+        },
         "chosen_contract": asdict(contract),
         "sample_rows": sample_rows,
     }
@@ -310,39 +391,27 @@ def generate_topology_target(
     instance_mask_u8 = instance_mask_u8.astype(np.uint8)
     ids = _positive_instance_ids(instance_mask_u8)
     h, w = instance_mask_u8.shape[:2]
-    union_fg = (instance_mask_u8 > 0).astype(np.uint8)
-
-    boundary = np.zeros((h, w), dtype=np.uint8)
-    separation = np.zeros((h, w), dtype=np.uint8)
-    narrow = np.zeros((h, w), dtype=np.uint8)
-    sep_kernel = _ellipse_kernel(int(contract.separation_width_px))
-
-    inst_masks: dict[int, np.ndarray] = {}
+    critical_foreground = np.zeros((h, w), dtype=np.uint8)
     for inst_id in ids:
         inst01 = (instance_mask_u8 == int(inst_id)).astype(np.uint8)
-        inst_masks[int(inst_id)] = inst01
-        boundary = np.maximum(boundary, _morph_band(inst01, int(contract.boundary_width_px)))
         dt = cv2.distanceTransform(inst01, cv2.DIST_L2, 5).astype(np.float32)
         width_map = 2.0 * dt
-        narrow = np.maximum(
-            narrow,
+        critical_foreground = np.maximum(
+            critical_foreground,
             ((inst01 > 0) & (width_map > 0.0) & (width_map <= float(contract.narrow_width_threshold_px))).astype(np.uint8),
         )
+        if bool(contract.include_foreground_boundary):
+            boundary = _boundary_mask(inst01)
+            critical_foreground = np.maximum(critical_foreground, boundary.astype(np.uint8))
 
-    for idx, left_id in enumerate(ids):
-        left_dil = cv2.dilate(inst_masks[int(left_id)], sep_kernel, iterations=1)
-        for right_id in ids[idx + 1 :]:
-            right_dil = cv2.dilate(inst_masks[int(right_id)], sep_kernel, iterations=1)
-            overlap = ((left_dil > 0) & (right_dil > 0) & (union_fg == 0)).astype(np.uint8)
-            separation = np.maximum(separation, overlap)
+    inter_instance_separation = _compute_separation_channel(instance_mask_u8, int(contract.separation_radius_px))
 
-    target = ((boundary > 0) | (separation > 0) | (narrow > 0)).astype(np.uint8)
+    target = np.stack([critical_foreground.astype(np.uint8), inter_instance_separation.astype(np.uint8)], axis=-1)
     if not return_parts:
         return target
     return target, {
-        "boundary": boundary.astype(np.uint8),
-        "separation": separation.astype(np.uint8),
-        "narrow": narrow.astype(np.uint8),
+        "critical_foreground": critical_foreground.astype(np.uint8),
+        "inter_instance_separation": inter_instance_separation.astype(np.uint8),
     }
 
 
@@ -382,7 +451,7 @@ class SemanticTopologyAuxDataset(Dataset):
         image = _simple_preprocess_uint8_rgb(image)
         image_t = torch.from_numpy(image.transpose(2, 0, 1)).float()
         mask_t = torch.from_numpy(mask.astype(np.uint8)).long()
-        topology_t = torch.from_numpy(topology_target.astype(np.float32))
+        topology_t = torch.from_numpy(topology_target.transpose(2, 0, 1).astype(np.float32))
         return {
             "image": image_t,
             "mask": mask_t,
@@ -435,10 +504,14 @@ class SemanticTopologyAuxLoss(nn.Module):
         topology_target: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         semantic = self.semantic_loss(semantic_logits, semantic_target)
-        topology = self.topology_loss(topology_logits, topology_target)
+        topology_fg = self.topology_loss(topology_logits[:, 0:1], topology_target[:, 0:1])
+        topology_sep = self.topology_loss(topology_logits[:, 1:2], topology_target[:, 1:2])
+        topology = 0.5 * (topology_fg + topology_sep)
         total = semantic + float(self.lambda_topology) * topology
         return {
             "semantic_loss": semantic,
+            "topology_fg_loss": topology_fg,
+            "topology_separation_loss": topology_sep,
             "topology_loss": topology,
             "combined_loss": total,
         }
@@ -450,7 +523,7 @@ class TopologyHead(nn.Module):
         self.block = nn.Sequential(
             nn.Conv2d(int(in_channels), int(hidden_channels), kernel_size=3, padding=1, bias=True),
             nn.ReLU(inplace=True),
-            nn.Conv2d(int(hidden_channels), 1, kernel_size=1, bias=True),
+            nn.Conv2d(int(hidden_channels), 2, kernel_size=1, bias=True),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -939,30 +1012,7 @@ def evaluate_oracle_k_reconstruction(
         "oracle_k_source": "manifest.gt_instance_count",
         "holdout_used": False,
     }
-
-
-def topology_reconstruction_better(candidate: dict[str, Any], best: dict[str, Any] | None) -> bool:
-    if best is None:
-        return True
-    keys = [
-        ("all_iou_ge_0.50", True),
-        ("mean_matched_iou", True),
-        ("gt2_success", True),
-        ("semantic_mean_fg", True),
-        ("epoch", False),
-    ]
-    for key, descending in keys:
-        left = candidate.get(key, None)
-        right = best.get(key, None)
-        if left == right:
-            continue
-        if descending:
-            return float(left) > float(right)
-        return int(left) < int(right)
-    return False
-
-
-def build_validation_contract(research_manifest: Path) -> dict[str, Any]:
+def build_validation_contract(research_eval_split_txt: Path) -> dict[str, Any]:
     return {
         "semantic_metrics": [
             "leaflet_dice",
@@ -982,20 +1032,33 @@ def build_validation_contract(research_manifest: Path) -> dict[str, Any]:
             "gt3_success",
             "topology_failure_classes",
         ],
-        "research_manifest": str(research_manifest.resolve()),
+        "research_eval_name": "semantic_topology_research_eval",
+        "research_eval_split_txt": str(research_eval_split_txt.resolve()),
         "normalizer_method": "centroid_distance_k_normalizer",
+        "post_training_only": True,
         "oracle_k_analysis_only": True,
         "holdout_used": False,
-        "checkpoint_rules": {
-            "best_mean_fg.pth": "highest semantic mean_dice_fg",
-            "best_topology_reconstruction.pth": [
-                "highest all_iou_ge_0.50",
-                "higher mean_matched_iou",
-                "higher gt2_success",
-                "higher semantic_mean_fg",
-                "earlier epoch",
-            ],
-        },
+        "checkpoint_rules": {"best_mean_fg.pth": "highest semantic mean_dice_fg"},
+        "prohibited_training_uses": [
+            "optimizer",
+            "scheduler",
+            "early_stopping",
+            "checkpoint_selection",
+            "lambda_selection",
+            "target_parameter_selection",
+        ],
+        "compare_checkpoints": [
+            {
+                "label": "baseline_semantic",
+                "checkpoint_path": str(DEFAULT_SEMANTIC_CHECKPOINT.resolve()),
+                "checkpoint_sha256": _sha256_file(DEFAULT_SEMANTIC_CHECKPOINT.resolve()),
+            },
+            {
+                "label": "topology_aux_best_mean_fg",
+                "checkpoint_path": "training/runs/unetpp_effb3_semantic_topology_aux_finetune_100ep/best_mean_fg.pth",
+                "checkpoint_sha256": None,
+            },
+        ],
     }
 
 
@@ -1011,19 +1074,14 @@ def build_visual_target_audit(
     items = read_split_file(dataset_root.resolve(), train_split_txt.resolve())
     rows: list[dict[str, Any]] = []
 
-    def _overlay(rgb: np.ndarray, target01: np.ndarray) -> np.ndarray:
-        out = rgb.copy().astype(np.float32)
-        mask = target01.astype(bool)
-        out[mask] = out[mask] * 0.45 + np.asarray([255.0, 0.0, 0.0], dtype=np.float32) * 0.55
-        return out.astype(np.uint8)
-
     candidates: dict[str, tuple[float, str]] = {
         "gt1": (float("-inf"), ""),
-        "gt2": (float("-inf"), ""),
-        "gt3": (float("-inf"), ""),
+        "gt2_close_neighbors": (float("-inf"), ""),
+        "gt3_close_neighbors": (float("-inf"), ""),
         "narrow_leaflet": (float("-inf"), ""),
         "close_neighbors": (float("-inf"), ""),
         "disconnected_same_leaflet": (float("-inf"), ""),
+        "no_separation_target": (float("-inf"), ""),
     }
 
     for item in items:
@@ -1039,18 +1097,21 @@ def build_visual_target_audit(
         disconnected = int(any(int(v) > 1 for v in comp_counts.values()))
         narrow_score = -float(np.percentile(widths, 10)) if widths.size else 0.0
         close_score = -float(min(gaps)) if gaps else 0.0
+        sep_fraction = float(np.mean(parts["inter_instance_separation"] > 0))
         if gt_count == 1 and narrow_score > candidates["gt1"][0]:
             candidates["gt1"] = (narrow_score, sample_id)
-        if gt_count == 2 and close_score > candidates["gt2"][0]:
-            candidates["gt2"] = (close_score, sample_id)
-        if gt_count == 3 and close_score > candidates["gt3"][0]:
-            candidates["gt3"] = (close_score, sample_id)
+        if gt_count == 2 and close_score > candidates["gt2_close_neighbors"][0]:
+            candidates["gt2_close_neighbors"] = (close_score, sample_id)
+        if gt_count == 3 and close_score > candidates["gt3_close_neighbors"][0]:
+            candidates["gt3_close_neighbors"] = (close_score, sample_id)
         if narrow_score > candidates["narrow_leaflet"][0]:
             candidates["narrow_leaflet"] = (narrow_score, sample_id)
         if close_score > candidates["close_neighbors"][0]:
             candidates["close_neighbors"] = (close_score, sample_id)
         if disconnected > 0 and float(disconnected) > candidates["disconnected_same_leaflet"][0]:
             candidates["disconnected_same_leaflet"] = (float(disconnected), sample_id)
+        if sep_fraction == 0.0 and float(-gt_count) > candidates["no_separation_target"][0]:
+            candidates["no_separation_target"] = (float(-gt_count), sample_id)
         rows.append(
             {
                 "sample_id": sample_id,
@@ -1058,7 +1119,8 @@ def build_visual_target_audit(
                 "pair_gap_min_px": float(min(gaps)) if gaps else None,
                 "local_width_p10_px": float(np.percentile(widths, 10)) if widths.size else None,
                 "disconnected_same_leaflet": int(disconnected),
-                "target_fraction": float(np.mean(target > 0)),
+                "critical_foreground_fraction": float(np.mean(parts["critical_foreground"] > 0)),
+                "inter_instance_separation_fraction": sep_fraction,
             }
         )
 
@@ -1073,21 +1135,38 @@ def build_visual_target_audit(
         instance_mask = _center_crop_like_validation(_read_u8(instance_root.resolve() / "instance_masks" / f"{sample_id}.png"), 768, 768, is_mask=True)
         target, parts = generate_topology_target(instance_mask, contract, return_parts=True)
         gt_leaflet = (semantic_mask == 1).astype(np.uint8)
-        overlay = _overlay(image, target)
+        critical_fg = parts["critical_foreground"].astype(np.uint8)
+        separation = parts["inter_instance_separation"].astype(np.uint8)
+        overlay = image.copy().astype(np.float32)
+        overlay[critical_fg > 0] = overlay[critical_fg > 0] * 0.45 + np.asarray([255.0, 0.0, 0.0], dtype=np.float32) * 0.55
+        overlay[separation > 0] = overlay[separation > 0] * 0.35 + np.asarray([0.0, 255.0, 255.0], dtype=np.float32) * 0.65
+        overlay = overlay.astype(np.uint8)
         semantic_rgb = np.zeros((gt_leaflet.shape[0], gt_leaflet.shape[1], 3), dtype=np.uint8)
         semantic_rgb[gt_leaflet > 0] = np.asarray([0, 255, 0], dtype=np.uint8)
-        target_rgb = np.zeros_like(semantic_rgb)
-        target_rgb[parts["boundary"] > 0] = np.asarray([255, 255, 0], dtype=np.uint8)
-        target_rgb[parts["separation"] > 0] = np.asarray([255, 0, 255], dtype=np.uint8)
-        target_rgb[parts["narrow"] > 0] = np.asarray([255, 0, 0], dtype=np.uint8)
+        critical_rgb = np.zeros_like(semantic_rgb)
+        critical_rgb[critical_fg > 0] = np.asarray([255, 0, 0], dtype=np.uint8)
+        separation_rgb = np.zeros_like(semantic_rgb)
+        separation_rgb[separation > 0] = np.asarray([0, 255, 255], dtype=np.uint8)
+        combined_rgb = np.zeros_like(semantic_rgb)
+        combined_rgb[critical_fg > 0] = np.asarray([255, 0, 0], dtype=np.uint8)
+        combined_rgb[separation > 0] = np.asarray([0, 255, 255], dtype=np.uint8)
         inst_vis = cv2.applyColorMap(((instance_mask.astype(np.float32) / max(float(instance_mask.max()), 1.0)) * 255.0 + 0.5).astype(np.uint8), cv2.COLORMAP_TURBO)
-        panel_top = np.concatenate([cv2.cvtColor(image, cv2.COLOR_RGB2BGR), cv2.cvtColor(semantic_rgb, cv2.COLOR_RGB2BGR)], axis=1)
-        panel_bottom = np.concatenate([inst_vis, cv2.cvtColor(target_rgb, cv2.COLOR_RGB2BGR), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)], axis=1)
-        if panel_bottom.shape[1] != panel_top.shape[1]:
-            pad_w = panel_bottom.shape[1] - panel_top.shape[1]
-            if pad_w > 0:
-                pad = np.zeros((panel_top.shape[0], pad_w, 3), dtype=np.uint8)
-                panel_top = np.concatenate([panel_top, pad], axis=1)
+        panel_top = np.concatenate(
+            [
+                cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+                inst_vis,
+                cv2.cvtColor(semantic_rgb, cv2.COLOR_RGB2BGR),
+            ],
+            axis=1,
+        )
+        panel_bottom = np.concatenate(
+            [
+                cv2.cvtColor(critical_rgb, cv2.COLOR_RGB2BGR),
+                cv2.cvtColor(separation_rgb, cv2.COLOR_RGB2BGR),
+                cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR),
+            ],
+            axis=1,
+        )
         grid = np.concatenate([panel_top, panel_bottom], axis=0)
         out_path = output_dir / f"{category}_{sample_id}.png"
         cv2.imwrite(str(out_path), grid)
@@ -1247,7 +1326,7 @@ def prepare_experiment(
     dataset_root = _resolve_repo_path(dataset_cfg.get("root", DEFAULT_SEMANTIC_DATASET_ROOT), DEFAULT_SEMANTIC_DATASET_ROOT)
     train_split_txt = _resolve_repo_path(dataset_cfg.get("train_txt", DEFAULT_SEMANTIC_TRAIN_SPLIT), DEFAULT_SEMANTIC_TRAIN_SPLIT)
     instance_root = _resolve_repo_path(dataset_cfg.get("instance_root", DEFAULT_INSTANCE_ROOT), DEFAULT_INSTANCE_ROOT)
-    research_manifest = _resolve_repo_path(dataset_cfg.get("research_val_manifest", DEFAULT_RESEARCH_MANIFEST), DEFAULT_RESEARCH_MANIFEST)
+    research_eval_split_txt = _resolve_repo_path(dataset_cfg.get("research_eval_split_txt", DEFAULT_SEMANTIC_TEST_SPLIT), DEFAULT_SEMANTIC_TEST_SPLIT)
 
     contract, target_audit = choose_topology_target_contract(
         dataset_root=dataset_root,
@@ -1260,7 +1339,7 @@ def prepare_experiment(
     for row in sample_rows:
         sample_id = str(row["sample_id"])
         target = generate_topology_target(_read_u8(instance_root / "instance_masks" / f"{sample_id}.png"), contract)
-        frac = float(np.mean(target > 0))
+        frac = float(np.mean(np.any(target > 0, axis=-1)))
         target_rows.append({**row, "topology_target_fraction": frac})
         target_fractions.append(frac)
     target_audit["topology_target_fraction"] = {
@@ -1298,7 +1377,7 @@ def prepare_experiment(
         "current_semantic_checkpoint": checkpoint_info,
         "baseline_trainable_modules": "full model trainable in training/train.py semantic fine-tuning path",
     }
-    validation_contract = build_validation_contract(research_manifest)
+    validation_contract = build_validation_contract(research_eval_split_txt)
     readiness = {
         "status": "prep_complete_pending_preflight"
         if (

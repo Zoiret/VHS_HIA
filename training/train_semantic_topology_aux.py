@@ -380,17 +380,11 @@ def train(cfg: dict[str, object], device: torch.device) -> None:
                     "leaflet_iou",
                     "ring_dice",
                     "ring_iou",
-                    "oracle_exact_k",
-                    "oracle_mean_matched_iou",
-                    "oracle_all_iou_ge_0.50",
-                    "oracle_gt2_success",
-                    "oracle_gt3_success",
                     "epoch_time_sec",
                 ]
             )
 
     best_mean_fg = None
-    best_topology = None
     es_cfg = cfg.get("early_stopping", None)
     es_enabled = isinstance(es_cfg, dict) and bool(es_cfg)
     es_monitor = str(es_cfg.get("monitor", "mean_dice_fg")).strip() if es_enabled else None
@@ -398,8 +392,6 @@ def train(cfg: dict[str, object], device: torch.device) -> None:
     es_patience = int(es_cfg.get("patience", 20)) if es_enabled else 0
     es_best = None
     es_bad_epochs = 0
-    research_manifest = topo_aux._resolve_repo_path(dataset_cfg.get("research_val_manifest", topo_aux.DEFAULT_RESEARCH_MANIFEST), topo_aux.DEFAULT_RESEARCH_MANIFEST)
-    research_image_root = topo_aux._resolve_repo_path(dataset_cfg.get("research_image_root", topo_aux.DEFAULT_INSTANCE_ROOT), topo_aux.DEFAULT_INSTANCE_ROOT)
     for epoch in range(1, epochs + 1):
         epoch_t0 = time.perf_counter()
         topo_aux.set_train_modes(model, freeze_info)
@@ -426,13 +418,6 @@ def train(cfg: dict[str, object], device: torch.device) -> None:
                 pbar.set_postfix(loss=f"{running_loss / max(n_batches, 1):.6f}")
 
         semantic_metrics = topo_aux.compute_semantic_metrics(model, val_loader, device, loss_fn, use_amp)
-        topology_metrics = topo_aux.evaluate_oracle_k_reconstruction(
-            model,
-            manifest_path=research_manifest,
-            image_root=research_image_root,
-            device=device,
-            use_amp=use_amp,
-        )
         epoch_time = time.perf_counter() - epoch_t0
         topo_aux.save_checkpoint(
             out_dir / "last.pth",
@@ -443,7 +428,6 @@ def train(cfg: dict[str, object], device: torch.device) -> None:
             extra={
                 "checkpoint_type": "last",
                 "semantic_metrics": semantic_metrics,
-                "topology_metrics": topology_metrics,
                 "checkpoint_init": checkpoint_info,
                 "optimizer_groups": optimizer_meta,
             },
@@ -461,33 +445,7 @@ def train(cfg: dict[str, object], device: torch.device) -> None:
                 extra={
                     "checkpoint_type": "semantic",
                     "semantic_metrics": semantic_metrics,
-                    "topology_metrics": topology_metrics,
                     "research_only": False,
-                },
-            )
-
-        candidate_topology = {
-            "epoch": int(epoch),
-            "all_iou_ge_0.50": float(topology_metrics["all_iou_ge_0.50"]),
-            "mean_matched_iou": float(topology_metrics["mean_matched_iou"]),
-            "gt2_success": float(topology_metrics["gt2_success"]),
-            "semantic_mean_fg": float(semantic_metrics["mean_dice_fg"]),
-        }
-        if topo_aux.topology_reconstruction_better(candidate_topology, best_topology):
-            best_topology = candidate_topology
-            topo_aux.save_checkpoint(
-                out_dir / "best_topology_reconstruction.pth",
-                model,
-                optimizer,
-                epoch,
-                cfg,
-                extra={
-                    "checkpoint_type": "experimental_topology_reconstruction",
-                    "semantic_metrics": semantic_metrics,
-                    "topology_metrics": topology_metrics,
-                    "research_only": True,
-                    "normalizer_method": "centroid_distance_k_normalizer",
-                    "oracle_k_source": "manifest.gt_instance_count",
                 },
             )
 
@@ -545,11 +503,6 @@ def train(cfg: dict[str, object], device: torch.device) -> None:
                     float(semantic_metrics["leaflet_iou"]),
                     float(semantic_metrics["ring_dice"]),
                     float(semantic_metrics["ring_iou"]),
-                    float(topology_metrics["exact_k"]),
-                    float(topology_metrics["mean_matched_iou"]),
-                    float(topology_metrics["all_iou_ge_0.50"]),
-                    float(topology_metrics["gt2_success"]),
-                    float(topology_metrics["gt3_success"]),
                     float(epoch_time),
                 ]
             )
@@ -558,9 +511,8 @@ def train(cfg: dict[str, object], device: torch.device) -> None:
                 {
                     "epoch": epoch,
                     "semantic_mean_dice_fg": semantic_metrics["mean_dice_fg"],
-                    "oracle_all_iou_ge_0.50": topology_metrics["all_iou_ge_0.50"],
-                    "oracle_gt2_success": topology_metrics["gt2_success"],
-                    "oracle_gt3_success": topology_metrics["gt3_success"],
+                    "leaflet_dice": semantic_metrics["leaflet_dice"],
+                    "ring_dice": semantic_metrics["ring_dice"],
                 },
                 ensure_ascii=False,
             )
