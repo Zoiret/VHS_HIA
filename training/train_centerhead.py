@@ -843,9 +843,8 @@ def _forward_center_with_precision(
     return_details: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | dict, dict]:
     decoder_features = decoder_output.detach() if bool(detach_decoder_output) else decoder_output
-    decoder_features = model.resolve_center_features(decoder_features)
-    if center_fp32:
-        decoder_features = decoder_features.float()
+    requested_center_feature_dtype = torch.float32 if bool(center_fp32) else None
+    decoder_features = model.resolve_center_features(decoder_features, feature_dtype=requested_center_feature_dtype)
     center_autocast_enabled = bool(amp_enabled_global and (not center_fp32))
     with _autocast_ctx(device, enabled=center_autocast_enabled):
         center_logits = model.forward_center_from_features(decoder_features)
@@ -861,12 +860,19 @@ def _forward_center_with_precision(
         "center_fp32": bool(center_fp32),
         "center_autocast_enabled": bool(center_autocast_enabled),
         "center_grad_scaler_enabled": bool(center_autocast_enabled),
+        "decoder_output_dtype_before_center_boundary": _dtype_name(decoder_output),
         "decoder_features_dtype": _dtype_name(decoder_features),
         "decoder_features_shape": list(decoder_features.shape) if torch.is_tensor(decoder_features) else None,
         "center_logits_dtype": _dtype_name(center_logits),
         "center_logits_shape": list(center_logits.shape) if torch.is_tensor(center_logits) else None,
         "center_loss_dtype": _dtype_name(center_loss),
         "center_feature_capture_info": dict(getattr(model, "center_feature_capture_info", lambda: {})() or {}),
+        "center_feature_resolve_info": dict(getattr(model, "_last_center_resolve_info", {}) or {}),
+        "center_primary_projection_weight_dtype": _dtype_name(getattr(getattr(model, "center_primary_projection", None), "weight", None)),
+        "center_context_projection_weight_dtype": _dtype_name(getattr(getattr(model, "center_context_projection", None), "weight", None)),
+        "center_fusion_adapter_weight_dtype": _dtype_name(getattr(getattr(getattr(model, "center_fusion_adapter", None), "__getitem__", lambda *_args, **_kwargs: None)(0) if getattr(model, "center_fusion_adapter", None) is not None else None, "weight", None)),
+        "center_adapter_weight_dtype": _dtype_name(getattr(getattr(model, "center_adapter", None), "weight", None)),
+        "center_head_output_weight_dtype": _dtype_name(getattr(model.center_head_output_layer(), "weight", None)),
     }
     return decoder_features, center_logits, payload, precision_info
 

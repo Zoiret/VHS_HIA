@@ -115,6 +115,7 @@ class UnetPlusPlusSemanticCenterHead(torch.nn.Module):
         self._captured_center_features: dict[str, torch.Tensor | None] = {}
         self._captured_center_feature_call_counts: dict[str, int] = {}
         self._decoder_capture_paths: dict[str, str] = {}
+        self._last_center_resolve_info: dict[str, object] = {}
 
         if self.center_feature_module_path is not None and self.center_feature_expected_channels is None:
             raise ValueError("center_feature.expected_channels is required when center_feature.module_path is set")
@@ -250,6 +251,7 @@ class UnetPlusPlusSemanticCenterHead(torch.nn.Module):
         for path in list(self._decoder_capture_paths):
             self._captured_center_features[str(path)] = None
             self._captured_center_feature_call_counts[str(path)] = 0
+        self._last_center_resolve_info = {}
 
     def close_center_feature_hooks(self) -> None:
         return None
@@ -312,11 +314,29 @@ class UnetPlusPlusSemanticCenterHead(torch.nn.Module):
             "primary_projection_out_channels": self.primary_projection_out_channels,
             "fusion_method": self.fusion_method,
             "fusion_out_channels": self.fusion_out_channels,
+            "last_resolve_info": dict(self._last_center_resolve_info),
         }
 
-    def resolve_center_features(self, decoder_output: torch.Tensor) -> torch.Tensor:
+    def resolve_center_features(self, decoder_output: torch.Tensor, *, feature_dtype: torch.dtype | None = None) -> torch.Tensor:
+        self._last_center_resolve_info = {
+            "requested_feature_dtype": str(feature_dtype).replace("torch.", "") if feature_dtype is not None else None,
+            "decoder_output_input_dtype": str(decoder_output.dtype).replace("torch.", "") if torch.is_tensor(decoder_output) else None,
+            "primary_before_dtype": None,
+            "primary_after_dtype": None,
+            "context_before_dtype": None,
+            "context_after_dtype": None,
+            "projection_weight_dtype": str(self.center_primary_projection.weight.dtype).replace("torch.", "") if self.center_primary_projection is not None else None,
+            "context_projection_weight_dtype": str(self.center_context_projection.weight.dtype).replace("torch.", "") if self.center_context_projection is not None else None,
+            "fusion_adapter_weight_dtype": str(self.center_fusion_adapter[0].weight.dtype).replace("torch.", "") if self.center_fusion_adapter is not None else None,
+            "center_adapter_weight_dtype": str(self.center_adapter.weight.dtype).replace("torch.", "") if self.center_adapter is not None else None,
+            "center_head_weight_dtype": str(self.center_head_output_layer().weight.dtype).replace("torch.", "") if hasattr(self.center_head_output_layer(), "weight") and self.center_head_output_layer().weight is not None else None,
+        }
         if self.center_feature_module_path is None:
-            return decoder_output
+            resolved = decoder_output.to(dtype=feature_dtype) if feature_dtype is not None else decoder_output
+            self._last_center_resolve_info["primary_before_dtype"] = str(decoder_output.dtype).replace("torch.", "") if torch.is_tensor(decoder_output) else None
+            self._last_center_resolve_info["primary_after_dtype"] = str(resolved.dtype).replace("torch.", "") if torch.is_tensor(resolved) else None
+            self._last_center_resolve_info["resolved_output_dtype"] = str(resolved.dtype).replace("torch.", "") if torch.is_tensor(resolved) else None
+            return resolved
         if int(self._captured_center_feature_call_counts.get(str(self.center_feature_module_path), 0)) != 1:
             raise RuntimeError(
                 f"Configured center feature capture must occur exactly once for {self.center_feature_module_path}; "
@@ -325,12 +345,17 @@ class UnetPlusPlusSemanticCenterHead(torch.nn.Module):
         feat = self._captured_center_features.get(str(self.center_feature_module_path))
         if not torch.is_tensor(feat):
             raise RuntimeError(f"Configured center feature tensor missing for {self.center_feature_module_path}")
+        self._last_center_resolve_info["primary_before_dtype"] = str(feat.dtype).replace("torch.", "")
         if self.center_feature_expected_channels is not None and int(feat.shape[1]) != int(self.center_feature_expected_channels):
             raise RuntimeError(
                 f"Captured center feature channels mismatch for {self.center_feature_module_path}: "
                 f"expected {int(self.center_feature_expected_channels)}, got {int(feat.shape[1])}"
             )
+        if feature_dtype is not None:
+            feat = feat.to(dtype=feature_dtype)
+        self._last_center_resolve_info["primary_after_dtype"] = str(feat.dtype).replace("torch.", "")
         if not self.multiscale_enabled:
+            self._last_center_resolve_info["resolved_output_dtype"] = str(feat.dtype).replace("torch.", "")
             return feat
         if int(self._captured_center_feature_call_counts.get(str(self.context_feature_module_path), 0)) != 1:
             raise RuntimeError(
@@ -340,11 +365,15 @@ class UnetPlusPlusSemanticCenterHead(torch.nn.Module):
         context_feat = self._captured_center_features.get(str(self.context_feature_module_path))
         if not torch.is_tensor(context_feat):
             raise RuntimeError(f"Configured context feature tensor missing for {self.context_feature_module_path}")
+        self._last_center_resolve_info["context_before_dtype"] = str(context_feat.dtype).replace("torch.", "")
         if self.context_feature_expected_channels is not None and int(context_feat.shape[1]) != int(self.context_feature_expected_channels):
             raise RuntimeError(
                 f"Captured context feature channels mismatch for {self.context_feature_module_path}: "
                 f"expected {int(self.context_feature_expected_channels)}, got {int(context_feat.shape[1])}"
             )
+        if feature_dtype is not None:
+            context_feat = context_feat.to(dtype=feature_dtype)
+        self._last_center_resolve_info["context_after_dtype"] = str(context_feat.dtype).replace("torch.", "")
         primary_proj = self.center_primary_projection(feat)
         context_proj = self.center_context_projection(context_feat)
         if list(context_proj.shape[-2:]) != list(primary_proj.shape[-2:]):
@@ -352,7 +381,9 @@ class UnetPlusPlusSemanticCenterHead(torch.nn.Module):
         if self.fusion_method != "concat":
             raise RuntimeError(f"Unsupported fusion method at runtime: {self.fusion_method}")
         fused = torch.cat([primary_proj, context_proj], dim=1)
-        return self.center_fusion_adapter(fused)
+        resolved = self.center_fusion_adapter(fused)
+        self._last_center_resolve_info["resolved_output_dtype"] = str(resolved.dtype).replace("torch.", "")
+        return resolved
 
     def upsample_center_logits(self, center_logits: torch.Tensor) -> torch.Tensor:
         if not bool(self.center_feature_upsample_logits_to_target):
