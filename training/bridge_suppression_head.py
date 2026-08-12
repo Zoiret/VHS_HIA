@@ -1,0 +1,1042 @@
+from __future__ import annotations
+
+import contextlib
+import csv
+import hashlib
+import json
+import math
+import random
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+except ModuleNotFoundError as e:
+    raise SystemExit(
+        "PyTorch is not installed. Install training deps with:\n"
+        "  py -m pip install -r requirements-train.txt"
+    ) from e
+
+import audit_semantic_soft_logit_recoverability as soft_audit
+import evaluate_semantic_topology_aux_postrun as postrun
+import leaflet_oracle_count_geometric_split_audit as base_audit
+import leaflet_oracle_count_geometric_split_forensic as forensic
+import semantic_topology_aux as topo_aux
+from dataset import read_split_file
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SEMANTIC_CONFIG = REPO_ROOT / "training" / "configs" / "unetpp_effb3_semantic_topology_aux_finetune_100ep.yaml"
+DEFAULT_SEMANTIC_CHECKPOINT = (
+    REPO_ROOT / "training" / "runs" / "unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep" / "best_mean_fg.pth"
+)
+DEFAULT_TRAIN_SPLIT = REPO_ROOT / "datasets" / "converted_full_multiclass_curated" / "train.txt"
+DEFAULT_VAL_SPLIT = REPO_ROOT / "datasets" / "converted_full_multiclass_curated" / "val.txt"
+DEFAULT_TEST_SPLIT = REPO_ROOT / "datasets" / "converted_full_multiclass_curated" / "test.txt"
+DEFAULT_DATASET_ROOT = REPO_ROOT / "datasets" / "converted_full_multiclass"
+DEFAULT_INSTANCE_ROOT = REPO_ROOT / "datasets" / "converted_leaflet_instances"
+MICRO_MANIFEST_PATH = REPO_ROOT / "training" / "manifests" / "bridge_suppression_micro_overfit_manifest.json"
+PROHIBITED_PATH_SUBSTRINGS = ("center_full_val_manifest.jsonl", "authoritative_106_holdout", "holdout")
+LOCKED_CANDIDATE_THRESHOLD = 0.50
+BRIDGE_REMOVE_THRESHOLD = 0.50
+MICROSET_POSITIVE_TARGET = 8
+MICROSET_NEGATIVE_TARGET = 2
+
+
+@dataclass(frozen=True)
+class SplitAudit:
+    split_path: str
+    sample_count: int
+    patient_count: int
+    gt1: int
+    gt2: int
+    gt3: int
+    bridge_positive_samples: int
+    sample_overlap_with_train: int
+    patient_overlap_with_train: int
+    instance_mask_available: int
+    gt_instance_count_available: int
+
+
+def _resolve_repo_path(path_like: str | Path | None, default: Path) -> Path:
+    if path_like is None:
+        return default.resolve()
+    path = Path(path_like)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.resolve()
+
+
+def _assert_safe_path(path: Path) -> None:
+    text = str(path).replace("\\", "/").lower()
+    for token in PROHIBITED_PATH_SUBSTRINGS:
+        if token.lower() in text:
+            raise SystemExit(f"Prohibited path detected in bridge suppression preparation: {path}")
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+    except ModuleNotFoundError as e:
+        raise SystemExit(
+            "PyYAML is not installed. Install training deps with:\n"
+            "  py -m pip install -r requirements-train.txt"
+        ) from e
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit(f"Expected YAML dict at {path}")
+    return data
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key) for key in fieldnames})
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _seed_everything(seed: int) -> None:
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+    torch.manual_seed(int(seed))
+    torch.cuda.manual_seed_all(int(seed))
+
+
+def _amp_enabled(cfg: dict[str, Any], device: torch.device) -> bool:
+    train_cfg = cfg.get("train") or {}
+    v = train_cfg.get("amp", None)
+    if v is None:
+        return device.type == "cuda"
+    return bool(v) and device.type == "cuda"
+
+
+def _autocast_ctx(device: torch.device, enabled: bool):
+    if device.type == "cuda" and bool(enabled):
+        return torch.amp.autocast("cuda", enabled=True)
+    return contextlib.nullcontext()
+
+
+def _select_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _make_grad_scaler(device: torch.device, enabled: bool):
+    if device.type == "cuda" and bool(enabled):
+        return torch.amp.GradScaler("cuda")
+    return None
+
+
+def _make_patient_id(sample_id: str) -> str:
+    parts = str(sample_id).split("_")
+    if len(parts) >= 2:
+        return f"{parts[0]}_{parts[1]}"
+    return str(sample_id)
+
+
+def _connected_components(mask01: np.ndarray) -> tuple[np.ndarray, int]:
+    n, labels = cv2.connectedComponents(mask01.astype(np.uint8), connectivity=8)
+    return labels.astype(np.int32), max(int(n) - 1, 0)
+
+
+def _mask_rgb(mask01: np.ndarray, color: tuple[int, int, int]) -> np.ndarray:
+    out = np.zeros(mask01.shape + (3,), dtype=np.uint8)
+    out[mask01.astype(bool)] = np.asarray(color, dtype=np.uint8)
+    return out
+
+
+def _instance_rgb(labels_u8: np.ndarray) -> np.ndarray:
+    palette = np.asarray(
+        [
+            [0, 0, 0],
+            [230, 57, 70],
+            [29, 153, 243],
+            [38, 166, 154],
+            [255, 183, 3],
+            [171, 71, 188],
+            [240, 98, 146],
+        ],
+        dtype=np.uint8,
+    )
+    out = np.zeros(labels_u8.shape + (3,), dtype=np.uint8)
+    for label in np.unique(labels_u8):
+        idx = int(label)
+        if idx <= 0:
+            continue
+        out[labels_u8 == idx] = palette[idx % len(palette)]
+    return out
+
+
+def _probability_heatmap_rgb(p_leaf: np.ndarray) -> np.ndarray:
+    scaled = np.clip(np.round(p_leaf * 255.0), 0, 255).astype(np.uint8)
+    return cv2.cvtColor(cv2.applyColorMap(scaled, cv2.COLORMAP_VIRIDIS), cv2.COLOR_BGR2RGB)
+
+
+def _panel(title: str, image_rgb: np.ndarray) -> np.ndarray:
+    canvas = np.full((image_rgb.shape[0] + 36, image_rgb.shape[1], 3), 18, dtype=np.uint8)
+    canvas[36:, :, :] = image_rgb
+    cv2.putText(canvas, title, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, lineType=cv2.LINE_AA)
+    return cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
+
+
+def _save_visual_grid(
+    *,
+    out_path: Path,
+    image_rgb: np.ndarray,
+    gt_inst_u8: np.ndarray,
+    p_leaf: np.ndarray,
+    candidate_mask01: np.ndarray,
+    bridge_target01: np.ndarray,
+    candidate_minus_oracle01: np.ndarray,
+    reconstructed_u8: np.ndarray,
+) -> str:
+    panels = [
+        _panel("RGB", image_rgb),
+        _panel("GT Instances", _instance_rgb(gt_inst_u8)),
+        _panel("P(leaflet)", _probability_heatmap_rgb(p_leaf)),
+        _panel("P>=0.50 Candidate", _mask_rgb(candidate_mask01, (255, 255, 255))),
+        _panel("FALSE_BRIDGE_PIXELS", _mask_rgb(bridge_target01, (255, 255, 255))),
+        _panel("Candidate Minus Oracle Bridge", _mask_rgb(candidate_minus_oracle01, (255, 255, 255))),
+        _panel("Reconstructed Instances", _instance_rgb(reconstructed_u8)),
+    ]
+    filler = np.full_like(panels[0], 18)
+    row1 = np.concatenate(panels[:4], axis=1)
+    row2 = np.concatenate([panels[4], panels[5], panels[6], filler], axis=1)
+    grid = np.concatenate([row1, row2], axis=0)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_path), grid)
+    return str(out_path.resolve())
+
+
+def false_bridge_pixels_from_candidate(
+    *,
+    gt_sem_u8: np.ndarray,
+    gt_inst_u8: np.ndarray,
+    candidate_mask01: np.ndarray,
+) -> np.ndarray:
+    bridge_component = soft_audit._bridge_component_mask(gt_inst_u8.astype(np.uint8), candidate_mask01.astype(np.uint8))
+    false_leaflet = ((gt_sem_u8 != 1) & (candidate_mask01 > 0)).astype(np.uint8)
+    return ((false_leaflet > 0) & (bridge_component > 0)).astype(np.uint8)
+
+
+def candidate_p50_mask_from_probs(p_leaf: np.ndarray) -> np.ndarray:
+    return (p_leaf >= float(LOCKED_CANDIDATE_THRESHOLD)).astype(np.uint8)
+
+
+def refine_candidate_with_bridge_probs(candidate_mask01: np.ndarray, bridge_probs: np.ndarray, threshold: float = BRIDGE_REMOVE_THRESHOLD) -> np.ndarray:
+    remove01 = (bridge_probs >= float(threshold)).astype(np.uint8)
+    return ((candidate_mask01 > 0) & (remove01 == 0)).astype(np.uint8)
+
+
+def run_locked_reconstruction(pred_leaf01: np.ndarray, gt_inst_u8: np.ndarray) -> dict[str, Any]:
+    gt_k = int(len(topo_aux._positive_instance_ids(gt_inst_u8.astype(np.uint8))))
+    normalized = postrun.run_locked_normalization(pred_leaf01.astype(np.uint8), gt_k)
+    pred_inst = normalized["labels"].astype(np.uint8)
+    metrics = base_audit.compute_detailed_instance_metrics(gt_inst_u8.astype(np.uint8), pred_inst, gt_k=gt_k, pred_k=int(normalized["final_group_count"]))
+    topology = forensic.classify_semantic_topology(gt_inst_u8.astype(np.uint8), pred_leaf01.astype(np.uint8))
+    return {
+        "gt_k": gt_k,
+        "pred_k": int(normalized["final_group_count"]),
+        "labels": pred_inst,
+        "metrics": metrics,
+        "topology": topology,
+    }
+
+
+class ContextProjection(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int = 8) -> None:
+        super().__init__()
+        self.proj = nn.Conv2d(int(in_channels), int(out_channels), kernel_size=1, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(x)
+
+
+class BridgeSuppressionHead(nn.Module):
+    def __init__(self, in_channels: int, hidden_channels: int = 16) -> None:
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(int(in_channels), int(hidden_channels), kernel_size=3, padding=1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(int(hidden_channels), 1, kernel_size=1, bias=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
+class FrozenSemanticBridgeSuppressionModel(nn.Module):
+    def __init__(
+        self,
+        *,
+        encoder_name: str,
+        encoder_weights: str | None,
+        in_channels: int,
+        classes: int,
+        context_channels_out: int = 8,
+        bridge_hidden_channels: int = 16,
+    ) -> None:
+        super().__init__()
+        try:
+            import segmentation_models_pytorch as smp
+        except ModuleNotFoundError as e:
+            raise SystemExit(
+                "segmentation-models-pytorch is not installed. Install training deps with:\n"
+                "  py -m pip install -r requirements-train.txt"
+            ) from e
+
+        self.base = smp.UnetPlusPlus(
+            encoder_name=str(encoder_name),
+            encoder_weights=encoder_weights,
+            in_channels=int(in_channels),
+            classes=int(classes),
+        )
+        self._tap_paths = ["base.decoder.blocks.x_0_4", "base.decoder.blocks.x_2_2"]
+        self._tap_outputs: dict[str, torch.Tensor] = {}
+        modules = dict(self.named_modules())
+        for path in self._tap_paths:
+            module = modules.get(path, None)
+            if module is None:
+                raise RuntimeError(f"Feature tap module not found: {path}")
+            module.register_forward_hook(self._make_tap_hook(path))
+
+        x04_mod = modules["base.decoder.blocks.x_0_4"]
+        x22_mod = modules["base.decoder.blocks.x_2_2"]
+        x04_channels = int(self._infer_out_channels(x04_mod))
+        x22_channels = int(self._infer_out_channels(x22_mod))
+        self.x_0_4_channels = x04_channels
+        self.x_2_2_channels = x22_channels
+        self.context_projection = ContextProjection(in_channels=x22_channels, out_channels=int(context_channels_out))
+        self.bridge_head = BridgeSuppressionHead(in_channels=int(x04_channels + context_channels_out + 1), hidden_channels=int(bridge_hidden_channels))
+
+    def _make_tap_hook(self, path: str):
+        def _hook(_module, _inputs, output):
+            self._tap_outputs[path] = output
+
+        return _hook
+
+    @staticmethod
+    def _infer_out_channels(module: nn.Module) -> int:
+        convs = [m for m in module.modules() if isinstance(m, nn.Conv2d)]
+        if not convs:
+            raise RuntimeError(f"Failed to infer output channels for module {type(module).__name__}")
+        return int(convs[-1].out_channels)
+
+    def freeze_semantic_base(self) -> None:
+        for param in self.base.parameters():
+            param.requires_grad = False
+        self.base.eval()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.base.eval()
+        self.context_projection.train(mode)
+        self.bridge_head.train(mode)
+        return self
+
+    def bridge_forward_from_cached(self, *, x_0_4: torch.Tensor, x_2_2: torch.Tensor, p_leaf: torch.Tensor) -> dict[str, torch.Tensor]:
+        train_dtype = self.context_projection.proj.weight.dtype
+        x_0_4_fp = x_0_4.to(dtype=train_dtype)
+        x_2_2_fp = x_2_2.to(dtype=train_dtype)
+        p_leaf_fp = p_leaf.to(dtype=train_dtype)
+        projected = self.context_projection(x_2_2_fp)
+        projected_up = F.interpolate(projected, size=x_0_4_fp.shape[-2:], mode="bilinear", align_corners=False)
+        concat = torch.cat([x_0_4_fp, projected_up, p_leaf_fp], dim=1)
+        bridge_logits = self.bridge_head(concat)
+        candidate_mask = (p_leaf_fp >= float(LOCKED_CANDIDATE_THRESHOLD)).to(dtype=train_dtype)
+        return {
+            "x_0_4": x_0_4_fp,
+            "x_2_2": x_2_2_fp,
+            "projected_context": projected_up,
+            "p_leaf": p_leaf_fp,
+            "candidate_mask": candidate_mask,
+            "bridge_logits": bridge_logits,
+            "concatenated": concat,
+        }
+
+    def forward(self, image_t: torch.Tensor) -> dict[str, torch.Tensor]:
+        self._tap_outputs = {}
+        with torch.no_grad():
+            features = self.base.encoder(image_t)
+            decoder_feature = self.base.decoder(features)
+            semantic_logits = self.base.segmentation_head(decoder_feature)
+        x_0_4 = self._tap_outputs["base.decoder.blocks.x_0_4"]
+        x_2_2 = self._tap_outputs["base.decoder.blocks.x_2_2"]
+        p_leaf = torch.softmax(semantic_logits.float(), dim=1)[:, 1:2]
+        bridge = self.bridge_forward_from_cached(x_0_4=x_0_4, x_2_2=x_2_2, p_leaf=p_leaf)
+        bridge["semantic_logits"] = semantic_logits
+        return bridge
+
+
+def build_model_from_cfg(cfg: dict[str, Any]) -> FrozenSemanticBridgeSuppressionModel:
+    model_cfg = cfg.get("model") or {}
+    bridge_cfg = cfg.get("bridge_head") or {}
+    encoder_name = model_cfg.get("encoder_name") or model_cfg.get("encoder")
+    if not encoder_name:
+        raise SystemExit("Config: model.encoder_name is required")
+    model = FrozenSemanticBridgeSuppressionModel(
+        encoder_name=str(encoder_name),
+        encoder_weights=model_cfg.get("encoder_weights", None),
+        in_channels=int(model_cfg["in_channels"]),
+        classes=int(model_cfg["classes"]),
+        context_channels_out=int(bridge_cfg.get("context_projection_channels", 8)),
+        bridge_hidden_channels=int(bridge_cfg.get("hidden_channels", 16)),
+    )
+    model.freeze_semantic_base()
+    return model
+
+
+def load_semantic_checkpoint(model: FrozenSemanticBridgeSuppressionModel, checkpoint_path: Path) -> dict[str, Any]:
+    checkpoint_path = checkpoint_path.resolve()
+    ckpt = torch.load(str(checkpoint_path), map_location="cpu")
+    state = ckpt.get("model") if isinstance(ckpt, dict) else ckpt
+    if not isinstance(state, dict):
+        raise SystemExit(f"Unsupported checkpoint format: {checkpoint_path}")
+    incompat = model.base.load_state_dict(state, strict=True)
+    missing = list(getattr(incompat, "missing_keys", [])) if incompat is not None else []
+    unexpected = list(getattr(incompat, "unexpected_keys", [])) if incompat is not None else []
+    if missing or unexpected:
+        raise RuntimeError(f"Unexpected checkpoint incompatibility: missing={missing[:5]} unexpected={unexpected[:5]}")
+    return {
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_sha256": _sha256_file(checkpoint_path),
+        "epoch": ckpt.get("epoch") if isinstance(ckpt, dict) else None,
+    }
+
+
+class CandidateBalancedBCEDiceLoss(nn.Module):
+    def __init__(self, eps: float = 1.0e-6) -> None:
+        super().__init__()
+        self.eps = float(eps)
+
+    def forward(self, *, bridge_logits: torch.Tensor, bridge_target: torch.Tensor, candidate_mask: torch.Tensor) -> dict[str, torch.Tensor]:
+        candidate = candidate_mask > 0.5
+        logits_flat = bridge_logits[candidate]
+        target_flat = bridge_target[candidate]
+        zero = bridge_logits.sum() * 0.0
+        if int(logits_flat.numel()) == 0:
+            return {
+                "loss": zero,
+                "balanced_bce": zero,
+                "dice_loss": zero,
+                "positive_bce": zero,
+                "negative_bce": zero,
+                "candidate_count": torch.tensor(0, device=bridge_logits.device, dtype=torch.float32),
+                "positive_count": torch.tensor(0, device=bridge_logits.device, dtype=torch.float32),
+                "negative_count": torch.tensor(0, device=bridge_logits.device, dtype=torch.float32),
+            }
+        pos = target_flat > 0.5
+        neg = ~pos
+        if bool(torch.any(pos)):
+            pos_loss = F.binary_cross_entropy_with_logits(logits_flat[pos], torch.ones_like(logits_flat[pos]), reduction="mean")
+        else:
+            pos_loss = zero
+        if bool(torch.any(neg)):
+            neg_loss = F.binary_cross_entropy_with_logits(logits_flat[neg], torch.zeros_like(logits_flat[neg]), reduction="mean")
+        else:
+            neg_loss = zero
+        balanced_bce = 0.5 * pos_loss + 0.5 * neg_loss
+        probs = torch.sigmoid(logits_flat)
+        target_float = target_flat.float()
+        intersection = torch.sum(probs * target_float)
+        dice_coeff = (2.0 * intersection + self.eps) / (torch.sum(probs) + torch.sum(target_float) + self.eps)
+        dice_loss = 1.0 - dice_coeff
+        total = balanced_bce + dice_loss
+        return {
+            "loss": total,
+            "balanced_bce": balanced_bce,
+            "dice_loss": dice_loss,
+            "positive_bce": pos_loss,
+            "negative_bce": neg_loss,
+            "candidate_count": torch.tensor(float(logits_flat.numel()), device=bridge_logits.device),
+            "positive_count": torch.tensor(float(torch.sum(pos).item()), device=bridge_logits.device),
+            "negative_count": torch.tensor(float(torch.sum(neg).item()), device=bridge_logits.device),
+        }
+
+
+def build_optimizer(model: FrozenSemanticBridgeSuppressionModel, cfg: dict[str, Any]) -> tuple[torch.optim.Optimizer, dict[str, Any]]:
+    train_cfg = cfg.get("train") or {}
+    lr_context = float(train_cfg.get("lr_context_projection", train_cfg.get("lr", 1.0e-3)))
+    lr_head = float(train_cfg.get("lr_bridge_head", train_cfg.get("lr", 1.0e-3)))
+    weight_decay = float(train_cfg.get("weight_decay", 1.0e-5))
+    context_named = [(name, p) for name, p in model.named_parameters() if name.startswith("context_projection.") and p.requires_grad]
+    head_named = [(name, p) for name, p in model.named_parameters() if name.startswith("bridge_head.") and p.requires_grad]
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": [p for _n, p in context_named], "lr": lr_context},
+            {"params": [p for _n, p in head_named], "lr": lr_head},
+        ],
+        weight_decay=weight_decay,
+    )
+    meta = {
+        "context_projection_lr": lr_context,
+        "bridge_head_lr": lr_head,
+        "weight_decay": weight_decay,
+        "context_projection_params": int(sum(int(p.numel()) for _n, p in context_named)),
+        "bridge_head_params": int(sum(int(p.numel()) for _n, p in head_named)),
+        "total_trainable_params": int(sum(int(p.numel()) for _n, p in context_named + head_named)),
+        "parameter_names": [name for name, _p in context_named + head_named],
+    }
+    return optimizer, meta
+
+
+def _collect_batchnorm_stats(model: nn.Module) -> list[tuple[str, torch.Tensor, torch.Tensor]]:
+    out: list[tuple[str, torch.Tensor, torch.Tensor]] = []
+    for name, module in model.named_modules():
+        running_mean = getattr(module, "running_mean", None)
+        running_var = getattr(module, "running_var", None)
+        if running_mean is None or running_var is None:
+            continue
+        if torch.is_tensor(running_mean) and torch.is_tensor(running_var):
+            out.append((name, running_mean.detach().clone(), running_var.detach().clone()))
+    return out
+
+
+def _max_bn_delta(model: nn.Module, ref: list[tuple[str, torch.Tensor, torch.Tensor]]) -> float:
+    modules = dict(model.named_modules())
+    max_delta = 0.0
+    for name, mean_ref, var_ref in ref:
+        module = modules.get(name, None)
+        if module is None:
+            continue
+        running_mean = getattr(module, "running_mean", None)
+        running_var = getattr(module, "running_var", None)
+        if running_mean is None or running_var is None:
+            continue
+        d1 = float((running_mean.detach() - mean_ref).abs().max().item()) if running_mean.numel() else 0.0
+        d2 = float((running_var.detach() - var_ref).abs().max().item()) if running_var.numel() else 0.0
+        max_delta = max(max_delta, d1, d2)
+    return float(max_delta)
+
+
+def _snapshot_named_parameters(named_params: list[tuple[str, torch.nn.Parameter]]) -> dict[str, torch.Tensor]:
+    return {str(name): param.detach().clone() for name, param in named_params}
+
+
+def _max_parameter_delta_from_snapshot(named_params: list[tuple[str, torch.nn.Parameter]], snap: dict[str, torch.Tensor]) -> float:
+    max_delta = 0.0
+    for name, param in named_params:
+        ref = snap.get(str(name), None)
+        if ref is None:
+            continue
+        delta = float((param.detach() - ref).abs().max().item()) if param.numel() else 0.0
+        max_delta = max(max_delta, delta)
+    return float(max_delta)
+
+
+def _named_grad_l2_norm(named_params: list[tuple[str, torch.nn.Parameter]]) -> float:
+    s = 0.0
+    for _name, param in named_params:
+        if param.grad is None:
+            continue
+        s += float(torch.sum(param.grad.detach().float() ** 2).item())
+    return float(math.sqrt(max(s, 0.0)))
+
+
+def _count_present_grads(named_params: list[tuple[str, torch.nn.Parameter]]) -> int:
+    return int(sum(1 for _name, param in named_params if param.grad is not None))
+
+
+def _all_grads_finite(named_params: list[tuple[str, torch.nn.Parameter]]) -> bool:
+    for _name, param in named_params:
+        if param.grad is None:
+            continue
+        if not bool(torch.isfinite(param.grad.detach()).all().item()):
+            return False
+    return True
+
+
+def save_checkpoint(path: Path, model: nn.Module, optimizer: torch.optim.Optimizer, step: int, cfg: dict[str, Any], extra: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "step": int(step),
+            "config": cfg,
+            "extra": extra,
+        },
+        str(path),
+    )
+
+
+def _load_image_rgb(path: Path) -> np.ndarray:
+    img_bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        raise FileNotFoundError(f"Failed to read image: {path}")
+    return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+
+def _load_u8(path: Path) -> np.ndarray:
+    arr = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if arr is None:
+        raise FileNotFoundError(f"Failed to read image: {path}")
+    if arr.ndim == 3:
+        arr = arr[:, :, 0]
+    return arr.astype(np.uint8)
+
+
+def _center_crop_like_validation(image: np.ndarray, crop_h: int, crop_w: int, *, is_mask: bool) -> np.ndarray:
+    h, w = image.shape[:2]
+    if h < crop_h or w < crop_w:
+        new_h = max(h, crop_h)
+        new_w = max(w, crop_w)
+        interp = cv2.INTER_NEAREST if is_mask else cv2.INTER_LINEAR
+        image = cv2.resize(image, (new_w, new_h), interpolation=interp)
+        h, w = image.shape[:2]
+    y0 = (h - crop_h) // 2 if h > crop_h else 0
+    x0 = (w - crop_w) // 2 if w > crop_w else 0
+    if image.ndim == 2:
+        return image[y0 : y0 + crop_h, x0 : x0 + crop_w]
+    return image[y0 : y0 + crop_h, x0 : x0 + crop_w, :]
+
+
+def _simple_preprocess_uint8_rgb(image_rgb_u8: np.ndarray) -> np.ndarray:
+    return image_rgb_u8.astype(np.float32) / 255.0
+
+
+def _build_split_items(cfg: dict[str, Any], split_txt: Path) -> list[dict[str, Any]]:
+    dataset_cfg = cfg.get("dataset") or {}
+    dataset_root = _resolve_repo_path(dataset_cfg.get("root", DEFAULT_DATASET_ROOT), DEFAULT_DATASET_ROOT)
+    instance_root = _resolve_repo_path(dataset_cfg.get("instance_root", DEFAULT_INSTANCE_ROOT), DEFAULT_INSTANCE_ROOT)
+    items = read_split_file(dataset_root.resolve(), split_txt.resolve())
+    out: list[dict[str, Any]] = []
+    for item in items:
+        sample_id = Path(item.image_path).stem
+        instance_path = instance_root / "instance_masks" / f"{sample_id}.png"
+        out.append(
+            {
+                "sample_id": str(sample_id),
+                "patient_id": _make_patient_id(sample_id),
+                "image_path": str(item.image_path),
+                "mask_path": str(item.mask_path),
+                "instance_path": str(instance_path.resolve()),
+            }
+        )
+    return out
+
+
+def mine_bridge_records_for_split(
+    *,
+    cfg: dict[str, Any],
+    split_txt: Path,
+    model: FrozenSemanticBridgeSuppressionModel,
+    device: torch.device,
+    use_amp: bool,
+    cache_features: bool,
+    selected_sample_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    _assert_safe_path(split_txt)
+    items = _build_split_items(cfg, split_txt)
+    if selected_sample_ids is not None:
+        items = [item for item in items if str(item["sample_id"]) in {str(v) for v in selected_sample_ids}]
+    audit_batch_size = int(((cfg.get("train") or {}).get("audit_batch_size", 2 if device.type != "cuda" else 8)))
+    out: list[dict[str, Any]] = []
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, len(items), audit_batch_size):
+            batch_items = items[start : start + audit_batch_size]
+            images_np: list[np.ndarray] = []
+            gt_sems: list[np.ndarray] = []
+            gt_insts: list[np.ndarray] = []
+            for item in batch_items:
+                image_rgb = _load_image_rgb(Path(item["image_path"]))
+                gt_sem = _load_u8(Path(item["mask_path"]))
+                gt_inst = _load_u8(Path(item["instance_path"]))
+                target_h, target_w = gt_sem.shape[:2]
+                image_rgb = _center_crop_like_validation(image_rgb, target_h, target_w, is_mask=False)
+                gt_inst = _center_crop_like_validation(gt_inst, target_h, target_w, is_mask=True)
+                images_np.append(_simple_preprocess_uint8_rgb(image_rgb).transpose(2, 0, 1))
+                gt_sems.append(gt_sem.astype(np.uint8))
+                gt_insts.append(gt_inst.astype(np.uint8))
+            image_batch = torch.from_numpy(np.stack(images_np, axis=0)).float().to(device)
+            with _autocast_ctx(device, enabled=use_amp):
+                outputs = model(image_batch)
+            p_leaf_batch = outputs["p_leaf"].detach().cpu().numpy().astype(np.float32)
+            x04_batch = outputs["x_0_4"].detach().cpu().float() if cache_features else None
+            x22_batch = outputs["x_2_2"].detach().cpu().float() if cache_features else None
+            for idx, item in enumerate(batch_items):
+                gt_sem = gt_sems[idx]
+                gt_inst = gt_insts[idx]
+                p_leaf = p_leaf_batch[idx, 0]
+                candidate_mask = candidate_p50_mask_from_probs(p_leaf)
+                bridge_target = false_bridge_pixels_from_candidate(
+                    gt_sem_u8=gt_sem.astype(np.uint8),
+                    gt_inst_u8=gt_inst.astype(np.uint8),
+                    candidate_mask01=candidate_mask.astype(np.uint8),
+                )
+                oracle_removed = ((candidate_mask > 0) & (bridge_target == 0)).astype(np.uint8)
+                topo_before = forensic.classify_semantic_topology(gt_inst.astype(np.uint8), candidate_mask.astype(np.uint8))
+                topo_after = forensic.classify_semantic_topology(gt_inst.astype(np.uint8), oracle_removed.astype(np.uint8))
+                labels, region_count = _connected_components(bridge_target.astype(np.uint8))
+                region_areas = [int(np.sum(labels == cc_idx)) for cc_idx in range(1, int(region_count) + 1)]
+                gt_count = int(len(topo_aux._positive_instance_ids(gt_inst.astype(np.uint8))))
+                reconstructed = run_locked_reconstruction(oracle_removed.astype(np.uint8), gt_inst.astype(np.uint8))
+                record = {
+                    **item,
+                    "gt_count": int(gt_count),
+                    "candidate_pixels": int(np.sum(candidate_mask > 0)),
+                    "bridge_pixels": int(np.sum(bridge_target > 0)),
+                    "bridge_positive": int(np.sum(bridge_target > 0) > 0),
+                    "bridge_region_count": int(region_count),
+                    "bridge_region_areas": region_areas,
+                    "topology_changes_if_oracle_removed": int(
+                        str(topo_before["topology_class"]) != str(topo_after["topology_class"])
+                        or bool(topo_before["bridge"]) != bool(topo_after["bridge"])
+                        or bool(topo_before["missing"]) != bool(topo_after["missing"])
+                    ),
+                    "candidate_mask": candidate_mask.astype(np.uint8),
+                    "bridge_target": bridge_target.astype(np.uint8),
+                    "p_leaf": p_leaf.astype(np.float32),
+                    "gt_semantic": gt_sem.astype(np.uint8),
+                    "gt_instances": gt_inst.astype(np.uint8),
+                    "oracle_removed_mask": oracle_removed.astype(np.uint8),
+                    "oracle_removed_reconstruction": reconstructed["labels"].astype(np.uint8),
+                }
+                if cache_features and x04_batch is not None and x22_batch is not None:
+                    record["x_0_4"] = x04_batch[idx].clone()
+                    record["x_2_2"] = x22_batch[idx].clone()
+                out.append(record)
+    return out
+
+
+def summarize_bridge_records(records: list[dict[str, Any]], split_path: Path, *, train_sample_ids: set[str] | None = None, train_patient_ids: set[str] | None = None) -> dict[str, Any]:
+    train_sample_ids = train_sample_ids or set()
+    train_patient_ids = train_patient_ids or set()
+    gt1 = sum(1 for row in records if int(row["gt_count"]) == 1)
+    gt2 = sum(1 for row in records if int(row["gt_count"]) == 2)
+    gt3 = sum(1 for row in records if int(row["gt_count"]) == 3)
+    bridge_positive = [row for row in records if int(row["bridge_positive"]) == 1]
+    gt2_positive = sum(1 for row in bridge_positive if int(row["gt_count"]) == 2)
+    gt3_positive = sum(1 for row in bridge_positive if int(row["gt_count"]) == 3)
+    bridge_pixels_per_positive = [int(row["bridge_pixels"]) for row in bridge_positive]
+    bridge_region_areas = [int(area) for row in bridge_positive for area in row["bridge_region_areas"]]
+    bridge_region_counts = [int(row["bridge_region_count"]) for row in bridge_positive]
+    overlap_samples = sorted({str(row["sample_id"]) for row in records if str(row["sample_id"]) in train_sample_ids})
+    overlap_patients = sorted({str(row["patient_id"]) for row in records if str(row["patient_id"]) in train_patient_ids})
+    return {
+        "split_path": str(split_path.resolve()),
+        "sample_count": int(len(records)),
+        "patient_count": int(len({str(row["patient_id"]) for row in records})),
+        "gt1": int(gt1),
+        "gt2": int(gt2),
+        "gt3": int(gt3),
+        "bridge_positive_samples": int(len(bridge_positive)),
+        "gt2_positive_samples": int(gt2_positive),
+        "gt3_positive_samples": int(gt3_positive),
+        "total_candidate_pixels": int(sum(int(row["candidate_pixels"]) for row in records)),
+        "total_bridge_positive_pixels": int(sum(int(row["bridge_pixels"]) for row in records)),
+        "bridge_positive_fraction_within_candidate": float(
+            sum(int(row["bridge_pixels"]) for row in records) / max(sum(int(row["candidate_pixels"]) for row in records), 1)
+        ),
+        "bridge_pixels_per_positive_sample": {
+            "median": float(np.median(bridge_pixels_per_positive)) if bridge_pixels_per_positive else 0.0,
+            "p75": float(np.percentile(bridge_pixels_per_positive, 75)) if bridge_pixels_per_positive else 0.0,
+            "p90": float(np.percentile(bridge_pixels_per_positive, 90)) if bridge_pixels_per_positive else 0.0,
+            "max": int(max(bridge_pixels_per_positive)) if bridge_pixels_per_positive else 0,
+        },
+        "connected_bridge_regions_per_positive_sample": {
+            "median": float(np.median(bridge_region_counts)) if bridge_region_counts else 0.0,
+            "p75": float(np.percentile(bridge_region_counts, 75)) if bridge_region_counts else 0.0,
+            "p90": float(np.percentile(bridge_region_counts, 90)) if bridge_region_counts else 0.0,
+            "max": int(max(bridge_region_counts)) if bridge_region_counts else 0,
+        },
+        "bridge_region_area_distribution": {
+            "median": float(np.median(bridge_region_areas)) if bridge_region_areas else 0.0,
+            "p75": float(np.percentile(bridge_region_areas, 75)) if bridge_region_areas else 0.0,
+            "p90": float(np.percentile(bridge_region_areas, 90)) if bridge_region_areas else 0.0,
+            "max": int(max(bridge_region_areas)) if bridge_region_areas else 0,
+        },
+        "topology_changing_bridge_samples": int(sum(int(row["topology_changes_if_oracle_removed"]) for row in bridge_positive)),
+        "sample_overlap_with_train": int(len(overlap_samples)),
+        "patient_overlap_with_train": int(len(overlap_patients)),
+        "overlap_samples": overlap_samples,
+        "overlap_patients": overlap_patients,
+        "instance_mask_available": int(sum(1 for row in records if Path(row["instance_path"]).exists())),
+        "gt_instance_count_available": int(sum(1 for row in records if int(row["gt_count"]) > 0)),
+    }
+
+
+def _select_visual_examples(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    positive = [row for row in records if int(row["bridge_positive"]) == 1]
+    negatives = [row for row in records if int(row["bridge_positive"]) == 0 and int(row["gt_count"]) in {2, 3}]
+
+    def _pick(rows: list[dict[str, Any]], key_fn) -> dict[str, Any] | None:
+        if not rows:
+            return None
+        rows = sorted(rows, key=key_fn, reverse=True)
+        return rows[0]
+
+    return {
+        "gt2_bridge_positive": _pick([r for r in positive if int(r["gt_count"]) == 2], lambda r: int(r["bridge_pixels"])),
+        "gt3_bridge_positive": _pick([r for r in positive if int(r["gt_count"]) == 3], lambda r: int(r["bridge_pixels"])),
+        "multiple_bridge_regions": _pick(positive, lambda r: (int(r["bridge_region_count"]), int(r["bridge_pixels"]))),
+        "thin_bridge": _pick(positive, lambda r: -float(np.median(r["bridge_region_areas"])) if r["bridge_region_areas"] else float("-inf")),
+        "broad_bridge": _pick(positive, lambda r: int(max(r["bridge_region_areas"])) if r["bridge_region_areas"] else 0),
+        "bridge_negative_gt2_gt3": _pick(negatives, lambda r: int(r["candidate_pixels"])),
+        "oracle_changes_failure_to_success": _pick(
+            [
+                r for r in positive
+                if bool(run_locked_reconstruction(r["candidate_mask"], r["gt_instances"])["metrics"]["all_iou_ge_0.50"]) is False
+                and bool(run_locked_reconstruction(r["oracle_removed_mask"], r["gt_instances"])["metrics"]["all_iou_ge_0.50"]) is True
+            ],
+            lambda r: int(r["bridge_pixels"]),
+        ),
+    }
+
+
+def save_train_target_visual_audit(records: list[dict[str, Any]], output_dir: Path) -> dict[str, str]:
+    visuals_dir = output_dir / "bridge_target_visual_audit"
+    visuals_dir.mkdir(parents=True, exist_ok=True)
+    chosen = _select_visual_examples(records)
+    out: dict[str, str] = {}
+    for label, row in chosen.items():
+        if row is None:
+            continue
+        image_rgb = _center_crop_like_validation(
+            _load_image_rgb(Path(row["image_path"])),
+            row["gt_semantic"].shape[0],
+            row["gt_semantic"].shape[1],
+            is_mask=False,
+        )
+        out[label] = _save_visual_grid(
+            out_path=visuals_dir / f"{label}_{row['sample_id']}.png",
+            image_rgb=image_rgb,
+            gt_inst_u8=row["gt_instances"],
+            p_leaf=row["p_leaf"],
+            candidate_mask01=row["candidate_mask"],
+            bridge_target01=row["bridge_target"],
+            candidate_minus_oracle01=row["oracle_removed_mask"],
+            reconstructed_u8=row["oracle_removed_reconstruction"],
+        )
+    return out
+
+
+def select_micro_overfit_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    positives = [row for row in records if int(row["bridge_positive"]) == 1]
+    negatives = [row for row in records if int(row["bridge_positive"]) == 0]
+    positives = sorted(
+        positives,
+        key=lambda r: (
+            int(r["topology_changes_if_oracle_removed"]),
+            int(r["gt_count"]),
+            int(r["bridge_region_count"]),
+            int(r["bridge_pixels"]),
+            -ord(str(r["sample_id"])[0]) if str(r["sample_id"]) else 0,
+        ),
+        reverse=True,
+    )
+    negatives = sorted(
+        negatives,
+        key=lambda r: (
+            int(r["gt_count"]),
+            int(r["candidate_pixels"]),
+        ),
+        reverse=True,
+    )
+    selected: list[dict[str, Any]] = []
+
+    def _take_one(rows: list[dict[str, Any]], predicate) -> None:
+        for row in rows:
+            if predicate(row) and all(str(row["sample_id"]) != str(existing["sample_id"]) for existing in selected):
+                selected.append(row)
+                return
+
+    _take_one(positives, lambda r: int(r["gt_count"]) == 3)
+    _take_one(positives, lambda r: int(r["gt_count"]) == 2)
+    for row in positives:
+        if len([r for r in selected if int(r["bridge_positive"]) == 1]) >= MICROSET_POSITIVE_TARGET:
+            break
+        if all(str(row["sample_id"]) != str(existing["sample_id"]) for existing in selected):
+            selected.append(row)
+    _take_one(negatives, lambda r: int(r["gt_count"]) == 3)
+    _take_one(negatives, lambda r: int(r["gt_count"]) == 2)
+    for row in negatives:
+        if len([r for r in selected if int(r["bridge_positive"]) == 0]) >= MICROSET_NEGATIVE_TARGET:
+            break
+        if all(str(row["sample_id"]) != str(existing["sample_id"]) for existing in selected):
+            selected.append(row)
+    return sorted(selected, key=lambda r: str(r["sample_id"]))
+
+
+def write_micro_manifest(records: list[dict[str, Any]], path: Path) -> dict[str, Any]:
+    payload = {
+        "source_split": str(DEFAULT_TRAIN_SPLIT.resolve()),
+        "locked_candidate_threshold": float(LOCKED_CANDIDATE_THRESHOLD),
+        "sample_ids": [str(row["sample_id"]) for row in records],
+        "bridge_positive_count": int(sum(int(row["bridge_positive"]) for row in records)),
+        "bridge_negative_count": int(sum(1 for row in records if int(row["bridge_positive"]) == 0)),
+        "gt2_count": int(sum(1 for row in records if int(row["gt_count"]) == 2)),
+        "gt3_count": int(sum(1 for row in records if int(row["gt_count"]) == 3)),
+        "rows": [
+            {
+                "sample_id": str(row["sample_id"]),
+                "gt_count": int(row["gt_count"]),
+                "bridge_positive": int(row["bridge_positive"]),
+                "bridge_pixels": int(row["bridge_pixels"]),
+                "candidate_pixels": int(row["candidate_pixels"]),
+                "topology_changes_if_oracle_removed": int(row["topology_changes_if_oracle_removed"]),
+            }
+            for row in records
+        ],
+    }
+    _write_json(path, payload)
+    return payload
+
+
+def cache_microset_features(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in records:
+        out.append(
+            {
+                "sample_id": str(row["sample_id"]),
+                "patient_id": str(row["patient_id"]),
+                "gt_count": int(row["gt_count"]),
+                "bridge_positive": int(row["bridge_positive"]),
+                "candidate_pixels": int(row["candidate_pixels"]),
+                "bridge_pixels": int(row["bridge_pixels"]),
+                "x_0_4": row["x_0_4"].clone(),
+                "x_2_2": row["x_2_2"].clone(),
+                "p_leaf": torch.from_numpy(row["p_leaf"][None, ...]).float(),
+                "candidate_mask": torch.from_numpy(row["candidate_mask"][None, ...].astype(np.float32)),
+                "bridge_target": torch.from_numpy(row["bridge_target"][None, ...].astype(np.float32)),
+                "gt_instances": row["gt_instances"].astype(np.uint8),
+                "candidate_mask_np": row["candidate_mask"].astype(np.uint8),
+                "oracle_removed_mask": row["oracle_removed_mask"].astype(np.uint8),
+                "image_path": str(row["image_path"]),
+            }
+        )
+    return out
+
+
+def stack_cached_batch(records: list[dict[str, Any]], device: torch.device) -> dict[str, Any]:
+    return {
+        "x_0_4": torch.stack([row["x_0_4"] for row in records], dim=0).to(device),
+        "x_2_2": torch.stack([row["x_2_2"] for row in records], dim=0).to(device),
+        "p_leaf": torch.stack([row["p_leaf"] for row in records], dim=0).to(device),
+        "candidate_mask": torch.stack([row["candidate_mask"] for row in records], dim=0).to(device),
+        "bridge_target": torch.stack([row["bridge_target"] for row in records], dim=0).to(device),
+        "sample_ids": [str(row["sample_id"]) for row in records],
+    }
+
+
+def compute_binary_metrics_from_domain(
+    *,
+    bridge_probs: torch.Tensor,
+    bridge_target: torch.Tensor,
+    candidate_mask: torch.Tensor,
+    threshold: float = BRIDGE_REMOVE_THRESHOLD,
+) -> dict[str, Any]:
+    domain = candidate_mask > 0.5
+    pred = (bridge_probs >= float(threshold)) & domain
+    target = (bridge_target > 0.5) & domain
+    tp = int(torch.sum(pred & target).item())
+    fp = int(torch.sum(pred & (~target)).item())
+    fn = int(torch.sum((~pred) & target).item())
+    precision = float(tp / max(tp + fp, 1))
+    recall = float(tp / max(tp + fn, 1))
+    f1 = float((2 * tp) / max(2 * tp + fp + fn, 1))
+    dice = f1
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "dice": dice,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+    }
+
+
+def evaluate_reconstruction_levels_on_cached(
+    model: FrozenSemanticBridgeSuppressionModel,
+    records: list[dict[str, Any]],
+    device: torch.device,
+    *,
+    threshold: float = BRIDGE_REMOVE_THRESHOLD,
+) -> dict[str, Any]:
+    model.eval()
+    batch = stack_cached_batch(records, device)
+    with torch.no_grad():
+        outputs = model.bridge_forward_from_cached(
+            x_0_4=batch["x_0_4"],
+            x_2_2=batch["x_2_2"],
+            p_leaf=batch["p_leaf"],
+        )
+        bridge_probs = torch.sigmoid(outputs["bridge_logits"]).detach().cpu()
+    predicted_metrics: list[dict[str, Any]] = []
+    start_metrics: list[dict[str, Any]] = []
+    oracle_metrics: list[dict[str, Any]] = []
+    for idx, row in enumerate(records):
+        candidate_mask = row["candidate_mask_np"].astype(np.uint8)
+        pred_remove = (bridge_probs[idx, 0].numpy() >= float(threshold)).astype(np.uint8)
+        refined = ((candidate_mask > 0) & (pred_remove == 0)).astype(np.uint8)
+        start = run_locked_reconstruction(candidate_mask, row["gt_instances"])
+        pred = run_locked_reconstruction(refined, row["gt_instances"])
+        oracle = run_locked_reconstruction(row["oracle_removed_mask"], row["gt_instances"])
+        start_metrics.append({"sample_id": row["sample_id"], "gt_count": row["gt_count"], **start["metrics"]})
+        predicted_metrics.append({"sample_id": row["sample_id"], "gt_count": row["gt_count"], **pred["metrics"]})
+        oracle_metrics.append({"sample_id": row["sample_id"], "gt_count": row["gt_count"], **oracle["metrics"]})
+
+    def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        n = int(len(rows))
+        success50 = int(sum(int(bool(row["all_iou_ge_0.50"])) for row in rows))
+        return {
+            "n": n,
+            "mean_matched_iou": float(np.mean([float(row["instance_mean_matched_iou"]) for row in rows])) if rows else 0.0,
+            "all_iou_ge_0.50_count": success50,
+            "all_iou_ge_0.50_rate": float(success50 / max(n, 1)),
+            "gt2_success": f"{sum(int(bool(row['all_iou_ge_0.50'])) for row in rows if int(row['gt_count']) == 2)}/{sum(1 for row in rows if int(row['gt_count']) == 2)}",
+            "gt3_success": f"{sum(int(bool(row['all_iou_ge_0.50'])) for row in rows if int(row['gt_count']) == 3)}/{sum(1 for row in rows if int(row['gt_count']) == 3)}",
+        }
+
+    binary = compute_binary_metrics_from_domain(
+        bridge_probs=bridge_probs,
+        bridge_target=batch["bridge_target"].cpu(),
+        candidate_mask=batch["candidate_mask"].cpu(),
+        threshold=threshold,
+    )
+    return {
+        "pixel": binary,
+        "reconstruction": {
+            "p50_start": _summary(start_metrics),
+            "p50_minus_predicted_bridge": _summary(predicted_metrics),
+            "p50_minus_gt_oracle_bridge": _summary(oracle_metrics),
+        },
+    }
+
+
+def build_validation_audit(
+    *,
+    train_records: list[dict[str, Any]],
+    val_records: list[dict[str, Any]],
+    val_split: Path,
+) -> dict[str, Any]:
+    train_samples = {str(row["sample_id"]) for row in train_records}
+    train_patients = {str(row["patient_id"]) for row in train_records}
+    summary = summarize_bridge_records(val_records, val_split, train_sample_ids=train_samples, train_patient_ids=train_patients)
+    summary["verdict"] = "valid_for_bridge_head_development" if int(summary["sample_overlap_with_train"]) == 0 else "blocked"
+    return summary

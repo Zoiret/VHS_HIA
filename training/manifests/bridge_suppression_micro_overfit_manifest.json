@@ -1,0 +1,102 @@
+{
+  "source_split": "E:\\3d_visual\\ml\\datasets\\converted_full_multiclass_curated\\train.txt",
+  "locked_candidate_threshold": 0.5,
+  "sample_ids": [
+    "m03_p01_s02",
+    "m03_p01_s05",
+    "m03_p01_s19",
+    "m05_p01_s38",
+    "m09_p01_s34",
+    "m11_p01_s06",
+    "m11_p02_s01",
+    "m12_p02_s01",
+    "m12_p02_s08",
+    "m13_p03_s05"
+  ],
+  "bridge_positive_count": 8,
+  "bridge_negative_count": 2,
+  "gt2_count": 2,
+  "gt3_count": 8,
+  "rows": [
+    {
+      "sample_id": "m03_p01_s02",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 19992,
+      "candidate_pixels": 127353,
+      "topology_changes_if_oracle_removed": 1
+    },
+    {
+      "sample_id": "m03_p01_s05",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 6664,
+      "candidate_pixels": 128617,
+      "topology_changes_if_oracle_removed": 1
+    },
+    {
+      "sample_id": "m03_p01_s19",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 7934,
+      "candidate_pixels": 119980,
+      "topology_changes_if_oracle_removed": 1
+    },
+    {
+      "sample_id": "m05_p01_s38",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 2070,
+      "candidate_pixels": 74565,
+      "topology_changes_if_oracle_removed": 1
+    },
+    {
+      "sample_id": "m09_p01_s34",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 6397,
+      "candidate_pixels": 110259,
+      "topology_changes_if_oracle_removed": 1
+    },
+    {
+      "sample_id": "m11_p01_s06",
+      "gt_count": 2,
+      "bridge_positive": 1,
+      "bridge_pixels": 93307,
+      "candidate_pixels": 340038,
+      "topology_changes_if_oracle_removed": 1
+    },
+    {
+      "sample_id": "m11_p02_s01",
+      "gt_count": 3,
+      "bridge_positive": 0,
+      "bridge_pixels": 0,
+      "candidate_pixels": 324924,
+      "topology_changes_if_oracle_removed": 0
+    },
+    {
+      "sample_id": "m12_p02_s01",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 9688,
+      "candidate_pixels": 177161,
+      "topology_changes_if_oracle_removed": 1
+    },
+    {
+      "sample_id": "m12_p02_s08",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 9193,
+      "candidate_pixels": 135430,
+      "topology_changes_if_oracle_removed": 1
+    },
+    {
+      "sample_id": "m13_p03_s05",
+      "gt_count": 2,
+      "bridge_positive": 0,
+      "bridge_pixels": 0,
+      "candidate_pixels": 191460,
+      "topology_changes_if_oracle_removed": 0
+    }
+  ]
+}
