@@ -117,6 +117,84 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         future_full = bridge._resolve_repo_path((cfg.get("reserved_full_run") or {}).get("save_dir"), bridge.REPO_ROOT / "training" / "runs" / "bridge_suppression_full")
         self.assertFalse(future_full.exists())
 
+    def test_bridge_contract_input_size_is_fixed_768(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit.yaml")
+        self.assertEqual(bridge._bridge_input_hw_from_cfg(cfg), (768, 768))
+
+    def test_bridge_target_is_generated_in_final_crop_coordinates(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit.yaml")
+
+        full_rgb = np.zeros((1024, 1024, 3), dtype=np.uint8)
+        full_sem = np.zeros((1024, 1024), dtype=np.uint8)
+        full_inst = np.zeros((1024, 1024), dtype=np.uint8)
+        full_sem[128:896, 128:896] = 7
+        full_inst[128:896, 128:896] = 9
+        cropped_sem = full_sem[128:896, 128:896]
+        cropped_inst = full_inst[128:896, 128:896]
+
+        class FakeModel:
+            def eval(self):
+                return self
+
+            def __call__(self, image_batch):
+                self.last_image_shape = tuple(image_batch.shape)
+                bsz = int(image_batch.shape[0])
+                return {
+                    "p_leaf": torch.ones((bsz, 1, 768, 768), dtype=torch.float32),
+                    "x_0_4": torch.zeros((bsz, 16, 768, 768), dtype=torch.float32),
+                    "x_2_2": torch.zeros((bsz, 32, 192, 192), dtype=torch.float32),
+                }
+
+        model = FakeModel()
+        fake_item = {
+            "sample_id": "m00_p00_s00",
+            "patient_id": "m00_p00",
+            "image_path": "fake_image.png",
+            "mask_path": "fake_mask.png",
+            "instance_path": "fake_inst.png",
+        }
+
+        def fake_load_u8(path: Path):
+            path_s = str(path)
+            if "inst" in path_s:
+                return full_inst.copy()
+            return full_sem.copy()
+
+        def fake_false_bridge(*, gt_sem_u8, gt_inst_u8, candidate_mask01):
+            self.assertEqual(gt_sem_u8.shape, (768, 768))
+            self.assertEqual(gt_inst_u8.shape, (768, 768))
+            self.assertTrue(np.array_equal(gt_sem_u8, cropped_sem))
+            self.assertTrue(np.array_equal(gt_inst_u8, cropped_inst))
+            self.assertEqual(candidate_mask01.shape, (768, 768))
+            return np.zeros_like(candidate_mask01, dtype=np.uint8)
+
+        with mock.patch.object(bridge, "_build_split_items", return_value=[fake_item]), \
+             mock.patch.object(bridge, "_load_image_rgb", return_value=full_rgb.copy()), \
+             mock.patch.object(bridge, "_load_u8", side_effect=fake_load_u8), \
+             mock.patch.object(bridge, "false_bridge_pixels_from_candidate", side_effect=fake_false_bridge), \
+             mock.patch.object(bridge, "run_locked_reconstruction", return_value={"labels": np.zeros((768, 768), dtype=np.uint8)}):
+            records = bridge.mine_bridge_records_for_split(
+                cfg=cfg,
+                split_txt=Path("datasets/converted_full_multiclass_curated/train.txt"),
+                model=model,
+                device=torch.device("cpu"),
+                use_amp=False,
+                cache_features=True,
+                selected_sample_ids={"m00_p00_s00"},
+            )
+        self.assertEqual(len(records), 1)
+        row = records[0]
+        self.assertEqual(tuple(model.last_image_shape), (1, 3, 768, 768))
+        self.assertEqual(row["gt_semantic"].shape, (768, 768))
+        self.assertEqual(row["gt_instances"].shape, (768, 768))
+        self.assertEqual(row["candidate_mask"].shape, (768, 768))
+        self.assertEqual(row["bridge_target"].shape, (768, 768))
+        self.assertEqual(tuple(row["x_0_4"].shape), (16, 768, 768))
+        self.assertEqual(tuple(row["x_2_2"].shape), (32, 192, 192))
+        self.assertEqual(row["bridge_contract_input_hw"], [768, 768])
+
 
 if __name__ == "__main__":
     unittest.main()

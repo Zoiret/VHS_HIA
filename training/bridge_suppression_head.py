@@ -614,6 +614,12 @@ def _center_crop_like_validation(image: np.ndarray, crop_h: int, crop_w: int, *,
     return image[y0 : y0 + crop_h, x0 : x0 + crop_w, :]
 
 
+def _bridge_input_hw_from_cfg(cfg: dict[str, Any]) -> tuple[int, int]:
+    model_cfg = cfg.get("model") or {}
+    size = int(model_cfg.get("input_size", 768))
+    return int(size), int(size)
+
+
 def _simple_preprocess_uint8_rgb(image_rgb_u8: np.ndarray) -> np.ndarray:
     return image_rgb_u8.astype(np.float32) / 255.0
 
@@ -662,13 +668,14 @@ def mine_bridge_records_for_split(
             images_np: list[np.ndarray] = []
             gt_sems: list[np.ndarray] = []
             gt_insts: list[np.ndarray] = []
+            crop_h, crop_w = _bridge_input_hw_from_cfg(cfg)
             for item in batch_items:
                 image_rgb = _load_image_rgb(Path(item["image_path"]))
-                gt_sem = _load_u8(Path(item["mask_path"]))
-                gt_inst = _load_u8(Path(item["instance_path"]))
-                target_h, target_w = gt_sem.shape[:2]
-                image_rgb = _center_crop_like_validation(image_rgb, target_h, target_w, is_mask=False)
-                gt_inst = _center_crop_like_validation(gt_inst, target_h, target_w, is_mask=True)
+                gt_sem_full = _load_u8(Path(item["mask_path"]))
+                gt_inst_full = _load_u8(Path(item["instance_path"]))
+                image_rgb = _center_crop_like_validation(image_rgb, crop_h, crop_w, is_mask=False)
+                gt_sem = _center_crop_like_validation(gt_sem_full, crop_h, crop_w, is_mask=True)
+                gt_inst = _center_crop_like_validation(gt_inst_full, crop_h, crop_w, is_mask=True)
                 images_np.append(_simple_preprocess_uint8_rgb(image_rgb).transpose(2, 0, 1))
                 gt_sems.append(gt_sem.astype(np.uint8))
                 gt_insts.append(gt_inst.astype(np.uint8))
@@ -715,6 +722,7 @@ def mine_bridge_records_for_split(
                     "gt_instances": gt_inst.astype(np.uint8),
                     "oracle_removed_mask": oracle_removed.astype(np.uint8),
                     "oracle_removed_reconstruction": reconstructed["labels"].astype(np.uint8),
+                    "bridge_contract_input_hw": [int(crop_h), int(crop_w)],
                 }
                 if cache_features and x04_batch is not None and x22_batch is not None:
                     record["x_0_4"] = x04_batch[idx].clone()
@@ -835,7 +843,17 @@ def save_train_target_visual_audit(records: list[dict[str, Any]], output_dir: Pa
     return out
 
 
-def select_micro_overfit_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _read_existing_micro_manifest(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _default_select_micro_overfit_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     positives = [row for row in records if int(row["bridge_positive"]) == 1]
     negatives = [row for row in records if int(row["bridge_positive"]) == 0]
     positives = sorted(
@@ -879,6 +897,47 @@ def select_micro_overfit_records(records: list[dict[str, Any]]) -> list[dict[str
             break
         if all(str(row["sample_id"]) != str(existing["sample_id"]) for existing in selected):
             selected.append(row)
+    return sorted(selected, key=lambda r: str(r["sample_id"]))
+
+
+def select_micro_overfit_records(records: list[dict[str, Any]], *, manifest_path: Path = MICRO_MANIFEST_PATH) -> list[dict[str, Any]]:
+    existing = _read_existing_micro_manifest(manifest_path)
+    if not existing:
+        return _default_select_micro_overfit_records(records)
+
+    rows_by_id = {str(row["sample_id"]): row for row in records}
+    selected: list[dict[str, Any]] = []
+    taken_ids: set[str] = set()
+    needs_positive_replacement = 0
+
+    for row in existing.get("rows", []):
+        if not isinstance(row, dict):
+            continue
+        sample_id = str(row.get("sample_id", ""))
+        current = rows_by_id.get(sample_id)
+        if current is None:
+            continue
+        previous_positive = int(row.get("bridge_positive", 0)) == 1
+        current_positive = int(current["bridge_positive"]) == 1
+        if previous_positive and not current_positive:
+            needs_positive_replacement += 1
+            continue
+        selected.append(current)
+        taken_ids.add(sample_id)
+
+    if needs_positive_replacement <= 0:
+        return selected
+
+    positive_pool = [
+        row for row in _default_select_micro_overfit_records(records)
+        if int(row["bridge_positive"]) == 1 and str(row["sample_id"]) not in taken_ids
+    ]
+    for row in positive_pool:
+        if needs_positive_replacement <= 0:
+            break
+        selected.append(row)
+        taken_ids.add(str(row["sample_id"]))
+        needs_positive_replacement -= 1
     return sorted(selected, key=lambda r: str(r["sample_id"]))
 
 

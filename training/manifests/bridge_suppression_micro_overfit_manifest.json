@@ -13,8 +13,8 @@
     "m12_p02_s08",
     "m13_p03_s05"
   ],
-  "bridge_positive_count": 8,
-  "bridge_negative_count": 2,
+  "bridge_positive_count": 9,
+  "bridge_negative_count": 1,
   "gt2_count": 2,
   "gt3_count": 8,
   "rows": [
@@ -22,72 +22,72 @@
       "sample_id": "m03_p01_s02",
       "gt_count": 3,
       "bridge_positive": 1,
-      "bridge_pixels": 19992,
-      "candidate_pixels": 127353,
+      "bridge_pixels": 11828,
+      "candidate_pixels": 104307,
       "topology_changes_if_oracle_removed": 1
     },
     {
       "sample_id": "m03_p01_s05",
       "gt_count": 3,
       "bridge_positive": 1,
-      "bridge_pixels": 6664,
-      "candidate_pixels": 128617,
+      "bridge_pixels": 6182,
+      "candidate_pixels": 115078,
       "topology_changes_if_oracle_removed": 1
     },
     {
       "sample_id": "m03_p01_s19",
       "gt_count": 3,
       "bridge_positive": 1,
-      "bridge_pixels": 7934,
-      "candidate_pixels": 119980,
+      "bridge_pixels": 7390,
+      "candidate_pixels": 105036,
       "topology_changes_if_oracle_removed": 1
     },
     {
       "sample_id": "m05_p01_s38",
       "gt_count": 3,
       "bridge_positive": 1,
-      "bridge_pixels": 2070,
-      "candidate_pixels": 74565,
+      "bridge_pixels": 2604,
+      "candidate_pixels": 68767,
       "topology_changes_if_oracle_removed": 1
     },
     {
       "sample_id": "m09_p01_s34",
       "gt_count": 3,
       "bridge_positive": 1,
-      "bridge_pixels": 6397,
-      "candidate_pixels": 110259,
+      "bridge_pixels": 7171,
+      "candidate_pixels": 113067,
       "topology_changes_if_oracle_removed": 1
     },
     {
       "sample_id": "m11_p01_s06",
       "gt_count": 2,
       "bridge_positive": 1,
-      "bridge_pixels": 93307,
-      "candidate_pixels": 340038,
+      "bridge_pixels": 75371,
+      "candidate_pixels": 307354,
       "topology_changes_if_oracle_removed": 1
     },
     {
       "sample_id": "m11_p02_s01",
       "gt_count": 3,
-      "bridge_positive": 0,
-      "bridge_pixels": 0,
-      "candidate_pixels": 324924,
-      "topology_changes_if_oracle_removed": 0
+      "bridge_positive": 1,
+      "bridge_pixels": 6996,
+      "candidate_pixels": 292486,
+      "topology_changes_if_oracle_removed": 1
     },
     {
       "sample_id": "m12_p02_s01",
       "gt_count": 3,
       "bridge_positive": 1,
-      "bridge_pixels": 9688,
-      "candidate_pixels": 177161,
+      "bridge_pixels": 13296,
+      "candidate_pixels": 190000,
       "topology_changes_if_oracle_removed": 1
     },
     {
       "sample_id": "m12_p02_s08",
       "gt_count": 3,
       "bridge_positive": 1,
-      "bridge_pixels": 9193,
-      "candidate_pixels": 135430,
+      "bridge_pixels": 22353,
+      "candidate_pixels": 150906,
       "topology_changes_if_oracle_removed": 1
     },
     {
@@ -95,7 +95,7 @@
       "gt_count": 2,
       "bridge_positive": 0,
       "bridge_pixels": 0,
-      "candidate_pixels": 191460,
+      "candidate_pixels": 155511,
       "topology_changes_if_oracle_removed": 0
     }
   ]
