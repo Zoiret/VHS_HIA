@@ -198,6 +198,8 @@ class TestBridgeSuppressionHead(unittest.TestCase):
     def test_locked_v2_manifest_counts(self):
         bridge, _soft = self._mods()
         payload = bridge.read_locked_micro_manifest(bridge.MICRO_MANIFEST_V2_PATH)
+        self.assertEqual(payload["source_split"], "datasets/converted_full_multiclass_curated/train.txt")
+        self.assertEqual(payload["source_split_sha256"], "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d")
         summary = bridge.summarize_manifest_expectations(payload)
         self.assertEqual(summary["expected_sample_count"], 10)
         self.assertEqual(summary["expected_positive_count"], 6)
@@ -207,6 +209,88 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         self.assertEqual(sum(1 for row in rows if int(row["bridge_positive"]) == 1 and int(row["gt_count"]) == 3), 3)
         self.assertEqual(sum(1 for row in rows if int(row["bridge_positive"]) == 0 and int(row["gt_count"]) == 2), 2)
         self.assertEqual(sum(1 for row in rows if int(row["bridge_positive"]) == 0 and int(row["gt_count"]) == 3), 2)
+
+    def test_portable_repo_relative_manifest_path_resolves_on_posix_and_windows_logic(self):
+        bridge, _soft = self._mods()
+        rel = "datasets/converted_full_multiclass_curated/train.txt"
+        posix_text = bridge._portable_repo_path_text(rel, repo_root="/repo/project", platform_name="posix")
+        windows_text = bridge._portable_repo_path_text(rel, repo_root=r"E:\repo\project", platform_name="nt")
+        self.assertEqual(posix_text, "/repo/project/datasets/converted_full_multiclass_curated/train.txt")
+        self.assertEqual(windows_text, r"E:\repo\project\datasets\converted_full_multiclass_curated\train.txt")
+
+    def test_validate_locked_manifest_source_split_passes_for_relative_train_path_and_sha(self):
+        bridge, _soft = self._mods()
+        payload = {
+            "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
+            "source_split": "datasets/converted_full_multiclass_curated/train.txt",
+            "source_split_sha256": "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d",
+            "sample_ids": ["a"],
+            "rows": [{"sample_id": "a"}],
+        }
+        summary = bridge.validate_locked_manifest_source_split(
+            manifest_payload=payload,
+            configured_train_split=bridge.DEFAULT_TRAIN_SPLIT,
+        )
+        self.assertEqual(summary["status"], "pass")
+        self.assertEqual(summary["resolved_source_split"], str(bridge.DEFAULT_TRAIN_SPLIT.resolve()))
+        self.assertEqual(summary["actual_source_split_sha256"], payload["source_split_sha256"])
+
+    def test_validate_locked_manifest_source_split_blocks_wrong_relative_split(self):
+        bridge, _soft = self._mods()
+        payload = {
+            "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
+            "source_split": "datasets/converted_full_multiclass_curated/val.txt",
+            "source_split_sha256": "c0e455da98e46e4cd523a45f386fa898bfb09fc1f218b14c4a8c525bfb4a5d84",
+            "sample_ids": ["a"],
+            "rows": [{"sample_id": "a"}],
+        }
+        summary = bridge.validate_locked_manifest_source_split(
+            manifest_payload=payload,
+            configured_train_split=bridge.DEFAULT_TRAIN_SPLIT,
+        )
+        self.assertEqual(summary["status"], "blocked")
+        self.assertIn("Locked micro manifest must use train split only", str(summary["error"]))
+
+    def test_validate_locked_manifest_source_split_blocks_wrong_absolute_path(self):
+        bridge, _soft = self._mods()
+        payload = {
+            "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
+            "source_split": str(bridge.DEFAULT_VAL_SPLIT.resolve()),
+            "source_split_sha256": "c0e455da98e46e4cd523a45f386fa898bfb09fc1f218b14c4a8c525bfb4a5d84",
+            "sample_ids": ["a"],
+            "rows": [{"sample_id": "a"}],
+        }
+        summary = bridge.validate_locked_manifest_source_split(
+            manifest_payload=payload,
+            configured_train_split=bridge.DEFAULT_TRAIN_SPLIT,
+        )
+        self.assertEqual(summary["status"], "blocked")
+        self.assertIn(str(bridge.DEFAULT_VAL_SPLIT.resolve()), str(summary["error"]))
+
+    def test_windows_absolute_manifest_path_is_not_reinterpreted_on_posix(self):
+        bridge, _soft = self._mods()
+        with self.assertRaises(ValueError):
+            bridge._portable_repo_path_text(
+                r"E:\3d_visual\ml\datasets\converted_full_multiclass_curated\train.txt",
+                repo_root="/home/user/repo",
+                platform_name="posix",
+            )
+
+    def test_validate_locked_manifest_source_split_blocks_sha_mismatch(self):
+        bridge, _soft = self._mods()
+        payload = {
+            "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
+            "source_split": "datasets/converted_full_multiclass_curated/train.txt",
+            "source_split_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "sample_ids": ["a"],
+            "rows": [{"sample_id": "a"}],
+        }
+        summary = bridge.validate_locked_manifest_source_split(
+            manifest_payload=payload,
+            configured_train_split=bridge.DEFAULT_TRAIN_SPLIT,
+        )
+        self.assertEqual(summary["status"], "blocked")
+        self.assertIn("TRAIN SHA256 mismatch", str(summary["error"]))
 
     def test_missing_selected_sample_causes_hard_failure(self):
         bridge, _soft = self._mods()
@@ -232,6 +316,8 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         bridge, _soft = self._mods()
         payload = {
             "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
+            "source_split": "datasets/converted_full_multiclass_curated/train.txt",
+            "source_split_sha256": "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d",
             "sample_ids": ["a", "b"],
             "rows": [
                 {"sample_id": "a", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 5, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1},

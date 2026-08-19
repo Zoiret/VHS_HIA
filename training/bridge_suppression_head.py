@@ -5,9 +5,11 @@ import csv
 import hashlib
 import json
 import math
+import os
 import random
+import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import cv2
@@ -68,10 +70,53 @@ class SplitAudit:
 def _resolve_repo_path(path_like: str | Path | None, default: Path) -> Path:
     if path_like is None:
         return default.resolve()
-    path = Path(path_like)
-    if not path.is_absolute():
-        path = REPO_ROOT / path
-    return path.resolve()
+    try:
+        portable_text = _portable_repo_path_text(path_like, repo_root=REPO_ROOT, platform_name=os.name)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
+    return Path(portable_text).resolve()
+
+
+def _is_windows_absolute_text(path_text: str) -> bool:
+    text = str(path_text).strip()
+    return bool(re.match(r"^[A-Za-z]:[\\/]", text)) or text.startswith("\\\\")
+
+
+def _is_posix_absolute_text(path_text: str) -> bool:
+    text = str(path_text).strip()
+    return text.startswith("/")
+
+
+def _portable_repo_path_text(path_like: str | Path, *, repo_root: str | Path, platform_name: str) -> str:
+    raw = str(path_like).strip()
+    if not raw:
+        raise ValueError("Portable path error: empty path is not allowed.")
+    repo_root_text = str(repo_root).strip()
+    if platform_name == "nt":
+        if _is_posix_absolute_text(raw) and not _is_windows_absolute_text(raw):
+            raise ValueError(
+                f"Portable path error: POSIX-style absolute path is not valid on Windows platform: {raw}. "
+                f"Use a repository-relative path instead."
+            )
+        if _is_windows_absolute_text(raw):
+            return str(PureWindowsPath(raw))
+        return str(PureWindowsPath(repo_root_text) / raw)
+    if _is_windows_absolute_text(raw):
+        raise ValueError(
+            f"Portable path error: Windows-style absolute path is not valid on POSIX platform: {raw}. "
+            f"Use a repository-relative path instead."
+        )
+    repo_root_posix = repo_root_text.replace("\\", "/")
+    if _is_posix_absolute_text(raw):
+        return str(PurePosixPath(raw))
+    return str(PurePosixPath(repo_root_posix) / raw.replace("\\", "/"))
+
+
+def _repo_relative_canonical_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(path.resolve())
 
 
 def _assert_safe_path(path: Path) -> None:
@@ -118,6 +163,56 @@ def _sha256_file(path: Path) -> str:
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+def validate_locked_manifest_source_split(
+    *,
+    manifest_payload: dict[str, Any],
+    configured_train_split: Path,
+) -> dict[str, Any]:
+    summary = {
+        "status": "pass",
+        "manifest_path": str(_resolve_repo_path(manifest_payload.get("_manifest_path"), MICRO_MANIFEST_V2_PATH)),
+        "manifest_source_split": str(manifest_payload.get("source_split", "")),
+        "configured_train_split": str(configured_train_split.resolve()),
+        "resolved_source_split": None,
+        "expected_source_split_sha256": str(manifest_payload.get("source_split_sha256", "")),
+        "actual_source_split_sha256": None,
+        "error": None,
+    }
+    source_split = manifest_payload.get("source_split")
+    expected_sha = str(manifest_payload.get("source_split_sha256", "")).strip().lower()
+    if not isinstance(source_split, str) or not source_split.strip():
+        summary["status"] = "blocked"
+        summary["error"] = "Locked micro manifest must contain a non-empty source_split string."
+        return summary
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        summary["status"] = "blocked"
+        summary["error"] = "Locked micro manifest must contain source_split_sha256 as a 64-character lowercase hex string."
+        return summary
+    try:
+        resolved_source_split = _resolve_repo_path(source_split, configured_train_split)
+    except SystemExit as e:
+        summary["status"] = "blocked"
+        summary["error"] = str(e)
+        return summary
+    summary["resolved_source_split"] = str(resolved_source_split)
+    if resolved_source_split != configured_train_split.resolve():
+        summary["status"] = "blocked"
+        summary["error"] = (
+            "Locked micro manifest must use train split only. "
+            f"Manifest source_split={resolved_source_split} train_split={configured_train_split.resolve()}"
+        )
+        return summary
+    actual_sha = _sha256_file(resolved_source_split).lower()
+    summary["actual_source_split_sha256"] = actual_sha
+    if actual_sha != expected_sha:
+        summary["status"] = "blocked"
+        summary["error"] = (
+            "Locked micro manifest TRAIN SHA256 mismatch. "
+            f"manifest={expected_sha} actual={actual_sha} path={resolved_source_split}"
+        )
+    return summary
 
 
 def _seed_everything(seed: int) -> None:
@@ -868,8 +963,14 @@ def read_locked_micro_manifest(path: Path) -> dict[str, Any]:
         raise SystemExit(f"Locked micro manifest is missing or invalid JSON: {path}")
     sample_ids = payload.get("sample_ids")
     rows = payload.get("rows")
+    source_split = payload.get("source_split")
+    source_split_sha256 = payload.get("source_split_sha256")
     if not isinstance(sample_ids, list) or not isinstance(rows, list):
         raise SystemExit(f"Locked micro manifest must contain sample_ids and rows lists: {path}")
+    if not isinstance(source_split, str) or not source_split.strip():
+        raise SystemExit(f"Locked micro manifest must contain non-empty source_split: {path}")
+    if not isinstance(source_split_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", source_split_sha256.strip().lower()):
+        raise SystemExit(f"Locked micro manifest must contain source_split_sha256 as lowercase hex: {path}")
     row_ids = [str(row.get("sample_id", "")) for row in rows if isinstance(row, dict)]
     if [str(v) for v in sample_ids] != row_ids:
         raise SystemExit(f"Locked micro manifest sample_ids/rows mismatch: {path}")
@@ -1040,7 +1141,8 @@ def select_micro_overfit_records(records: list[dict[str, Any]], *, manifest_path
 
 def write_micro_manifest(records: list[dict[str, Any]], path: Path) -> dict[str, Any]:
     payload = {
-        "source_split": str(DEFAULT_TRAIN_SPLIT.resolve()),
+        "source_split": _repo_relative_canonical_path(DEFAULT_TRAIN_SPLIT),
+        "source_split_sha256": _sha256_file(DEFAULT_TRAIN_SPLIT),
         "locked_candidate_threshold": float(LOCKED_CANDIDATE_THRESHOLD),
         "sample_ids": [str(row["sample_id"]) for row in records],
         "bridge_positive_count": int(sum(int(row["bridge_positive"]) for row in records)),

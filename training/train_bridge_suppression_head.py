@@ -456,12 +456,13 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
     manifest_path = bridge._resolve_repo_path(micro_cfg.get("manifest_path"), bridge.MICRO_MANIFEST_V2_PATH)
     manifest_payload = bridge.read_locked_micro_manifest(manifest_path)
     manifest_payload["_manifest_path"] = str(manifest_path.resolve())
-    manifest_source_split = bridge._resolve_repo_path(manifest_payload.get("source_split"), train_split)
-    if manifest_source_split != train_split.resolve():
-        raise SystemExit(
-            f"Locked micro manifest must use train split only. "
-            f"Manifest source_split={manifest_source_split} train_split={train_split.resolve()}"
-        )
+    manifest_split_validation = bridge.validate_locked_manifest_source_split(
+        manifest_payload=manifest_payload,
+        configured_train_split=train_split,
+    )
+    if str(manifest_split_validation.get("status")) != "pass":
+        bridge._write_json(save_dir / "micro_manifest_resolution.json", {"split_validation": manifest_split_validation})
+        raise SystemExit(str(manifest_split_validation.get("error")))
     micro_records = bridge.mine_bridge_records_for_split(
         cfg=cfg,
         split_txt=train_split,
@@ -476,9 +477,13 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         records=micro_records,
         split_txt=train_split,
     )
-    bridge._write_json(save_dir / "micro_manifest_resolution.json", manifest_resolution)
+    manifest_resolution_payload = {
+        "split_validation": manifest_split_validation,
+        "record_validation": manifest_resolution,
+    }
+    bridge._write_json(save_dir / "micro_manifest_resolution.json", manifest_resolution_payload)
     if str(manifest_resolution.get("status")) != "pass":
-        raise SystemExit(json.dumps(manifest_resolution, ensure_ascii=False, indent=2))
+        raise SystemExit(json.dumps(manifest_resolution_payload, ensure_ascii=False, indent=2))
     optimizer, optimizer_meta = bridge.build_optimizer(model, cfg)
     _save_target_audit_and_split_contract(
         save_dir=save_dir,
@@ -486,7 +491,7 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         val_audit=val_audit,
         train_visuals=train_visuals,
         micro_manifest=manifest_payload,
-        manifest_resolution=manifest_resolution,
+        manifest_resolution=manifest_resolution_payload,
     )
 
     raw_smoke_record = next((row for row in micro_records if int(row["bridge_positive"]) == 1), micro_records[0])
@@ -519,7 +524,7 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         "val_audit": val_audit,
         "smoke": smoke_summary,
         "micro_manifest": manifest_payload,
-        "micro_manifest_resolution": manifest_resolution,
+        "micro_manifest_resolution": manifest_resolution_payload,
         "micro_augment_flags": _micro_augment_flags(cfg),
         "micro_overfit": micro_summary,
         "future_full_run_exists": bool(future_full_dir.exists()),

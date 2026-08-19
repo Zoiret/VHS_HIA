@@ -1,5 +1,6 @@
 {
-  "source_split": "E:\\3d_visual\\ml\\datasets\\converted_full_multiclass_curated\\train.txt",
+  "source_split": "datasets/converted_full_multiclass_curated/train.txt",
+  "source_split_sha256": "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d",
   "locked_candidate_threshold": 0.5,
   "sample_ids": [
     "m11_p01_s06",
