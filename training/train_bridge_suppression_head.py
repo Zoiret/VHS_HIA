@@ -40,6 +40,31 @@ def _save_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "p50_start_success50",
         "pred_success50",
         "oracle_success50",
+        "positive_precision",
+        "positive_recall",
+        "positive_f1",
+        "positive_tp",
+        "positive_fp",
+        "positive_fn",
+        "positive_start_mean_iou",
+        "positive_pred_mean_iou",
+        "positive_oracle_mean_iou",
+        "positive_start_success50",
+        "positive_pred_success50",
+        "positive_oracle_success50",
+        "negative_predicted_bridge_pixels",
+        "negative_removed_fraction",
+        "negative_zero_predicted_removal",
+        "negative_start_mean_iou",
+        "negative_pred_mean_iou",
+        "negative_num_improves",
+        "negative_num_unchanged",
+        "negative_num_regresses",
+        "negative_num_component_topology_changes",
+        "all_removed_over_candidate",
+        "positive_removed_over_candidate",
+        "negative_removed_over_candidate",
+        "positive_gt_bridge_over_candidate",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -47,6 +72,25 @@ def _save_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row.get(key) for key in fieldnames})
+
+
+def _canonical_config_arg(cfg: dict[str, Any]) -> str:
+    cfg_path = Path(str(cfg["_config_path"])).resolve()
+    try:
+        return cfg_path.relative_to(bridge.REPO_ROOT).as_posix()
+    except ValueError:
+        return str(cfg_path)
+
+
+def _micro_augment_flags(cfg: dict[str, Any]) -> dict[str, bool]:
+    aug = cfg.get("augment") or {}
+    return {
+        "rotate90": bool(aug.get("rotate90", False)),
+        "hflip": bool(aug.get("hflip", False)),
+        "vflip": bool(aug.get("vflip", False)),
+        "brightness_contrast": bool(aug.get("brightness_contrast", False)),
+        "gamma": bool(aug.get("gamma", False)),
+    }
 
 
 def _smoke_step(
@@ -154,8 +198,10 @@ def _run_micro_overfit(
     semantic_ref = bridge._snapshot_named_parameters(semantic_named)
     base_bn_ref = bridge._collect_batchnorm_stats(model.base)
     metrics_rows: list[dict[str, Any]] = []
-    best_f1 = float("-inf")
-    best_payload: dict[str, Any] | None = None
+    best_pixel_f1 = float("-inf")
+    best_pixel_payload: dict[str, Any] | None = None
+    best_reconstruction_key = (float("-inf"), float("-inf"))
+    best_reconstruction_payload: dict[str, Any] | None = None
 
     for step in range(1, int(max_steps) + 1):
         model.train(True)
@@ -189,6 +235,9 @@ def _run_micro_overfit(
                     candidate_mask=batch["candidate_mask"],
                 )
                 recon = bridge.evaluate_reconstruction_levels_on_cached(model, cached_records, device)
+            positive_subset = recon["positive_subset"]
+            negative_subset = recon["negative_subset"]
+            removal_calibration = recon["removal_calibration"]
             row = {
                 "step": int(step),
                 "loss": float(loss.detach().cpu().item()),
@@ -209,22 +258,79 @@ def _run_micro_overfit(
                 "p50_start_success50": int(recon["reconstruction"]["p50_start"]["all_iou_ge_0.50_count"]),
                 "pred_success50": int(recon["reconstruction"]["p50_minus_predicted_bridge"]["all_iou_ge_0.50_count"]),
                 "oracle_success50": int(recon["reconstruction"]["p50_minus_gt_oracle_bridge"]["all_iou_ge_0.50_count"]),
+                "positive_precision": float(positive_subset["pixel"]["precision"]),
+                "positive_recall": float(positive_subset["pixel"]["recall"]),
+                "positive_f1": float(positive_subset["pixel"]["f1"]),
+                "positive_tp": int(positive_subset["pixel"]["tp"]),
+                "positive_fp": int(positive_subset["pixel"]["fp"]),
+                "positive_fn": int(positive_subset["pixel"]["fn"]),
+                "positive_start_mean_iou": float(positive_subset["reconstruction"]["p50_start"]["mean_matched_iou"]),
+                "positive_pred_mean_iou": float(positive_subset["reconstruction"]["p50_minus_predicted_bridge"]["mean_matched_iou"]),
+                "positive_oracle_mean_iou": float(positive_subset["reconstruction"]["p50_minus_gt_oracle_bridge"]["mean_matched_iou"]),
+                "positive_start_success50": int(positive_subset["reconstruction"]["p50_start"]["all_iou_ge_0.50_count"]),
+                "positive_pred_success50": int(positive_subset["reconstruction"]["p50_minus_predicted_bridge"]["all_iou_ge_0.50_count"]),
+                "positive_oracle_success50": int(positive_subset["reconstruction"]["p50_minus_gt_oracle_bridge"]["all_iou_ge_0.50_count"]),
+                "negative_predicted_bridge_pixels": int(negative_subset["predicted_bridge_pixels"]),
+                "negative_removed_fraction": float(negative_subset["fraction_of_candidate_pixels_removed"]),
+                "negative_zero_predicted_removal": int(negative_subset["samples_with_zero_predicted_removal"]),
+                "negative_start_mean_iou": float(negative_subset["starting_mean_matched_iou"]),
+                "negative_pred_mean_iou": float(negative_subset["refined_mean_matched_iou"]),
+                "negative_num_improves": int(negative_subset["num_improves"]),
+                "negative_num_unchanged": int(negative_subset["num_unchanged"]),
+                "negative_num_regresses": int(negative_subset["num_regresses"]),
+                "negative_num_component_topology_changes": int(negative_subset["num_component_topology_changes"]),
+                "all_removed_over_candidate": float(removal_calibration["all_removed_over_candidate"]),
+                "positive_removed_over_candidate": float(removal_calibration["positive_removed_over_candidate"]),
+                "negative_removed_over_candidate": float(removal_calibration["negative_removed_over_candidate"]),
+                "positive_gt_bridge_over_candidate": float(removal_calibration["positive_gt_bridge_over_candidate"]),
             }
             metrics_rows.append(row)
-            if float(pixel["f1"]) > float(best_f1):
-                best_f1 = float(pixel["f1"])
-                best_payload = {
+            if float(pixel["f1"]) > float(best_pixel_f1):
+                best_pixel_f1 = float(pixel["f1"])
+                best_pixel_payload = {
                     "step": int(step),
+                    "selection_policy": "pixel_f1",
+                    "selection_reason": {"bridge_f1": float(pixel["f1"])},
                     "pixel": pixel,
+                    "positive_subset": positive_subset,
+                    "negative_subset": negative_subset,
+                    "removal_calibration": removal_calibration,
                     "reconstruction": recon["reconstruction"],
                 }
                 bridge.save_checkpoint(
-                    save_dir / "best_micro_overfit.pth",
+                    save_dir / "best_pixel_f1.pth",
                     model,
                     optimizer,
                     step,
                     cfg,
-                    extra={"best_payload": best_payload},
+                    extra={"best_payload": best_pixel_payload},
+                )
+            reconstruction_key = (
+                int(recon["reconstruction"]["p50_minus_predicted_bridge"]["all_iou_ge_0.50_count"]),
+                float(recon["reconstruction"]["p50_minus_predicted_bridge"]["mean_matched_iou"]),
+            )
+            if reconstruction_key > best_reconstruction_key:
+                best_reconstruction_key = reconstruction_key
+                best_reconstruction_payload = {
+                    "step": int(step),
+                    "selection_policy": "reconstruction",
+                    "selection_reason": {
+                        "predicted_success50": int(reconstruction_key[0]),
+                        "predicted_mean_iou": float(reconstruction_key[1]),
+                    },
+                    "pixel": pixel,
+                    "positive_subset": positive_subset,
+                    "negative_subset": negative_subset,
+                    "removal_calibration": removal_calibration,
+                    "reconstruction": recon["reconstruction"],
+                }
+                bridge.save_checkpoint(
+                    save_dir / "best_reconstruction.pth",
+                    model,
+                    optimizer,
+                    step,
+                    cfg,
+                    extra={"best_payload": best_reconstruction_payload},
                 )
 
     bridge.save_checkpoint(
@@ -233,14 +339,20 @@ def _run_micro_overfit(
         optimizer,
         int(max_steps),
         cfg,
-        extra={"best_payload": best_payload},
+        extra={
+            "best_pixel_payload": best_pixel_payload,
+            "best_reconstruction_payload": best_reconstruction_payload,
+            "selection_policy": "last",
+            "selection_reason": {"step": int(max_steps)},
+        },
     )
     _save_metrics_csv(save_dir / "micro_overfit_metrics.csv", metrics_rows)
     final_row = metrics_rows[-1]
     summary = {
         "initial": metrics_rows[0],
         "final": final_row,
-        "best": best_payload,
+        "best_pixel": best_pixel_payload,
+        "best_reconstruction": best_reconstruction_payload,
         "semantic_parameter_max_delta": float(bridge._max_parameter_delta_from_snapshot(semantic_named, semantic_ref)),
         "semantic_bn_max_delta": float(bridge._max_bn_delta(model.base, base_bn_ref)),
         "trainable_grad_finite": bool(bridge._all_grads_finite(trainable_named)),
@@ -256,11 +368,13 @@ def _save_target_audit_and_split_contract(
     val_audit: dict[str, Any],
     train_visuals: dict[str, str],
     micro_manifest: dict[str, Any],
+    manifest_resolution: dict[str, Any],
 ) -> None:
     bridge._write_json(save_dir / "train_bridge_target_audit.json", train_audit)
     bridge._write_json(save_dir / "val_bridge_target_audit.json", val_audit)
     bridge._write_json(save_dir / "bridge_target_visuals.json", train_visuals)
     bridge._write_json(save_dir / "micro_manifest_summary.json", micro_manifest)
+    bridge._write_json(save_dir / "micro_manifest_resolution.json", manifest_resolution)
 
 
 def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, Any]:
@@ -279,7 +393,6 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         model,
         bridge._resolve_repo_path((cfg.get("train") or {}).get("init_checkpoint"), bridge.DEFAULT_SEMANTIC_CHECKPOINT),
     )
-    optimizer, optimizer_meta = bridge.build_optimizer(model, cfg)
     loss_fn = bridge.CandidateBalancedBCEDiceLoss()
 
     dataset_cfg = cfg.get("dataset") or {}
@@ -291,6 +404,7 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
     bridge._assert_safe_path(test_split)
 
     if smoke_only:
+        optimizer, optimizer_meta = bridge.build_optimizer(model, cfg)
         first_split_item = bridge._build_split_items(cfg, train_split)[0]
         smoke_records = bridge.mine_bridge_records_for_split(
             cfg=cfg,
@@ -316,7 +430,7 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
             "checkpoint": checkpoint_info,
             "optimizer": optimizer_meta,
             "smoke": smoke_summary,
-            "a100_smoke_command": f"python -u training/train_bridge_suppression_head.py --config {Path(cfg['_config_path']).relative_to(bridge.REPO_ROOT).as_posix()} --smoke-test" if device.type != "cuda" else None,
+            "a100_smoke_command": f"python -u training/train_bridge_suppression_head.py --config {_canonical_config_arg(cfg)} --smoke-test" if device.type != "cuda" else None,
         }
 
     train_records = bridge.mine_bridge_records_for_split(
@@ -338,8 +452,16 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         cache_features=False,
     )
     val_audit = bridge.build_validation_audit(train_records=train_records, val_records=val_records, val_split=val_split)
-    micro_seed_records = bridge.select_micro_overfit_records(train_records)
-    micro_manifest = bridge.write_micro_manifest(micro_seed_records, bridge.MICRO_MANIFEST_PATH)
+    micro_cfg = cfg.get("micro_overfit") or {}
+    manifest_path = bridge._resolve_repo_path(micro_cfg.get("manifest_path"), bridge.MICRO_MANIFEST_V2_PATH)
+    manifest_payload = bridge.read_locked_micro_manifest(manifest_path)
+    manifest_payload["_manifest_path"] = str(manifest_path.resolve())
+    manifest_source_split = bridge._resolve_repo_path(manifest_payload.get("source_split"), train_split)
+    if manifest_source_split != train_split.resolve():
+        raise SystemExit(
+            f"Locked micro manifest must use train split only. "
+            f"Manifest source_split={manifest_source_split} train_split={train_split.resolve()}"
+        )
     micro_records = bridge.mine_bridge_records_for_split(
         cfg=cfg,
         split_txt=train_split,
@@ -347,14 +469,24 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         device=device,
         use_amp=use_amp,
         cache_features=True,
-        selected_sample_ids={str(row["sample_id"]) for row in micro_seed_records},
+        selected_sample_ids={str(v) for v in manifest_payload["sample_ids"]},
     )
+    manifest_resolution = bridge.validate_locked_micro_records(
+        manifest_payload=manifest_payload,
+        records=micro_records,
+        split_txt=train_split,
+    )
+    bridge._write_json(save_dir / "micro_manifest_resolution.json", manifest_resolution)
+    if str(manifest_resolution.get("status")) != "pass":
+        raise SystemExit(json.dumps(manifest_resolution, ensure_ascii=False, indent=2))
+    optimizer, optimizer_meta = bridge.build_optimizer(model, cfg)
     _save_target_audit_and_split_contract(
         save_dir=save_dir,
         train_audit=train_audit,
         val_audit=val_audit,
         train_visuals=train_visuals,
-        micro_manifest=micro_manifest,
+        micro_manifest=manifest_payload,
+        manifest_resolution=manifest_resolution,
     )
 
     raw_smoke_record = next((row for row in micro_records if int(row["bridge_positive"]) == 1), micro_records[0])
@@ -369,7 +501,6 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
     )
     bridge._write_json(save_dir / "smoke_test_summary.json", smoke_summary)
     cached_micro = bridge.cache_microset_features(micro_records)
-    micro_cfg = cfg.get("micro_overfit") or {}
     micro_summary = _run_micro_overfit(
         model=model,
         cached_records=cached_micro,
@@ -387,11 +518,13 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         "train_audit": train_audit,
         "val_audit": val_audit,
         "smoke": smoke_summary,
-        "micro_manifest": micro_manifest,
+        "micro_manifest": manifest_payload,
+        "micro_manifest_resolution": manifest_resolution,
+        "micro_augment_flags": _micro_augment_flags(cfg),
         "micro_overfit": micro_summary,
         "future_full_run_exists": bool(future_full_dir.exists()),
         "future_full_run_dir": str(future_full_dir.resolve()),
-        "a100_smoke_command": f"python -u training/train_bridge_suppression_head.py --config {Path(cfg['_config_path']).relative_to(bridge.REPO_ROOT).as_posix()} --smoke-test" if device.type != "cuda" else None,
+        "a100_smoke_command": f"python -u training/train_bridge_suppression_head.py --config {_canonical_config_arg(cfg)} --smoke-test" if device.type != "cuda" else None,
     }
     bridge._write_json(save_dir / "readiness_summary.json", overall)
     return overall

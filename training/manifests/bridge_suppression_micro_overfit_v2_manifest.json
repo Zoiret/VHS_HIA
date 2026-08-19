@@ -1,0 +1,125 @@
+{
+  "source_split": "E:\\3d_visual\\ml\\datasets\\converted_full_multiclass_curated\\train.txt",
+  "locked_candidate_threshold": 0.5,
+  "sample_ids": [
+    "m11_p01_s06",
+    "m10_p01_s11",
+    "m09_p01_s27",
+    "m11_p02_s03",
+    "m03_p01_s10",
+    "m12_p02_s08",
+    "m13_p03_s05",
+    "m12_p01_s00",
+    "m13_p02_s08",
+    "m15_p01_s08"
+  ],
+  "bridge_positive_count": 6,
+  "bridge_negative_count": 4,
+  "positive_gt2_count": 3,
+  "positive_gt3_count": 3,
+  "negative_gt2_count": 2,
+  "negative_gt3_count": 2,
+  "patient_count": 10,
+  "rows": [
+    {
+      "sample_id": "m11_p01_s06",
+      "patient_id": "m11_p01",
+      "gt_count": 2,
+      "bridge_positive": 1,
+      "bridge_pixels": 75371,
+      "candidate_pixels": 307354,
+      "topology_changes_if_oracle_removed": 1,
+      "reason_selected": "broad_gt2_large_bridge_topology_change"
+    },
+    {
+      "sample_id": "m10_p01_s11",
+      "patient_id": "m10_p01",
+      "gt_count": 2,
+      "bridge_positive": 1,
+      "bridge_pixels": 12315,
+      "candidate_pixels": 107479,
+      "topology_changes_if_oracle_removed": 1,
+      "reason_selected": "medium_gt2_bridge_diverse_patient"
+    },
+    {
+      "sample_id": "m09_p01_s27",
+      "patient_id": "m09_p01",
+      "gt_count": 2,
+      "bridge_positive": 1,
+      "bridge_pixels": 9440,
+      "candidate_pixels": 75772,
+      "topology_changes_if_oracle_removed": 1,
+      "reason_selected": "thinner_gt2_bridge_diverse_patient"
+    },
+    {
+      "sample_id": "m11_p02_s03",
+      "patient_id": "m11_p02",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 23862,
+      "candidate_pixels": 293719,
+      "topology_changes_if_oracle_removed": 1,
+      "reason_selected": "broad_gt3_large_bridge_topology_change"
+    },
+    {
+      "sample_id": "m03_p01_s10",
+      "patient_id": "m03_p01",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 25715,
+      "candidate_pixels": 85102,
+      "topology_changes_if_oracle_removed": 1,
+      "reason_selected": "medium_gt3_bridge_diverse_patient"
+    },
+    {
+      "sample_id": "m12_p02_s08",
+      "patient_id": "m12_p02",
+      "gt_count": 3,
+      "bridge_positive": 1,
+      "bridge_pixels": 22353,
+      "candidate_pixels": 150906,
+      "topology_changes_if_oracle_removed": 1,
+      "reason_selected": "multi_region_gt3_bridge_diverse_patient"
+    },
+    {
+      "sample_id": "m13_p03_s05",
+      "patient_id": "m13_p03",
+      "gt_count": 2,
+      "bridge_positive": 0,
+      "bridge_pixels": 0,
+      "candidate_pixels": 155511,
+      "topology_changes_if_oracle_removed": 0,
+      "reason_selected": "gt2_negative_high_candidate_preservation"
+    },
+    {
+      "sample_id": "m12_p01_s00",
+      "patient_id": "m12_p01",
+      "gt_count": 2,
+      "bridge_positive": 0,
+      "bridge_pixels": 0,
+      "candidate_pixels": 139961,
+      "topology_changes_if_oracle_removed": 0,
+      "reason_selected": "gt2_negative_diverse_patient"
+    },
+    {
+      "sample_id": "m13_p02_s08",
+      "patient_id": "m13_p02",
+      "gt_count": 3,
+      "bridge_positive": 0,
+      "bridge_pixels": 0,
+      "candidate_pixels": 133202,
+      "topology_changes_if_oracle_removed": 0,
+      "reason_selected": "gt3_negative_high_candidate_preservation"
+    },
+    {
+      "sample_id": "m15_p01_s08",
+      "patient_id": "m15_p01",
+      "gt_count": 3,
+      "bridge_positive": 0,
+      "bridge_pixels": 0,
+      "candidate_pixels": 100973,
+      "topology_changes_if_oracle_removed": 0,
+      "reason_selected": "gt3_negative_diverse_patient"
+    }
+  ]
+}

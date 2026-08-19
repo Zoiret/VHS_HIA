@@ -1,0 +1,58 @@
+seed: 1337
+
+dataset:
+  root: datasets/converted_full_multiclass
+  train_txt: datasets/converted_full_multiclass_curated/train.txt
+  val_txt: datasets/converted_full_multiclass_curated/val.txt
+  test_txt: datasets/converted_full_multiclass_curated/test.txt
+  instance_root: datasets/converted_leaflet_instances
+
+model:
+  architecture: UnetPlusPlus
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+
+bridge_head:
+  context_projection_channels: 8
+  hidden_channels: 16
+  candidate_threshold: 0.50
+  remove_threshold: 0.50
+  x_0_4_path: base.decoder.blocks.x_0_4
+  x_2_2_path: base.decoder.blocks.x_2_2
+
+augment:
+  rotate90: false
+  hflip: false
+  vflip: false
+  brightness_contrast: false
+  gamma: false
+
+train:
+  save_dir: training/runs/unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth
+  lr: 0.001
+  lr_context_projection: 0.001
+  lr_bridge_head: 0.001
+  weight_decay: 0.00001
+  amp: true
+
+micro_overfit:
+  manifest_path: training/manifests/bridge_suppression_micro_overfit_v2_manifest.json
+  max_steps: 300
+  log_every: 10
+
+reserved_full_run:
+  config_path: training/configs/unetpp_effb3_bridge_suppression_frozen_semantic_100ep.yaml
+  save_dir: training/runs/unetpp_effb3_bridge_suppression_frozen_semantic_100ep
+
+experiment_notes:
+  purpose: Locked TRAIN-only bridge suppression micro-overfit V2.
+  semantic_base_frozen: true
+  semantic_candidate_mask_locked: p_leaf_ge_0.50
+  bridge_remove_threshold_locked: 0.50
+  no_authoritative_holdout: true
+  no_test_usage_in_micro_training: true
+  full_training_launched: false

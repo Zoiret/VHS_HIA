@@ -42,6 +42,7 @@ DEFAULT_TEST_SPLIT = REPO_ROOT / "datasets" / "converted_full_multiclass_curated
 DEFAULT_DATASET_ROOT = REPO_ROOT / "datasets" / "converted_full_multiclass"
 DEFAULT_INSTANCE_ROOT = REPO_ROOT / "datasets" / "converted_leaflet_instances"
 MICRO_MANIFEST_PATH = REPO_ROOT / "training" / "manifests" / "bridge_suppression_micro_overfit_manifest.json"
+MICRO_MANIFEST_V2_PATH = REPO_ROOT / "training" / "manifests" / "bridge_suppression_micro_overfit_v2_manifest.json"
 PROHIBITED_PATH_SUBSTRINGS = ("center_full_val_manifest.jsonl", "authoritative_106_holdout", "holdout")
 LOCKED_CANDIDATE_THRESHOLD = 0.50
 BRIDGE_REMOVE_THRESHOLD = 0.50
@@ -658,7 +659,15 @@ def mine_bridge_records_for_split(
     _assert_safe_path(split_txt)
     items = _build_split_items(cfg, split_txt)
     if selected_sample_ids is not None:
-        items = [item for item in items if str(item["sample_id"]) in {str(v) for v in selected_sample_ids}]
+        requested_ids = [str(v) for v in selected_sample_ids]
+        requested_set = set(requested_ids)
+        items = [item for item in items if str(item["sample_id"]) in requested_set]
+        resolved_ids = {str(item["sample_id"]) for item in items}
+        missing_ids = sorted(requested_set - resolved_ids)
+        if missing_ids:
+            raise SystemExit(
+                f"Locked micro manifest contains sample IDs not resolvable from split {split_txt.resolve()}: {missing_ids}"
+            )
     audit_batch_size = int(((cfg.get("train") or {}).get("audit_batch_size", 2 if device.type != "cuda" else 8)))
     out: list[dict[str, Any]] = []
     model.eval()
@@ -853,6 +862,94 @@ def _read_existing_micro_manifest(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def read_locked_micro_manifest(path: Path) -> dict[str, Any]:
+    payload = _read_existing_micro_manifest(path)
+    if payload is None:
+        raise SystemExit(f"Locked micro manifest is missing or invalid JSON: {path}")
+    sample_ids = payload.get("sample_ids")
+    rows = payload.get("rows")
+    if not isinstance(sample_ids, list) or not isinstance(rows, list):
+        raise SystemExit(f"Locked micro manifest must contain sample_ids and rows lists: {path}")
+    row_ids = [str(row.get("sample_id", "")) for row in rows if isinstance(row, dict)]
+    if [str(v) for v in sample_ids] != row_ids:
+        raise SystemExit(f"Locked micro manifest sample_ids/rows mismatch: {path}")
+    return payload
+
+
+def summarize_manifest_expectations(payload: dict[str, Any]) -> dict[str, Any]:
+    rows = [row for row in payload.get("rows", []) if isinstance(row, dict)]
+    return {
+        "expected_sample_count": int(len(rows)),
+        "expected_positive_count": int(sum(int(row.get("bridge_positive", 0)) for row in rows)),
+        "expected_negative_count": int(sum(1 for row in rows if int(row.get("bridge_positive", 0)) == 0)),
+        "expected_gt2_count": int(sum(1 for row in rows if int(row.get("gt_count", 0)) == 2)),
+        "expected_gt3_count": int(sum(1 for row in rows if int(row.get("gt_count", 0)) == 3)),
+        "sample_ids": [str(row.get("sample_id", "")) for row in rows],
+    }
+
+
+def validate_locked_micro_records(
+    *,
+    manifest_payload: dict[str, Any],
+    records: list[dict[str, Any]],
+    split_txt: Path,
+) -> dict[str, Any]:
+    expected_rows = [row for row in manifest_payload.get("rows", []) if isinstance(row, dict)]
+    expected_by_id = {str(row["sample_id"]): row for row in expected_rows}
+    actual_by_id = {str(row["sample_id"]): row for row in records}
+    expected_ids = [str(row["sample_id"]) for row in expected_rows]
+    actual_ids = [str(row["sample_id"]) for row in records]
+
+    summary = {
+        "manifest_path": str(_resolve_repo_path(manifest_payload.get("_manifest_path"), MICRO_MANIFEST_V2_PATH)),
+        "source_split": str(split_txt.resolve()),
+        **summarize_manifest_expectations(manifest_payload),
+        "actual_sample_count": int(len(records)),
+        "actual_positive_count": int(sum(int(row["bridge_positive"]) for row in records)),
+        "actual_negative_count": int(sum(1 for row in records if int(row["bridge_positive"]) == 0)),
+        "actual_gt2_count": int(sum(1 for row in records if int(row["gt_count"]) == 2)),
+        "actual_gt3_count": int(sum(1 for row in records if int(row["gt_count"]) == 3)),
+        "actual_sample_ids": actual_ids,
+    }
+
+    missing_ids = [sample_id for sample_id in expected_ids if sample_id not in actual_by_id]
+    unexpected_ids = [sample_id for sample_id in actual_ids if sample_id not in expected_by_id]
+    mismatched_rows: list[dict[str, Any]] = []
+    for sample_id in expected_ids:
+        expected = expected_by_id.get(sample_id)
+        actual = actual_by_id.get(sample_id)
+        if expected is None or actual is None:
+            continue
+        for key in ("patient_id", "gt_count", "bridge_positive", "bridge_pixels", "candidate_pixels", "topology_changes_if_oracle_removed"):
+            if key in expected and str(expected.get(key)) != str(actual.get(key)):
+                mismatched_rows.append(
+                    {
+                        "sample_id": sample_id,
+                        "field": key,
+                        "expected": expected.get(key),
+                        "actual": actual.get(key),
+                    }
+                )
+    summary["missing_ids"] = missing_ids
+    summary["unexpected_ids"] = unexpected_ids
+    summary["mismatched_rows"] = mismatched_rows
+    summary["status"] = "pass"
+
+    if (
+        missing_ids
+        or unexpected_ids
+        or mismatched_rows
+        or summary["expected_sample_count"] != summary["actual_sample_count"]
+        or summary["expected_positive_count"] != summary["actual_positive_count"]
+        or summary["expected_negative_count"] != summary["actual_negative_count"]
+        or summary["expected_gt2_count"] != summary["actual_gt2_count"]
+        or summary["expected_gt3_count"] != summary["actual_gt3_count"]
+        or summary["sample_ids"] != summary["actual_sample_ids"]
+    ):
+        summary["status"] = "blocked"
+    return summary
+
+
 def _default_select_micro_overfit_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     positives = [row for row in records if int(row["bridge_positive"]) == 1]
     negatives = [row for row in records if int(row["bridge_positive"]) == 0]
@@ -1030,6 +1127,40 @@ def compute_binary_metrics_from_domain(
     }
 
 
+def compute_binary_metrics_for_subset(
+    *,
+    bridge_probs: torch.Tensor,
+    bridge_target: torch.Tensor,
+    candidate_mask: torch.Tensor,
+    subset_indices: list[int],
+    threshold: float = BRIDGE_REMOVE_THRESHOLD,
+) -> dict[str, Any]:
+    if not subset_indices:
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0, "dice": 0.0, "tp": 0, "fp": 0, "fn": 0}
+    idx = torch.as_tensor(subset_indices, device=bridge_probs.device, dtype=torch.long)
+    return compute_binary_metrics_from_domain(
+        bridge_probs=bridge_probs.index_select(0, idx),
+        bridge_target=bridge_target.index_select(0, idx),
+        candidate_mask=candidate_mask.index_select(0, idx),
+        threshold=threshold,
+    )
+
+
+def _subset_reconstruction_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    n = int(len(rows))
+    success50 = int(sum(int(bool(row["all_iou_ge_0.50"])) for row in rows))
+    gt2_n = sum(1 for row in rows if int(row["gt_count"]) == 2)
+    gt3_n = sum(1 for row in rows if int(row["gt_count"]) == 3)
+    return {
+        "n": n,
+        "mean_matched_iou": float(np.mean([float(row["instance_mean_matched_iou"]) for row in rows])) if rows else 0.0,
+        "all_iou_ge_0.50_count": success50,
+        "all_iou_ge_0.50_rate": float(success50 / max(n, 1)),
+        "gt2_success": f"{sum(int(bool(row['all_iou_ge_0.50'])) for row in rows if int(row['gt_count']) == 2)}/{gt2_n}",
+        "gt3_success": f"{sum(int(bool(row['all_iou_ge_0.50'])) for row in rows if int(row['gt_count']) == 3)}/{gt3_n}",
+    }
+
+
 def evaluate_reconstruction_levels_on_cached(
     model: FrozenSemanticBridgeSuppressionModel,
     records: list[dict[str, Any]],
@@ -1049,28 +1180,61 @@ def evaluate_reconstruction_levels_on_cached(
     predicted_metrics: list[dict[str, Any]] = []
     start_metrics: list[dict[str, Any]] = []
     oracle_metrics: list[dict[str, Any]] = []
+    per_sample: list[dict[str, Any]] = []
+    positive_indices: list[int] = []
+    negative_indices: list[int] = []
+    total_removed_pixels = 0
+    total_candidate_pixels = 0
+    positive_removed_pixels = 0
+    positive_candidate_pixels = 0
+    negative_removed_pixels = 0
+    negative_candidate_pixels = 0
+    positive_gt_bridge_pixels = 0
     for idx, row in enumerate(records):
         candidate_mask = row["candidate_mask_np"].astype(np.uint8)
         pred_remove = (bridge_probs[idx, 0].numpy() >= float(threshold)).astype(np.uint8)
         refined = ((candidate_mask > 0) & (pred_remove == 0)).astype(np.uint8)
+        predicted_removed_pixels = int(np.sum((candidate_mask > 0) & (pred_remove > 0)))
+        candidate_pixels = int(row["candidate_pixels"])
+        total_removed_pixels += predicted_removed_pixels
+        total_candidate_pixels += candidate_pixels
+        comp_before = _connected_components(candidate_mask.astype(np.uint8))[1]
+        comp_after = _connected_components(refined.astype(np.uint8))[1]
         start = run_locked_reconstruction(candidate_mask, row["gt_instances"])
         pred = run_locked_reconstruction(refined, row["gt_instances"])
         oracle = run_locked_reconstruction(row["oracle_removed_mask"], row["gt_instances"])
         start_metrics.append({"sample_id": row["sample_id"], "gt_count": row["gt_count"], **start["metrics"]})
         predicted_metrics.append({"sample_id": row["sample_id"], "gt_count": row["gt_count"], **pred["metrics"]})
         oracle_metrics.append({"sample_id": row["sample_id"], "gt_count": row["gt_count"], **oracle["metrics"]})
-
-    def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-        n = int(len(rows))
-        success50 = int(sum(int(bool(row["all_iou_ge_0.50"])) for row in rows))
-        return {
-            "n": n,
-            "mean_matched_iou": float(np.mean([float(row["instance_mean_matched_iou"]) for row in rows])) if rows else 0.0,
-            "all_iou_ge_0.50_count": success50,
-            "all_iou_ge_0.50_rate": float(success50 / max(n, 1)),
-            "gt2_success": f"{sum(int(bool(row['all_iou_ge_0.50'])) for row in rows if int(row['gt_count']) == 2)}/{sum(1 for row in rows if int(row['gt_count']) == 2)}",
-            "gt3_success": f"{sum(int(bool(row['all_iou_ge_0.50'])) for row in rows if int(row['gt_count']) == 3)}/{sum(1 for row in rows if int(row['gt_count']) == 3)}",
-        }
+        if int(row["bridge_positive"]) == 1:
+            positive_indices.append(idx)
+            positive_removed_pixels += predicted_removed_pixels
+            positive_candidate_pixels += candidate_pixels
+            positive_gt_bridge_pixels += int(row["bridge_pixels"])
+        else:
+            negative_indices.append(idx)
+            negative_removed_pixels += predicted_removed_pixels
+            negative_candidate_pixels += candidate_pixels
+        per_sample.append(
+            {
+                "sample_id": str(row["sample_id"]),
+                "bridge_positive": int(row["bridge_positive"]),
+                "gt_count": int(row["gt_count"]),
+                "candidate_pixels": candidate_pixels,
+                "gt_bridge_pixels": int(row["bridge_pixels"]),
+                "predicted_removed_pixels": predicted_removed_pixels,
+                "predicted_removed_fraction": float(predicted_removed_pixels / max(candidate_pixels, 1)),
+                "start_mean_iou": float(start["metrics"]["instance_mean_matched_iou"]),
+                "predicted_mean_iou": float(pred["metrics"]["instance_mean_matched_iou"]),
+                "oracle_mean_iou": float(oracle["metrics"]["instance_mean_matched_iou"]),
+                "start_success50": int(bool(start["metrics"]["all_iou_ge_0.50"])),
+                "predicted_success50": int(bool(pred["metrics"]["all_iou_ge_0.50"])),
+                "oracle_success50": int(bool(oracle["metrics"]["all_iou_ge_0.50"])),
+                "component_count_start": int(comp_before),
+                "component_count_predicted": int(comp_after),
+                "component_topology_changed": int(comp_before != comp_after),
+            }
+        )
 
     binary = compute_binary_metrics_from_domain(
         bridge_probs=bridge_probs,
@@ -1078,13 +1242,53 @@ def evaluate_reconstruction_levels_on_cached(
         candidate_mask=batch["candidate_mask"].cpu(),
         threshold=threshold,
     )
+    positive_pixel = compute_binary_metrics_for_subset(
+        bridge_probs=bridge_probs,
+        bridge_target=batch["bridge_target"].cpu(),
+        candidate_mask=batch["candidate_mask"].cpu(),
+        subset_indices=positive_indices,
+        threshold=threshold,
+    )
+    negative_rows = [row for row in per_sample if int(row["bridge_positive"]) == 0]
+    positive_start = [row for row in start_metrics if str(row["sample_id"]) in {str(v["sample_id"]) for v in per_sample if int(v["bridge_positive"]) == 1}]
+    positive_pred = [row for row in predicted_metrics if str(row["sample_id"]) in {str(v["sample_id"]) for v in per_sample if int(v["bridge_positive"]) == 1}]
+    positive_oracle = [row for row in oracle_metrics if str(row["sample_id"]) in {str(v["sample_id"]) for v in per_sample if int(v["bridge_positive"]) == 1}]
     return {
         "pixel": binary,
-        "reconstruction": {
-            "p50_start": _summary(start_metrics),
-            "p50_minus_predicted_bridge": _summary(predicted_metrics),
-            "p50_minus_gt_oracle_bridge": _summary(oracle_metrics),
+        "positive_subset": {
+            "pixel": positive_pixel,
+            "reconstruction": {
+                "p50_start": _subset_reconstruction_summary(positive_start),
+                "p50_minus_predicted_bridge": _subset_reconstruction_summary(positive_pred),
+                "p50_minus_gt_oracle_bridge": _subset_reconstruction_summary(positive_oracle),
+            },
         },
+        "negative_subset": {
+            "predicted_bridge_pixels": int(sum(int(row["predicted_removed_pixels"]) for row in negative_rows)),
+            "fraction_of_candidate_pixels_removed": float(
+                sum(int(row["predicted_removed_pixels"]) for row in negative_rows)
+                / max(sum(int(row["candidate_pixels"]) for row in negative_rows), 1)
+            ),
+            "samples_with_zero_predicted_removal": int(sum(1 for row in negative_rows if int(row["predicted_removed_pixels"]) == 0)),
+            "starting_mean_matched_iou": float(np.mean([float(row["start_mean_iou"]) for row in negative_rows])) if negative_rows else 0.0,
+            "refined_mean_matched_iou": float(np.mean([float(row["predicted_mean_iou"]) for row in negative_rows])) if negative_rows else 0.0,
+            "num_improves": int(sum(1 for row in negative_rows if float(row["predicted_mean_iou"]) > float(row["start_mean_iou"]) + 1.0e-9)),
+            "num_unchanged": int(sum(1 for row in negative_rows if abs(float(row["predicted_mean_iou"]) - float(row["start_mean_iou"])) <= 1.0e-9)),
+            "num_regresses": int(sum(1 for row in negative_rows if float(row["predicted_mean_iou"]) + 1.0e-9 < float(row["start_mean_iou"]))),
+            "num_component_topology_changes": int(sum(int(row["component_topology_changed"]) for row in negative_rows)),
+        },
+        "removal_calibration": {
+            "all_removed_over_candidate": float(total_removed_pixels / max(total_candidate_pixels, 1)),
+            "positive_removed_over_candidate": float(positive_removed_pixels / max(positive_candidate_pixels, 1)),
+            "negative_removed_over_candidate": float(negative_removed_pixels / max(negative_candidate_pixels, 1)),
+            "positive_gt_bridge_over_candidate": float(positive_gt_bridge_pixels / max(positive_candidate_pixels, 1)),
+        },
+        "reconstruction": {
+            "p50_start": _subset_reconstruction_summary(start_metrics),
+            "p50_minus_predicted_bridge": _subset_reconstruction_summary(predicted_metrics),
+            "p50_minus_gt_oracle_bridge": _subset_reconstruction_summary(oracle_metrics),
+        },
+        "per_sample": per_sample,
     }
 
 

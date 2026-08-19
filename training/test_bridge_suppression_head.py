@@ -195,6 +195,133 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         self.assertEqual(tuple(row["x_2_2"].shape), (32, 192, 192))
         self.assertEqual(row["bridge_contract_input_hw"], [768, 768])
 
+    def test_locked_v2_manifest_counts(self):
+        bridge, _soft = self._mods()
+        payload = bridge.read_locked_micro_manifest(bridge.MICRO_MANIFEST_V2_PATH)
+        summary = bridge.summarize_manifest_expectations(payload)
+        self.assertEqual(summary["expected_sample_count"], 10)
+        self.assertEqual(summary["expected_positive_count"], 6)
+        self.assertEqual(summary["expected_negative_count"], 4)
+        rows = payload["rows"]
+        self.assertEqual(sum(1 for row in rows if int(row["bridge_positive"]) == 1 and int(row["gt_count"]) == 2), 3)
+        self.assertEqual(sum(1 for row in rows if int(row["bridge_positive"]) == 1 and int(row["gt_count"]) == 3), 3)
+        self.assertEqual(sum(1 for row in rows if int(row["bridge_positive"]) == 0 and int(row["gt_count"]) == 2), 2)
+        self.assertEqual(sum(1 for row in rows if int(row["bridge_positive"]) == 0 and int(row["gt_count"]) == 3), 2)
+
+    def test_missing_selected_sample_causes_hard_failure(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+
+        class FakeModel:
+            def eval(self):
+                return self
+
+        with mock.patch.object(bridge, "_build_split_items", return_value=[{"sample_id": "present"}]):
+            with self.assertRaises(SystemExit):
+                bridge.mine_bridge_records_for_split(
+                    cfg=cfg,
+                    split_txt=bridge.DEFAULT_TRAIN_SPLIT,
+                    model=FakeModel(),
+                    device=torch.device("cpu"),
+                    use_amp=False,
+                    cache_features=False,
+                    selected_sample_ids={"present", "missing"},
+                )
+
+    def test_validate_locked_micro_records_blocks_on_mismatch(self):
+        bridge, _soft = self._mods()
+        payload = {
+            "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
+            "sample_ids": ["a", "b"],
+            "rows": [
+                {"sample_id": "a", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 5, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1},
+                {"sample_id": "b", "patient_id": "p2", "gt_count": 3, "bridge_positive": 0, "bridge_pixels": 0, "candidate_pixels": 9, "topology_changes_if_oracle_removed": 0},
+            ],
+        }
+        records = [
+            {"sample_id": "a", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 5, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1},
+        ]
+        summary = bridge.validate_locked_micro_records(manifest_payload=payload, records=records, split_txt=bridge.DEFAULT_TRAIN_SPLIT)
+        self.assertEqual(summary["status"], "blocked")
+        self.assertEqual(summary["missing_ids"], ["b"])
+
+    def test_negative_preservation_metrics_and_removal_calibration(self):
+        bridge, _soft = self._mods()
+
+        class FakeModel:
+            def eval(self):
+                return self
+
+            def bridge_forward_from_cached(self, *, x_0_4, x_2_2, p_leaf):
+                logits = torch.tensor(
+                    [
+                        [[[2.0, -2.0], [-2.0, -2.0]]],
+                        [[[-2.0, -2.0], [-2.0, -2.0]]],
+                    ],
+                    dtype=torch.float32,
+                )
+                return {"bridge_logits": logits}
+
+        records = [
+            {
+                "sample_id": "pos",
+                "patient_id": "p1",
+                "gt_count": 2,
+                "bridge_positive": 1,
+                "candidate_pixels": 4,
+                "bridge_pixels": 2,
+                "x_0_4": torch.zeros((16, 2, 2), dtype=torch.float32),
+                "x_2_2": torch.zeros((32, 1, 1), dtype=torch.float32),
+                "p_leaf": torch.ones((1, 2, 2), dtype=torch.float32),
+                "candidate_mask": torch.ones((1, 2, 2), dtype=torch.float32),
+                "bridge_target": torch.tensor([[[1.0, 0.0], [1.0, 0.0]]], dtype=torch.float32),
+                "gt_instances": np.ones((2, 2), dtype=np.uint8),
+                "candidate_mask_np": np.ones((2, 2), dtype=np.uint8),
+                "oracle_removed_mask": np.array([[0, 0], [1, 1]], dtype=np.uint8),
+                "image_path": "x",
+            },
+            {
+                "sample_id": "neg",
+                "patient_id": "p2",
+                "gt_count": 3,
+                "bridge_positive": 0,
+                "candidate_pixels": 4,
+                "bridge_pixels": 0,
+                "x_0_4": torch.zeros((16, 2, 2), dtype=torch.float32),
+                "x_2_2": torch.zeros((32, 1, 1), dtype=torch.float32),
+                "p_leaf": torch.ones((1, 2, 2), dtype=torch.float32),
+                "candidate_mask": torch.ones((1, 2, 2), dtype=torch.float32),
+                "bridge_target": torch.zeros((1, 2, 2), dtype=torch.float32),
+                "gt_instances": np.full((2, 2), 2, dtype=np.uint8),
+                "candidate_mask_np": np.ones((2, 2), dtype=np.uint8),
+                "oracle_removed_mask": np.ones((2, 2), dtype=np.uint8),
+                "image_path": "y",
+            },
+        ]
+
+        def fake_reconstruction(pred_leaf01, gt_inst_u8):
+            marker = int(gt_inst_u8[0, 0])
+            fg = int(np.sum(pred_leaf01))
+            if marker == 1:
+                mean_iou = {4: 0.30, 3: 0.55, 2: 0.90}[fg]
+            else:
+                mean_iou = {4: 0.80, 3: 0.60}.get(fg, 0.80)
+            return {
+                "metrics": {
+                    "instance_mean_matched_iou": float(mean_iou),
+                    "all_iou_ge_0.50": bool(mean_iou >= 0.50),
+                }
+            }
+
+        with mock.patch.object(bridge, "run_locked_reconstruction", side_effect=fake_reconstruction):
+            out = bridge.evaluate_reconstruction_levels_on_cached(FakeModel(), records, torch.device("cpu"))
+        self.assertEqual(out["positive_subset"]["pixel"]["tp"], 1)
+        self.assertEqual(out["negative_subset"]["predicted_bridge_pixels"], 0)
+        self.assertEqual(out["negative_subset"]["samples_with_zero_predicted_removal"], 1)
+        self.assertEqual(out["negative_subset"]["num_unchanged"], 1)
+        self.assertEqual(out["negative_subset"]["num_component_topology_changes"], 0)
+        self.assertAlmostEqual(out["removal_calibration"]["negative_removed_over_candidate"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
