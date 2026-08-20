@@ -76,7 +76,7 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
             cfg["_config_path"] = str((bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml").resolve())
             manifest_payload = {
                 "source_split": "datasets/converted_full_multiclass_curated/train.txt",
-                "source_split_sha256": "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d",
+                "source_split_canonical_sha256": "f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82",
                 "sample_ids": ["s1"] * 10,
                 "rows": [{"sample_id": f"s{i}", "patient_id": f"p{i}", "gt_count": 2 if i < 5 else 3, "bridge_positive": 1 if i < 6 else 0, "bridge_pixels": 1 if i < 6 else 0, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1 if i < 6 else 0, "reason_selected": "x"} for i in range(10)],
             }
@@ -88,7 +88,7 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
             with mock.patch.object(bridge, "build_model_from_cfg", return_value=mock.Mock()), \
                  mock.patch.object(bridge, "load_semantic_checkpoint", return_value={"checkpoint_sha256": "x"}), \
                  mock.patch.object(bridge, "read_locked_micro_manifest", return_value=manifest_payload), \
-                 mock.patch.object(bridge, "validate_locked_manifest_source_split", return_value={"status": "pass", "resolved_source_split": str(bridge.DEFAULT_TRAIN_SPLIT.resolve()), "actual_source_split_sha256": manifest_payload["source_split_sha256"]}), \
+                 mock.patch.object(bridge, "validate_locked_manifest_source_split", return_value={"status": "pass", "resolved_source_split": str(bridge.DEFAULT_TRAIN_SPLIT.resolve()), "actual_source_split_canonical_sha256": manifest_payload["source_split_canonical_sha256"]}), \
                  mock.patch.object(bridge, "mine_bridge_records_for_split", side_effect=[fake_records, fake_records, fake_records]), \
                  mock.patch.object(bridge, "summarize_bridge_records", return_value={"sample_count": 1}), \
                  mock.patch.object(bridge, "build_validation_audit", return_value={"verdict": "valid_for_bridge_head_development"}), \
@@ -110,7 +110,7 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
             cfg["_config_path"] = str((bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml").resolve())
             manifest_payload = {
                 "source_split": "datasets/converted_full_multiclass_curated/train.txt",
-                "source_split_sha256": "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d",
+                "source_split_canonical_sha256": "f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82",
                 "sample_ids": ["s1"],
                 "rows": [{"sample_id": "s1", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 1, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1, "reason_selected": "x"}],
             }
@@ -119,7 +119,7 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
             with mock.patch.object(bridge, "build_model_from_cfg", return_value=mock.Mock()), \
                  mock.patch.object(bridge, "load_semantic_checkpoint", return_value={"checkpoint_sha256": "x"}), \
                  mock.patch.object(bridge, "read_locked_micro_manifest", return_value=manifest_payload), \
-                 mock.patch.object(bridge, "validate_locked_manifest_source_split", return_value={"status": "pass", "resolved_source_split": str(bridge.DEFAULT_TRAIN_SPLIT.resolve()), "actual_source_split_sha256": manifest_payload["source_split_sha256"]}), \
+                 mock.patch.object(bridge, "validate_locked_manifest_source_split", return_value={"status": "pass", "resolved_source_split": str(bridge.DEFAULT_TRAIN_SPLIT.resolve()), "actual_source_split_canonical_sha256": manifest_payload["source_split_canonical_sha256"]}), \
                  mock.patch.object(bridge, "mine_bridge_records_for_split", side_effect=[[fake_record], [fake_record], [fake_record]]), \
                  mock.patch.object(bridge, "summarize_bridge_records", return_value={"sample_count": 1}), \
                  mock.patch.object(bridge, "build_validation_audit", return_value={"verdict": "valid_for_bridge_head_development"}), \
@@ -139,7 +139,7 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
             cfg["_config_path"] = str((bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml").resolve())
             manifest_payload = {
                 "source_split": r"E:\3d_visual\ml\datasets\converted_full_multiclass_curated\train.txt",
-                "source_split_sha256": "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d",
+                "source_split_canonical_sha256": "f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82",
                 "sample_ids": ["s1"],
                 "rows": [{"sample_id": "s1", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 1, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1, "reason_selected": "x"}],
             }

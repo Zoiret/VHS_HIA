@@ -57,6 +57,17 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         got = bridge.false_bridge_pixels_from_candidate(gt_sem_u8=gt_sem, gt_inst_u8=gt_inst, candidate_mask01=candidate)
         self.assertEqual(int(np.sum(got)), 0)
 
+    def test_bridge_target_depends_on_semantic_gt_mask(self):
+        bridge, _soft = self._mods()
+        candidate = np.array([[1, 1], [1, 0]], dtype=np.uint8)
+        gt_inst = np.array([[1, 0], [2, 0]], dtype=np.uint8)
+        gt_sem_a = np.array([[1, 0], [0, 0]], dtype=np.uint8)
+        gt_sem_b = np.array([[1, 1], [0, 0]], dtype=np.uint8)
+        target_a = bridge.false_bridge_pixels_from_candidate(gt_sem_u8=gt_sem_a, gt_inst_u8=gt_inst, candidate_mask01=candidate)
+        target_b = bridge.false_bridge_pixels_from_candidate(gt_sem_u8=gt_sem_b, gt_inst_u8=gt_inst, candidate_mask01=candidate)
+        self.assertFalse(np.array_equal(target_a, target_b))
+        self.assertGreater(int(np.sum(target_a)), int(np.sum(target_b)))
+
     def test_candidate_masked_loss_and_zero_positive_safety(self):
         bridge, _soft = self._mods()
         loss_fn = bridge.CandidateBalancedBCEDiceLoss()
@@ -199,7 +210,7 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         bridge, _soft = self._mods()
         payload = bridge.read_locked_micro_manifest(bridge.MICRO_MANIFEST_V2_PATH)
         self.assertEqual(payload["source_split"], "datasets/converted_full_multiclass_curated/train.txt")
-        self.assertEqual(payload["source_split_sha256"], "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d")
+        self.assertEqual(payload["source_split_canonical_sha256"], "f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82")
         summary = bridge.summarize_manifest_expectations(payload)
         self.assertEqual(summary["expected_sample_count"], 10)
         self.assertEqual(summary["expected_positive_count"], 6)
@@ -223,7 +234,7 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         payload = {
             "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
             "source_split": "datasets/converted_full_multiclass_curated/train.txt",
-            "source_split_sha256": "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d",
+            "source_split_canonical_sha256": "f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82",
             "sample_ids": ["a"],
             "rows": [{"sample_id": "a"}],
         }
@@ -233,14 +244,14 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         )
         self.assertEqual(summary["status"], "pass")
         self.assertEqual(summary["resolved_source_split"], str(bridge.DEFAULT_TRAIN_SPLIT.resolve()))
-        self.assertEqual(summary["actual_source_split_sha256"], payload["source_split_sha256"])
+        self.assertEqual(summary["actual_source_split_canonical_sha256"], payload["source_split_canonical_sha256"])
 
     def test_validate_locked_manifest_source_split_blocks_wrong_relative_split(self):
         bridge, _soft = self._mods()
         payload = {
             "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
             "source_split": "datasets/converted_full_multiclass_curated/val.txt",
-            "source_split_sha256": "c0e455da98e46e4cd523a45f386fa898bfb09fc1f218b14c4a8c525bfb4a5d84",
+            "source_split_canonical_sha256": "b9b4151c48fe7824be1a3e25c4f519ebadf6353a58f717f9679fde2ca8ff376c",
             "sample_ids": ["a"],
             "rows": [{"sample_id": "a"}],
         }
@@ -256,7 +267,7 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         payload = {
             "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
             "source_split": str(bridge.DEFAULT_VAL_SPLIT.resolve()),
-            "source_split_sha256": "c0e455da98e46e4cd523a45f386fa898bfb09fc1f218b14c4a8c525bfb4a5d84",
+            "source_split_canonical_sha256": "b9b4151c48fe7824be1a3e25c4f519ebadf6353a58f717f9679fde2ca8ff376c",
             "sample_ids": ["a"],
             "rows": [{"sample_id": "a"}],
         }
@@ -281,7 +292,7 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         payload = {
             "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
             "source_split": "datasets/converted_full_multiclass_curated/train.txt",
-            "source_split_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "source_split_canonical_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
             "sample_ids": ["a"],
             "rows": [{"sample_id": "a"}],
         }
@@ -290,7 +301,7 @@ class TestBridgeSuppressionHead(unittest.TestCase):
             configured_train_split=bridge.DEFAULT_TRAIN_SPLIT,
         )
         self.assertEqual(summary["status"], "blocked")
-        self.assertIn("TRAIN SHA256 mismatch", str(summary["error"]))
+        self.assertIn("TRAIN canonical SHA256 mismatch", str(summary["error"]))
 
     def test_missing_selected_sample_causes_hard_failure(self):
         bridge, _soft = self._mods()
@@ -317,7 +328,7 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         payload = {
             "_manifest_path": str(bridge.MICRO_MANIFEST_V2_PATH),
             "source_split": "datasets/converted_full_multiclass_curated/train.txt",
-            "source_split_sha256": "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d",
+            "source_split_canonical_sha256": "f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82",
             "sample_ids": ["a", "b"],
             "rows": [
                 {"sample_id": "a", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 5, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1},

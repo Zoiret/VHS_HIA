@@ -165,6 +165,20 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _canonical_split_rows(path: Path) -> list[str]:
+    return [
+        row.strip()
+        for row in path.read_text(encoding="utf-8-sig").splitlines()
+        if row.strip()
+    ]
+
+
+def _canonical_split_sha256(path: Path) -> str:
+    rows = _canonical_split_rows(path)
+    payload = ("\n".join(rows) + "\n").encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def validate_locked_manifest_source_split(
     *,
     manifest_payload: dict[str, Any],
@@ -176,19 +190,19 @@ def validate_locked_manifest_source_split(
         "manifest_source_split": str(manifest_payload.get("source_split", "")),
         "configured_train_split": str(configured_train_split.resolve()),
         "resolved_source_split": None,
-        "expected_source_split_sha256": str(manifest_payload.get("source_split_sha256", "")),
-        "actual_source_split_sha256": None,
+        "expected_source_split_canonical_sha256": str(manifest_payload.get("source_split_canonical_sha256", "")),
+        "actual_source_split_canonical_sha256": None,
         "error": None,
     }
     source_split = manifest_payload.get("source_split")
-    expected_sha = str(manifest_payload.get("source_split_sha256", "")).strip().lower()
+    expected_sha = str(manifest_payload.get("source_split_canonical_sha256", "")).strip().lower()
     if not isinstance(source_split, str) or not source_split.strip():
         summary["status"] = "blocked"
         summary["error"] = "Locked micro manifest must contain a non-empty source_split string."
         return summary
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
         summary["status"] = "blocked"
-        summary["error"] = "Locked micro manifest must contain source_split_sha256 as a 64-character lowercase hex string."
+        summary["error"] = "Locked micro manifest must contain source_split_canonical_sha256 as a 64-character lowercase hex string."
         return summary
     try:
         resolved_source_split = _resolve_repo_path(source_split, configured_train_split)
@@ -204,12 +218,12 @@ def validate_locked_manifest_source_split(
             f"Manifest source_split={resolved_source_split} train_split={configured_train_split.resolve()}"
         )
         return summary
-    actual_sha = _sha256_file(resolved_source_split).lower()
-    summary["actual_source_split_sha256"] = actual_sha
+    actual_sha = _canonical_split_sha256(resolved_source_split).lower()
+    summary["actual_source_split_canonical_sha256"] = actual_sha
     if actual_sha != expected_sha:
         summary["status"] = "blocked"
         summary["error"] = (
-            "Locked micro manifest TRAIN SHA256 mismatch. "
+            "Locked micro manifest TRAIN canonical SHA256 mismatch. "
             f"manifest={expected_sha} actual={actual_sha} path={resolved_source_split}"
         )
     return summary
@@ -964,13 +978,13 @@ def read_locked_micro_manifest(path: Path) -> dict[str, Any]:
     sample_ids = payload.get("sample_ids")
     rows = payload.get("rows")
     source_split = payload.get("source_split")
-    source_split_sha256 = payload.get("source_split_sha256")
+    source_split_sha256 = payload.get("source_split_canonical_sha256")
     if not isinstance(sample_ids, list) or not isinstance(rows, list):
         raise SystemExit(f"Locked micro manifest must contain sample_ids and rows lists: {path}")
     if not isinstance(source_split, str) or not source_split.strip():
         raise SystemExit(f"Locked micro manifest must contain non-empty source_split: {path}")
     if not isinstance(source_split_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", source_split_sha256.strip().lower()):
-        raise SystemExit(f"Locked micro manifest must contain source_split_sha256 as lowercase hex: {path}")
+        raise SystemExit(f"Locked micro manifest must contain source_split_canonical_sha256 as lowercase hex: {path}")
     row_ids = [str(row.get("sample_id", "")) for row in rows if isinstance(row, dict)]
     if [str(v) for v in sample_ids] != row_ids:
         raise SystemExit(f"Locked micro manifest sample_ids/rows mismatch: {path}")
@@ -1142,7 +1156,7 @@ def select_micro_overfit_records(records: list[dict[str, Any]], *, manifest_path
 def write_micro_manifest(records: list[dict[str, Any]], path: Path) -> dict[str, Any]:
     payload = {
         "source_split": _repo_relative_canonical_path(DEFAULT_TRAIN_SPLIT),
-        "source_split_sha256": _sha256_file(DEFAULT_TRAIN_SPLIT),
+        "source_split_canonical_sha256": _canonical_split_sha256(DEFAULT_TRAIN_SPLIT),
         "locked_candidate_threshold": float(LOCKED_CANDIDATE_THRESHOLD),
         "sample_ids": [str(row["sample_id"]) for row in records],
         "bridge_positive_count": int(sum(int(row["bridge_positive"]) for row in records)),

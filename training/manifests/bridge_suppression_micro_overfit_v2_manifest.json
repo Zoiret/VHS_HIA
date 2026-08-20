@@ -1,6 +1,6 @@
 {
   "source_split": "datasets/converted_full_multiclass_curated/train.txt",
-  "source_split_sha256": "c23c836c383ad5d54652dba3f04ead2c03786b7e750127d954d6e3b34780973d",
+  "source_split_canonical_sha256": "f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82",
   "locked_candidate_threshold": 0.5,
   "sample_ids": [
     "m11_p01_s06",

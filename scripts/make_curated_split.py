@@ -113,7 +113,7 @@ def main() -> None:
     bad_missing = sorted([x for x in bad_ids if x not in index])
     unset_missing = sorted([x for x in unset_ids if x not in index])
 
-    resolved = [x for x in included_ids if x in index]
+    resolved = sorted(x for x in included_ids if x in index)
     val_ratio = float(args.val_ratio)
     test_ratio = float(args.test_ratio)
     n_val = int(round(len(resolved) * val_ratio))
@@ -122,14 +122,15 @@ def main() -> None:
     n_test = max(n_test, 0)
     desired_holdout = n_val + n_test
 
-    clean_resolved = [x for x in clean_ids if x in index and x not in bad_ids and x not in unset_ids]
+    clean_resolved = sorted(x for x in clean_ids if x in index and x not in bad_ids and x not in unset_ids)
     default_curated = Path("datasets/curated").resolve()
     prefer_clean = bool(args.prefer_clean_for_val_test) or (curated_dir != default_curated)
     min_clean = int(args.min_clean_for_val_test)
 
     if prefer_clean and desired_holdout > 0:
         if len(clean_resolved) >= max(desired_holdout, min_clean):
-            train_pool = [x for x in resolved if x not in set(clean_resolved)]
+            clean_resolved_set = set(clean_resolved)
+            train_pool = [x for x in resolved if x not in clean_resolved_set]
             holdout_pool = list(clean_resolved)
             hold_train, hold_val, hold_test = _split_ids(holdout_pool, seed=int(args.seed), val_ratio=val_ratio, test_ratio=test_ratio)
             val_ids = hold_val

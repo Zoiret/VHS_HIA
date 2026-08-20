@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,10 @@ def canonical_split_sha256(path: Path) -> tuple[list[str], str]:
     rows = _read_split_rows(path)
     payload = ("\n".join(rows) + "\n").encode("utf-8")
     return rows, hashlib.sha256(payload).hexdigest()
+
+
+def raw_split_sha256(path: Path) -> str:
+    return sha256_file(path)
 
 
 def sha256_file(path: Path) -> str:
@@ -109,6 +113,36 @@ def _hash_asset(path: Path, *, relative_path: str) -> dict[str, Any]:
     }
 
 
+def _semantic_mask_fingerprint(path: Path, *, relative_path: str) -> dict[str, Any]:
+    base = _hash_asset(path, relative_path=relative_path)
+    if not bool(base["exists"]):
+        return {
+            "path": base["path"],
+            "exists": False,
+            "file_size": None,
+            "file_sha256": None,
+            "decoded_shape": None,
+            "decoded_dtype": None,
+            "decoded_unique_values": [],
+            "decoded_class_counts": {},
+            "decoded_pixel_sha256": None,
+        }
+    decoded = _read_u8(path)
+    decoded_c = np.ascontiguousarray(decoded.astype(np.uint8))
+    unique, counts = np.unique(decoded_c, return_counts=True)
+    return {
+        "path": base["path"],
+        "exists": True,
+        "file_size": base["size"],
+        "file_sha256": base["sha256"],
+        "decoded_shape": [int(v) for v in decoded_c.shape],
+        "decoded_dtype": str(decoded_c.dtype),
+        "decoded_unique_values": [int(v) for v in unique.tolist()],
+        "decoded_class_counts": {str(int(k)): int(v) for k, v in zip(unique.tolist(), counts.tolist())},
+        "decoded_pixel_sha256": hashlib.sha256(decoded_c.tobytes(order="C")).hexdigest(),
+    }
+
+
 def _duplicate_rows(rows: list[str]) -> list[str]:
     counts: dict[str, int] = {}
     duplicates: list[str] = []
@@ -156,11 +190,26 @@ def _asset_triplet_for_row(
         "sample_id": str(sample_id),
         "patient_id": _patient_id_from_sample_id(sample_id),
         "image": _hash_asset(image_path, relative_path=image_rel),
-        "semantic_mask": _hash_asset(semantic_path, relative_path=semantic_rel),
+        "semantic_mask": _semantic_mask_fingerprint(semantic_path, relative_path=semantic_rel),
         "instance_mask": _hash_asset(instance_path, relative_path=f"instance_masks/{sample_id}.png"),
         "gt_count_after_locked_768_crop": gt_count,
     }
     return sample_id, asset_entry, gt_count
+
+
+def _logical_contract_payload(contract_payload: dict[str, Any]) -> dict[str, Any]:
+    logical = json.loads(json.dumps(contract_payload))
+    for split_entry in (logical.get("splits") or {}).values():
+        if isinstance(split_entry, dict):
+            split_entry.pop("raw_split_sha256", None)
+    for asset_entry in (logical.get("assets") or {}).values():
+        if not isinstance(asset_entry, dict):
+            continue
+        semantic_entry = asset_entry.get("semantic_mask")
+        if isinstance(semantic_entry, dict):
+            semantic_entry.pop("file_sha256", None)
+            semantic_entry.pop("file_size", None)
+    return logical
 
 
 def build_fingerprint(
@@ -183,6 +232,7 @@ def build_fingerprint(
     for split_name, split_path in sorted(splits.items()):
         split_path = split_path.resolve()
         rows, split_sha = canonical_split_sha256(split_path)
+        split_raw_sha = raw_split_sha256(split_path)
         ordered_sample_ids = [_sample_id_from_row(row) for row in rows]
         unique_patients = sorted({_patient_id_from_sample_id(sample_id) for sample_id in ordered_sample_ids})
         gt_distribution: dict[str, int] = {}
@@ -208,6 +258,7 @@ def build_fingerprint(
         total_duplicate_rows += int(len(duplicates))
         contract_splits[split_name] = {
             "split_relative_path": _stable_relative_text(split_path, REPO_ROOT, split_base),
+            "raw_split_sha256": split_raw_sha,
             "canonical_split_sha256": split_sha,
             "logical_row_count": int(len(rows)),
             "ordered_rows": rows,
@@ -235,7 +286,8 @@ def build_fingerprint(
         "splits": contract_splits,
         "assets": dict(sorted(contract_assets.items())),
     }
-    contract_json = json.dumps(contract_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    logical_contract_payload = _logical_contract_payload(contract_payload)
+    contract_json = json.dumps(logical_contract_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     dataset_contract_sha256 = hashlib.sha256(contract_json.encode("utf-8")).hexdigest()
     return {
         "dataset_contract_sha256": dataset_contract_sha256,
@@ -258,6 +310,18 @@ def build_fingerprint(
 def _rows_only_in_a(rows_a: list[str], rows_b: list[str]) -> list[str]:
     set_b = set(rows_b)
     return [row for row in rows_a if row not in set_b]
+
+
+def _sample_pool_summary(contract: dict[str, Any]) -> dict[str, Any]:
+    splits = contract.get("splits") or {}
+    sample_ids: list[str] = []
+    for split_entry in splits.values():
+        sample_ids.extend(list((split_entry or {}).get("ordered_sample_ids") or []))
+    unique_ids = sorted(set(sample_ids))
+    return {
+        "unique_sample_count": int(len(unique_ids)),
+        "ordered_unique_sample_ids": unique_ids,
+    }
 
 
 def compare_fingerprints(payload_a: dict[str, Any], payload_b: dict[str, Any]) -> dict[str, Any]:
@@ -307,8 +371,10 @@ def compare_fingerprints(payload_a: dict[str, Any], payload_b: dict[str, Any]) -
     asset_ids = sorted(set(assets_a.keys()) | set(assets_b.keys()))
     asset_diffs: dict[str, Any] = {
         "image_sha_mismatch": [],
-        "semantic_mask_sha_mismatch": [],
         "instance_mask_sha_mismatch": [],
+        "semantic_mask_sha_mismatch": [],
+        "semantic_file_bytes_differ_pixels_identical": [],
+        "semantic_pixels_differ": [],
         "missing_in_a": [],
         "missing_in_b": [],
         "missing_files": [],
@@ -327,7 +393,6 @@ def compare_fingerprints(payload_a: dict[str, Any], payload_b: dict[str, Any]) -
             continue
         for asset_key, bucket in (
             ("image", "image_sha_mismatch"),
-            ("semantic_mask", "semantic_mask_sha_mismatch"),
             ("instance_mask", "instance_mask_sha_mismatch"),
         ):
             a_asset = aa.get(asset_key) or {}
@@ -339,12 +404,27 @@ def compare_fingerprints(payload_a: dict[str, Any], payload_b: dict[str, Any]) -
             if str(a_asset.get("sha256")) != str(b_asset.get("sha256")):
                 asset_diffs[bucket].append(sample_id)
                 any_asset_mismatch = True
+        a_sem = aa.get("semantic_mask") or {}
+        b_sem = bb.get("semantic_mask") or {}
+        if not bool(a_sem.get("exists", False)) or not bool(b_sem.get("exists", False)):
+            asset_diffs["missing_files"].append({"sample_id": sample_id, "asset": "semantic_mask"})
+            missing_assets_in_contract = True
+            continue
+        if str(a_sem.get("file_sha256")) != str(b_sem.get("file_sha256")):
+            asset_diffs["semantic_mask_sha_mismatch"].append(sample_id)
+        if str(a_sem.get("decoded_pixel_sha256")) != str(b_sem.get("decoded_pixel_sha256")):
+            asset_diffs["semantic_pixels_differ"].append(sample_id)
+            any_asset_mismatch = True
+        elif str(a_sem.get("file_sha256")) != str(b_sem.get("file_sha256")):
+            asset_diffs["semantic_file_bytes_differ_pixels_identical"].append(sample_id)
 
+    pool_a = _sample_pool_summary(contract_a)
+    pool_b = _sample_pool_summary(contract_b)
     if missing_assets_in_contract:
         classification = "INCOMPLETE_COMPARISON"
     elif any_asset_mismatch:
         classification = "DIFFERENT_ASSETS"
-    elif any_split_difference or str(payload_a.get("dataset_contract_sha256")) != str(payload_b.get("dataset_contract_sha256")):
+    elif any_split_difference:
         classification = "SAME_ASSETS_DIFFERENT_SPLIT"
     else:
         classification = "IDENTICAL_DATASET"
@@ -353,8 +433,62 @@ def compare_fingerprints(payload_a: dict[str, Any], payload_b: dict[str, Any]) -
         "classification": classification,
         "dataset_contract_sha256_a": payload_a.get("dataset_contract_sha256"),
         "dataset_contract_sha256_b": payload_b.get("dataset_contract_sha256"),
+        "sample_pool_a": pool_a,
+        "sample_pool_b": pool_b,
+        "sample_pool_comparison": {
+            "exact_same_sample_id_pool": bool(pool_a["ordered_unique_sample_ids"] == pool_b["ordered_unique_sample_ids"]),
+            "sample_ids_only_in_a": sorted(set(pool_a["ordered_unique_sample_ids"]) - set(pool_b["ordered_unique_sample_ids"])),
+            "sample_ids_only_in_b": sorted(set(pool_b["ordered_unique_sample_ids"]) - set(pool_a["ordered_unique_sample_ids"])),
+        },
         "split_differences": split_diffs,
         "asset_differences": asset_diffs,
+    }
+
+
+def compare_split_dirs(canonical_dir: Path, external_dir: Path) -> dict[str, Any]:
+    canonical_dir = canonical_dir.resolve()
+    external_dir = external_dir.resolve()
+    split_names = ("train", "val", "test")
+    report: dict[str, Any] = {"status": "MATCH", "splits": {}, "canonical_dir": str(canonical_dir), "external_dir": str(external_dir)}
+    for split_name in split_names:
+        canonical_path = canonical_dir / f"{split_name}.txt"
+        external_path = external_dir / f"{split_name}.txt"
+        canonical_rows, canonical_sha = canonical_split_sha256(canonical_path)
+        external_exists = external_path.exists()
+        external_rows = _read_split_rows(external_path) if external_exists else []
+        external_sha = hashlib.sha256(("\n".join(external_rows) + "\n").encode("utf-8")).hexdigest() if external_exists else None
+        match = bool(external_exists and canonical_rows == external_rows)
+        if not match:
+            report["status"] = "DRIFT"
+        report["splits"][split_name] = {
+            "match": match,
+            "canonical_path": str(canonical_path),
+            "external_path": str(external_path),
+            "canonical_sha256": canonical_sha,
+            "external_sha256": external_sha,
+            "external_exists": external_exists,
+        }
+    return report
+
+
+def sync_split_dirs(canonical_dir: Path, external_dir: Path) -> dict[str, Any]:
+    canonical_dir = canonical_dir.resolve()
+    external_dir = external_dir.resolve()
+    split_names = ("train", "val", "test")
+    backup_dir = external_dir / "_backup_before_canonical_sync"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for split_name in split_names:
+        canonical_path = canonical_dir / f"{split_name}.txt"
+        external_path = external_dir / f"{split_name}.txt"
+        if external_path.exists():
+            shutil.copy2(str(external_path), str(backup_dir / f"{split_name}.txt"))
+        external_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(canonical_path), str(external_path))
+    verify_report = compare_split_dirs(canonical_dir, external_dir)
+    return {
+        "performed": True,
+        "backup_dir": str(backup_dir),
+        "verify": verify_report,
     }
 
 
@@ -372,6 +506,8 @@ def main() -> None:
     parser.add_argument("--crop-height", type=int, default=DEFAULT_CROP_H)
     parser.add_argument("--crop-width", type=int, default=DEFAULT_CROP_W)
     parser.add_argument("--compare", nargs=2, metavar=("A", "B"), default=None, help="Compare two fingerprint JSON files.")
+    parser.add_argument("--compare-splits", nargs=2, metavar=("CANONICAL_DIR", "EXTERNAL_DIR"), default=None, help="Compare tracked canonical split manifests against an external split directory.")
+    parser.add_argument("--sync", action="store_true", help="With --compare-splits, back up and copy canonical manifests into the external split directory.")
     args = parser.parse_args()
 
     if args.compare is not None:
@@ -384,6 +520,20 @@ def main() -> None:
             _write_json(_resolve_path(args.output, REPO_ROOT), result)
         else:
             print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if args.compare_splits is not None:
+        canonical_dir = _resolve_path(Path(args.compare_splits[0]), REPO_ROOT)
+        external_dir = _resolve_path(Path(args.compare_splits[1]), REPO_ROOT)
+        report = compare_split_dirs(canonical_dir, external_dir)
+        if args.sync:
+            report["sync"] = sync_split_dirs(canonical_dir, external_dir)
+        else:
+            report["sync"] = {"performed": False}
+        if args.output is not None:
+            _write_json(_resolve_path(args.output, REPO_ROOT), report)
+        else:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
         return
 
     if args.dataset_root is None or args.instance_root is None or not args.split:
