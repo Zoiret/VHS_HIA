@@ -244,6 +244,12 @@ def _amp_enabled(cfg: dict[str, Any], device: torch.device) -> bool:
     return bool(v) and device.type == "cuda"
 
 
+def _semantic_inference_amp_enabled(cfg: dict[str, Any], device: torch.device) -> bool:
+    semantic_cfg = cfg.get("semantic_inference") or {}
+    v = semantic_cfg.get("amp", False)
+    return bool(v) and device.type == "cuda"
+
+
 def _autocast_ctx(device: torch.device, enabled: bool):
     if device.type == "cuda" and bool(enabled):
         return torch.amp.autocast("cuda", enabled=True)
@@ -734,6 +740,20 @@ def _simple_preprocess_uint8_rgb(image_rgb_u8: np.ndarray) -> np.ndarray:
     return image_rgb_u8.astype(np.float32) / 255.0
 
 
+def _leaflet_probability_threshold_diagnostics(
+    p_leaf: np.ndarray,
+    *,
+    threshold: float = LOCKED_CANDIDATE_THRESHOLD,
+) -> dict[str, Any]:
+    delta = np.abs(np.asarray(p_leaf, dtype=np.float32) - np.float32(threshold))
+    return {
+        "min_abs_leaflet_probability_minus_0_5": float(np.min(delta)) if delta.size else 0.0,
+        "count_abs_leaflet_probability_minus_0_5_le_1e_6": int(np.sum(delta <= 1.0e-6)),
+        "count_abs_leaflet_probability_minus_0_5_le_1e_5": int(np.sum(delta <= 1.0e-5)),
+        "count_abs_leaflet_probability_minus_0_5_le_1e_4": int(np.sum(delta <= 1.0e-4)),
+    }
+
+
 def _build_split_items(cfg: dict[str, Any], split_txt: Path) -> list[dict[str, Any]]:
     dataset_cfg = cfg.get("dataset") or {}
     dataset_root = _resolve_repo_path(dataset_cfg.get("root", DEFAULT_DATASET_ROOT), DEFAULT_DATASET_ROOT)
@@ -761,16 +781,16 @@ def mine_bridge_records_for_split(
     split_txt: Path,
     model: FrozenSemanticBridgeSuppressionModel,
     device: torch.device,
-    use_amp: bool,
     cache_features: bool,
-    selected_sample_ids: set[str] | None = None,
+    selected_sample_ids: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[dict[str, Any]]:
     _assert_safe_path(split_txt)
     items = _build_split_items(cfg, split_txt)
     if selected_sample_ids is not None:
         requested_ids = [str(v) for v in selected_sample_ids]
         requested_set = set(requested_ids)
-        items = [item for item in items if str(item["sample_id"]) in requested_set]
+        by_id = {str(item["sample_id"]): item for item in items if str(item["sample_id"]) in requested_set}
+        items = [by_id[sample_id] for sample_id in requested_ids if sample_id in by_id]
         resolved_ids = {str(item["sample_id"]) for item in items}
         missing_ids = sorted(requested_set - resolved_ids)
         if missing_ids:
@@ -778,6 +798,7 @@ def mine_bridge_records_for_split(
                 f"Locked micro manifest contains sample IDs not resolvable from split {split_txt.resolve()}: {missing_ids}"
             )
     audit_batch_size = int(((cfg.get("train") or {}).get("audit_batch_size", 2 if device.type != "cuda" else 8)))
+    semantic_inference_amp = _semantic_inference_amp_enabled(cfg, device)
     out: list[dict[str, Any]] = []
     model.eval()
     with torch.no_grad():
@@ -798,7 +819,7 @@ def mine_bridge_records_for_split(
                 gt_sems.append(gt_sem.astype(np.uint8))
                 gt_insts.append(gt_inst.astype(np.uint8))
             image_batch = torch.from_numpy(np.stack(images_np, axis=0)).float().to(device)
-            with _autocast_ctx(device, enabled=use_amp):
+            with _autocast_ctx(device, enabled=semantic_inference_amp):
                 outputs = model(image_batch)
             p_leaf_batch = outputs["p_leaf"].detach().cpu().numpy().astype(np.float32)
             x04_batch = outputs["x_0_4"].detach().cpu().float() if cache_features else None
@@ -820,6 +841,7 @@ def mine_bridge_records_for_split(
                 region_areas = [int(np.sum(labels == cc_idx)) for cc_idx in range(1, int(region_count) + 1)]
                 gt_count = int(len(topo_aux._positive_instance_ids(gt_inst.astype(np.uint8))))
                 reconstructed = run_locked_reconstruction(oracle_removed.astype(np.uint8), gt_inst.astype(np.uint8))
+                probability_diag = _leaflet_probability_threshold_diagnostics(p_leaf)
                 record = {
                     **item,
                     "gt_count": int(gt_count),
@@ -841,6 +863,7 @@ def mine_bridge_records_for_split(
                     "oracle_removed_mask": oracle_removed.astype(np.uint8),
                     "oracle_removed_reconstruction": reconstructed["labels"].astype(np.uint8),
                     "bridge_contract_input_hw": [int(crop_h), int(crop_w)],
+                    **probability_diag,
                 }
                 if cache_features and x04_batch is not None and x22_batch is not None:
                     record["x_0_4"] = x04_batch[idx].clone()
@@ -1048,6 +1071,18 @@ def validate_locked_micro_records(
     summary["missing_ids"] = missing_ids
     summary["unexpected_ids"] = unexpected_ids
     summary["mismatched_rows"] = mismatched_rows
+    summary["per_sample_portability_diagnostics"] = [
+        {
+            "sample_id": str(row["sample_id"]),
+            "candidate_pixels": int(row["candidate_pixels"]),
+            "bridge_pixels": int(row["bridge_pixels"]),
+            "min_abs_leaflet_probability_minus_0_5": float(row.get("min_abs_leaflet_probability_minus_0_5", 0.0)),
+            "count_abs_leaflet_probability_minus_0_5_le_1e_6": int(row.get("count_abs_leaflet_probability_minus_0_5_le_1e_6", 0)),
+            "count_abs_leaflet_probability_minus_0_5_le_1e_5": int(row.get("count_abs_leaflet_probability_minus_0_5_le_1e_5", 0)),
+            "count_abs_leaflet_probability_minus_0_5_le_1e_4": int(row.get("count_abs_leaflet_probability_minus_0_5_le_1e_4", 0)),
+        }
+        for row in records
+    ]
     summary["status"] = "pass"
 
     if (

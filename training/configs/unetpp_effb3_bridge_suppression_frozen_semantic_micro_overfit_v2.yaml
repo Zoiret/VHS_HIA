@@ -39,6 +39,9 @@ train:
   weight_decay: 0.00001
   amp: true
 
+semantic_inference:
+  amp: false
+
 micro_overfit:
   manifest_path: training/manifests/bridge_suppression_micro_overfit_v2_manifest.json
   max_steps: 300

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -67,6 +68,18 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         target_b = bridge.false_bridge_pixels_from_candidate(gt_sem_u8=gt_sem_b, gt_inst_u8=gt_inst, candidate_mask01=candidate)
         self.assertFalse(np.array_equal(target_a, target_b))
         self.assertGreater(int(np.sum(target_a)), int(np.sum(target_b)))
+
+    def test_semantic_inference_amp_is_disabled_for_v2(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        self.assertFalse(bridge._semantic_inference_amp_enabled(cfg, torch.device("cuda")))
+        self.assertFalse(bridge._semantic_inference_amp_enabled(cfg, torch.device("cpu")))
+
+    def test_bridge_training_amp_can_remain_enabled_independently(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        self.assertTrue(bridge._amp_enabled(cfg, torch.device("cuda")))
+        self.assertFalse(bridge._semantic_inference_amp_enabled(cfg, torch.device("cuda")))
 
     def test_candidate_masked_loss_and_zero_positive_safety(self):
         bridge, _soft = self._mods()
@@ -191,7 +204,6 @@ class TestBridgeSuppressionHead(unittest.TestCase):
                 split_txt=Path("datasets/converted_full_multiclass_curated/train.txt"),
                 model=model,
                 device=torch.device("cpu"),
-                use_amp=False,
                 cache_features=True,
                 selected_sample_ids={"m00_p00_s00"},
             )
@@ -205,6 +217,146 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         self.assertEqual(tuple(row["x_0_4"].shape), (16, 768, 768))
         self.assertEqual(tuple(row["x_2_2"].shape), (32, 192, 192))
         self.assertEqual(row["bridge_contract_input_hw"], [768, 768])
+
+    def test_target_construction_ignores_train_amp_flag(self):
+        bridge, _soft = self._mods()
+        base_cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        cfg_true = json.loads(json.dumps(base_cfg))
+        cfg_false = json.loads(json.dumps(base_cfg))
+        cfg_true["train"]["amp"] = True
+        cfg_false["train"]["amp"] = False
+
+        fake_item = {
+            "sample_id": "m00_p00_s00",
+            "patient_id": "m00_p00",
+            "image_path": "fake_image.png",
+            "mask_path": "fake_mask.png",
+            "instance_path": "fake_inst.png",
+        }
+        full_rgb = np.zeros((768, 768, 3), dtype=np.uint8)
+        full_sem = np.zeros((768, 768), dtype=np.uint8)
+        full_inst = np.zeros((768, 768), dtype=np.uint8)
+        full_inst[:, :384] = 1
+        full_inst[:, 384:] = 2
+        full_sem[:, :384] = 1
+        p_leaf = np.full((1, 1, 768, 768), 0.25, dtype=np.float32)
+        p_leaf[:, :, 100:140, 370:398] = 0.75
+        x_0_4 = torch.zeros((1, 16, 768, 768), dtype=torch.float32)
+        x_2_2 = torch.zeros((1, 32, 192, 192), dtype=torch.float32)
+
+        class FakeModel:
+            def eval(self):
+                return self
+
+            def __call__(self, image_batch):
+                return {
+                    "p_leaf": torch.from_numpy(p_leaf).to(image_batch.device),
+                    "x_0_4": x_0_4.to(image_batch.device),
+                    "x_2_2": x_2_2.to(image_batch.device),
+                }
+
+        with mock.patch.object(bridge, "_build_split_items", return_value=[fake_item]), \
+             mock.patch.object(bridge, "_load_image_rgb", return_value=full_rgb.copy()), \
+             mock.patch.object(bridge, "_load_u8", side_effect=[full_sem.copy(), full_inst.copy(), full_sem.copy(), full_inst.copy()]), \
+             mock.patch.object(bridge, "run_locked_reconstruction", return_value={"labels": np.zeros((768, 768), dtype=np.uint8)}):
+            rec_true = bridge.mine_bridge_records_for_split(
+                cfg=cfg_true,
+                split_txt=bridge.DEFAULT_TRAIN_SPLIT,
+                model=FakeModel(),
+                device=torch.device("cpu"),
+                cache_features=True,
+                selected_sample_ids={"m00_p00_s00"},
+            )[0]
+            rec_false = bridge.mine_bridge_records_for_split(
+                cfg=cfg_false,
+                split_txt=bridge.DEFAULT_TRAIN_SPLIT,
+                model=FakeModel(),
+                device=torch.device("cpu"),
+                cache_features=True,
+                selected_sample_ids={"m00_p00_s00"},
+            )[0]
+        self.assertEqual(rec_true["candidate_pixels"], rec_false["candidate_pixels"])
+        self.assertEqual(rec_true["bridge_pixels"], rec_false["bridge_pixels"])
+        self.assertTrue(np.array_equal(rec_true["candidate_mask"], rec_false["candidate_mask"]))
+        self.assertTrue(np.array_equal(rec_true["bridge_target"], rec_false["bridge_target"]))
+
+    def test_target_construction_uses_semantic_inference_amp_not_train_amp(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        fake_item = {
+            "sample_id": "m00_p00_s00",
+            "patient_id": "m00_p00",
+            "image_path": "fake_image.png",
+            "mask_path": "fake_mask.png",
+            "instance_path": "fake_inst.png",
+        }
+
+        class FakeModel:
+            def eval(self):
+                return self
+
+            def __call__(self, image_batch):
+                return {
+                    "p_leaf": torch.zeros((1, 1, 768, 768), dtype=torch.float32, device=image_batch.device),
+                    "x_0_4": torch.zeros((1, 16, 768, 768), dtype=torch.float32, device=image_batch.device),
+                    "x_2_2": torch.zeros((1, 32, 192, 192), dtype=torch.float32, device=image_batch.device),
+                }
+
+        calls: list[bool] = []
+
+        def fake_autocast(device, enabled):
+            calls.append(bool(enabled))
+            return bridge.contextlib.nullcontext()
+
+        with mock.patch.object(bridge, "_build_split_items", return_value=[fake_item]), \
+             mock.patch.object(bridge, "_load_image_rgb", return_value=np.zeros((768, 768, 3), dtype=np.uint8)), \
+             mock.patch.object(bridge, "_load_u8", side_effect=[np.zeros((768, 768), dtype=np.uint8), np.zeros((768, 768), dtype=np.uint8)]), \
+             mock.patch.object(bridge, "run_locked_reconstruction", return_value={"labels": np.zeros((768, 768), dtype=np.uint8)}), \
+             mock.patch.object(bridge, "_autocast_ctx", side_effect=fake_autocast):
+            bridge.mine_bridge_records_for_split(
+                cfg=cfg,
+                split_txt=bridge.DEFAULT_TRAIN_SPLIT,
+                model=FakeModel(),
+                device=torch.device("cpu"),
+                cache_features=False,
+                selected_sample_ids={"m00_p00_s00"},
+            )
+        self.assertEqual(calls, [False])
+
+    def test_selected_sample_order_is_preserved_for_locked_manifest_resolution(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        items = [
+            {"sample_id": "b", "patient_id": "pb", "image_path": "b_img.png", "mask_path": "b_mask.png", "instance_path": "b_inst.png"},
+            {"sample_id": "a", "patient_id": "pa", "image_path": "a_img.png", "mask_path": "a_mask.png", "instance_path": "a_inst.png"},
+        ]
+
+        class FakeModel:
+            def eval(self):
+                return self
+
+            def __call__(self, image_batch):
+                bsz = int(image_batch.shape[0])
+                return {
+                    "p_leaf": torch.zeros((bsz, 1, 768, 768), dtype=torch.float32, device=image_batch.device),
+                    "x_0_4": torch.zeros((bsz, 16, 768, 768), dtype=torch.float32, device=image_batch.device),
+                    "x_2_2": torch.zeros((bsz, 32, 192, 192), dtype=torch.float32, device=image_batch.device),
+                }
+
+        zeros = np.zeros((768, 768), dtype=np.uint8)
+        with mock.patch.object(bridge, "_build_split_items", return_value=items), \
+             mock.patch.object(bridge, "_load_image_rgb", return_value=np.zeros((768, 768, 3), dtype=np.uint8)), \
+             mock.patch.object(bridge, "_load_u8", side_effect=[zeros.copy(), zeros.copy(), zeros.copy(), zeros.copy()]), \
+             mock.patch.object(bridge, "run_locked_reconstruction", return_value={"labels": zeros.copy()}):
+            records = bridge.mine_bridge_records_for_split(
+                cfg=cfg,
+                split_txt=bridge.DEFAULT_TRAIN_SPLIT,
+                model=FakeModel(),
+                device=torch.device("cpu"),
+                cache_features=False,
+                selected_sample_ids=["a", "b"],
+            )
+        self.assertEqual([row["sample_id"] for row in records], ["a", "b"])
 
     def test_locked_v2_manifest_counts(self):
         bridge, _soft = self._mods()
@@ -318,7 +470,6 @@ class TestBridgeSuppressionHead(unittest.TestCase):
                     split_txt=bridge.DEFAULT_TRAIN_SPLIT,
                     model=FakeModel(),
                     device=torch.device("cpu"),
-                    use_amp=False,
                     cache_features=False,
                     selected_sample_ids={"present", "missing"},
                 )

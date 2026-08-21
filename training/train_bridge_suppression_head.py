@@ -377,7 +377,7 @@ def _save_target_audit_and_split_contract(
     bridge._write_json(save_dir / "micro_manifest_resolution.json", manifest_resolution)
 
 
-def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, Any]:
+def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False, preflight_only: bool = False) -> dict[str, Any]:
     save_dir = bridge._resolve_repo_path((cfg.get("train") or {}).get("save_dir"), bridge.REPO_ROOT / "training" / "runs" / "bridge_suppression_micro")
     future_full_dir = bridge._resolve_repo_path((cfg.get("reserved_full_run") or {}).get("save_dir"), bridge.REPO_ROOT / "training" / "runs" / "bridge_suppression_full")
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -411,7 +411,6 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
             split_txt=train_split,
             model=model,
             device=device,
-            use_amp=use_amp,
             cache_features=False,
             selected_sample_ids={str(first_split_item["sample_id"])},
         )
@@ -438,7 +437,6 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         split_txt=train_split,
         model=model,
         device=device,
-        use_amp=use_amp,
         cache_features=False,
     )
     train_audit = bridge.summarize_bridge_records(train_records, train_split)
@@ -448,7 +446,6 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         split_txt=val_split,
         model=model,
         device=device,
-        use_amp=use_amp,
         cache_features=False,
     )
     val_audit = bridge.build_validation_audit(train_records=train_records, val_records=val_records, val_split=val_split)
@@ -468,9 +465,8 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
         split_txt=train_split,
         model=model,
         device=device,
-        use_amp=use_amp,
         cache_features=True,
-        selected_sample_ids={str(v) for v in manifest_payload["sample_ids"]},
+        selected_sample_ids=[str(v) for v in manifest_payload["sample_ids"]],
     )
     manifest_resolution = bridge.validate_locked_micro_records(
         manifest_payload=manifest_payload,
@@ -484,6 +480,23 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False) -> dict[str, 
     bridge._write_json(save_dir / "micro_manifest_resolution.json", manifest_resolution_payload)
     if str(manifest_resolution.get("status")) != "pass":
         raise SystemExit(json.dumps(manifest_resolution_payload, ensure_ascii=False, indent=2))
+    if preflight_only:
+        overall = {
+            "checkpoint": checkpoint_info,
+            "semantic_inference_amp_requested": bool((cfg.get("semantic_inference") or {}).get("amp", False)),
+            "semantic_inference_amp_enabled": bool(bridge._semantic_inference_amp_enabled(cfg, device)),
+            "bridge_training_amp_requested": bool((cfg.get("train") or {}).get("amp", False)),
+            "bridge_training_amp_enabled": bool(use_amp),
+            "train_audit": train_audit,
+            "val_audit": val_audit,
+            "micro_manifest": manifest_payload,
+            "micro_manifest_resolution": manifest_resolution_payload,
+            "micro_augment_flags": _micro_augment_flags(cfg),
+            "future_full_run_exists": bool(future_full_dir.exists()),
+            "future_full_run_dir": str(future_full_dir.resolve()),
+        }
+        bridge._write_json(save_dir / "preflight_summary.json", overall)
+        return overall
     optimizer, optimizer_meta = bridge.build_optimizer(model, cfg)
     _save_target_audit_and_split_contract(
         save_dir=save_dir,
@@ -539,11 +552,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, type=str)
     ap.add_argument("--smoke-test", action="store_true")
+    ap.add_argument("--preflight-only", action="store_true")
     args = ap.parse_args()
     cfg_path = bridge._resolve_repo_path(args.config, bridge.DEFAULT_SEMANTIC_CONFIG)
     cfg = bridge._read_yaml(cfg_path)
     cfg["_config_path"] = str(cfg_path.resolve())
-    summary = run_pipeline(cfg, smoke_only=bool(args.smoke_test))
+    summary = run_pipeline(cfg, smoke_only=bool(args.smoke_test), preflight_only=bool(args.preflight_only))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

@@ -45,6 +45,69 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
             self.assertEqual(summary["smoke"]["status"], "pass")
             self.assertIn("a100_smoke_command", summary)
 
+    def test_preflight_only_performs_zero_optimizer_steps_and_saves_no_checkpoints(self):
+        bridge, runner = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        with tempfile.TemporaryDirectory() as td:
+            cfg["train"]["save_dir"] = str(Path(td) / "micro_v2")
+            cfg["reserved_full_run"]["save_dir"] = str(Path(td) / "future_full")
+            cfg["_config_path"] = str((bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml").resolve())
+            manifest_payload = {
+                "source_split": "datasets/converted_full_multiclass_curated/train.txt",
+                "source_split_canonical_sha256": "f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82",
+                "sample_ids": ["s1"],
+                "rows": [{"sample_id": "s1", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 1, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1, "reason_selected": "x"}],
+            }
+            fake_record = {"sample_id": "s1", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 1, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1}
+            build_optimizer = mock.Mock(return_value=(mock.Mock(), {"total_trainable_params": 1}))
+            save_checkpoint = mock.Mock()
+            with mock.patch.object(bridge, "build_model_from_cfg", return_value=mock.Mock()), \
+                 mock.patch.object(bridge, "load_semantic_checkpoint", return_value={"checkpoint_sha256": "x"}), \
+                 mock.patch.object(bridge, "read_locked_micro_manifest", return_value=manifest_payload), \
+                 mock.patch.object(bridge, "validate_locked_manifest_source_split", return_value={"status": "pass", "resolved_source_split": str(bridge.DEFAULT_TRAIN_SPLIT.resolve()), "actual_source_split_canonical_sha256": manifest_payload["source_split_canonical_sha256"]}), \
+                 mock.patch.object(bridge, "mine_bridge_records_for_split", side_effect=[[fake_record], [fake_record], [fake_record]]), \
+                 mock.patch.object(bridge, "summarize_bridge_records", return_value={"sample_count": 1}), \
+                 mock.patch.object(bridge, "build_validation_audit", return_value={"verdict": "valid_for_bridge_head_development"}), \
+                 mock.patch.object(bridge, "validate_locked_micro_records", return_value={"status": "pass", "sample_ids": ["s1"], "actual_sample_ids": ["s1"], "per_sample_portability_diagnostics": []}), \
+                 mock.patch.object(bridge, "build_optimizer", build_optimizer), \
+                 mock.patch.object(bridge, "save_train_target_visual_audit", return_value={}), \
+                 mock.patch.object(bridge, "save_checkpoint", save_checkpoint):
+                summary = runner.run_pipeline(cfg, preflight_only=True)
+            self.assertFalse("optimizer" in summary)
+            self.assertFalse("smoke" in summary)
+            build_optimizer.assert_not_called()
+            save_checkpoint.assert_not_called()
+            self.assertFalse((Path(cfg["train"]["save_dir"]) / "last.pth").exists())
+
+    def test_preflight_only_reports_precision_domains(self):
+        bridge, runner = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        with tempfile.TemporaryDirectory() as td:
+            cfg["train"]["save_dir"] = str(Path(td) / "micro_v2")
+            cfg["reserved_full_run"]["save_dir"] = str(Path(td) / "future_full")
+            cfg["_config_path"] = str((bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml").resolve())
+            manifest_payload = {
+                "source_split": "datasets/converted_full_multiclass_curated/train.txt",
+                "source_split_canonical_sha256": "f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82",
+                "sample_ids": ["s1"],
+                "rows": [{"sample_id": "s1", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 1, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1, "reason_selected": "x"}],
+            }
+            fake_record = {"sample_id": "s1", "patient_id": "p1", "gt_count": 2, "bridge_positive": 1, "bridge_pixels": 1, "candidate_pixels": 10, "topology_changes_if_oracle_removed": 1}
+            with mock.patch.object(bridge, "build_model_from_cfg", return_value=mock.Mock()), \
+                 mock.patch.object(bridge, "load_semantic_checkpoint", return_value={"checkpoint_sha256": "x"}), \
+                 mock.patch.object(bridge, "read_locked_micro_manifest", return_value=manifest_payload), \
+                 mock.patch.object(bridge, "validate_locked_manifest_source_split", return_value={"status": "pass", "resolved_source_split": str(bridge.DEFAULT_TRAIN_SPLIT.resolve()), "actual_source_split_canonical_sha256": manifest_payload["source_split_canonical_sha256"]}), \
+                 mock.patch.object(bridge, "mine_bridge_records_for_split", side_effect=[[fake_record], [fake_record], [fake_record]]), \
+                 mock.patch.object(bridge, "summarize_bridge_records", return_value={"sample_count": 1}), \
+                 mock.patch.object(bridge, "build_validation_audit", return_value={"verdict": "valid_for_bridge_head_development"}), \
+                 mock.patch.object(bridge, "validate_locked_micro_records", return_value={"status": "pass", "sample_ids": ["s1"], "actual_sample_ids": ["s1"], "per_sample_portability_diagnostics": []}), \
+                 mock.patch.object(bridge, "save_train_target_visual_audit", return_value={}):
+                summary = runner.run_pipeline(cfg, preflight_only=True)
+            self.assertFalse(summary["semantic_inference_amp_requested"])
+            self.assertFalse(summary["semantic_inference_amp_enabled"])
+            self.assertTrue(summary["bridge_training_amp_requested"])
+            self.assertFalse(summary["bridge_training_amp_enabled"])
+
     def test_reserved_full_run_dir_blocker(self):
         bridge, runner = self._mods()
         cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit.yaml")
@@ -66,6 +129,7 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
         self.assertEqual(float(cfg["bridge_head"]["candidate_threshold"]), 0.50)
         self.assertEqual(float(cfg["bridge_head"]["remove_threshold"]), 0.50)
         self.assertTrue(all(bool(v) is False for v in (cfg.get("augment") or {}).values()))
+        self.assertFalse(bool((cfg.get("semantic_inference") or {}).get("amp", True)))
 
     def test_run_pipeline_uses_locked_manifest_and_never_regenerates(self):
         bridge, runner = self._mods()
