@@ -427,6 +427,11 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False, preflight_onl
         bridge._write_json(save_dir / "smoke_test_summary.json", smoke_summary)
         return {
             "checkpoint": checkpoint_info,
+            "semantic_inference_backend": bridge.semantic_inference_backend_summary(cfg, device),
+            "bridge_training": {
+                "amp_requested": bool((cfg.get("train") or {}).get("amp", False)),
+                "amp_enabled": bool(use_amp),
+            },
             "optimizer": optimizer_meta,
             "smoke": smoke_summary,
             "a100_smoke_command": f"python -u training/train_bridge_suppression_head.py --config {_canonical_config_arg(cfg)} --smoke-test" if device.type != "cuda" else None,
@@ -483,10 +488,11 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False, preflight_onl
     if preflight_only:
         overall = {
             "checkpoint": checkpoint_info,
-            "semantic_inference_amp_requested": bool((cfg.get("semantic_inference") or {}).get("amp", False)),
-            "semantic_inference_amp_enabled": bool(bridge._semantic_inference_amp_enabled(cfg, device)),
-            "bridge_training_amp_requested": bool((cfg.get("train") or {}).get("amp", False)),
-            "bridge_training_amp_enabled": bool(use_amp),
+            "semantic_inference_backend": bridge.semantic_inference_backend_summary(cfg, device),
+            "bridge_training": {
+                "amp_requested": bool((cfg.get("train") or {}).get("amp", False)),
+                "amp_enabled": bool(use_amp),
+            },
             "train_audit": train_audit,
             "val_audit": val_audit,
             "micro_manifest": manifest_payload,
@@ -532,6 +538,11 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False, preflight_onl
     )
     overall = {
         "checkpoint": checkpoint_info,
+        "semantic_inference_backend": bridge.semantic_inference_backend_summary(cfg, device),
+        "bridge_training": {
+            "amp_requested": bool((cfg.get("train") or {}).get("amp", False)),
+            "amp_enabled": bool(use_amp),
+        },
         "optimizer": optimizer_meta,
         "train_audit": train_audit,
         "val_audit": val_audit,

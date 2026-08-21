@@ -41,6 +41,10 @@ train:
 
 semantic_inference:
   amp: false
+  matmul_allow_tf32: false
+  cudnn_allow_tf32: false
+  cudnn_benchmark: false
+  cudnn_deterministic: true
 
 micro_overfit:
   manifest_path: training/manifests/bridge_suppression_micro_overfit_v2_manifest.json

@@ -103,10 +103,14 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
                  mock.patch.object(bridge, "validate_locked_micro_records", return_value={"status": "pass", "sample_ids": ["s1"], "actual_sample_ids": ["s1"], "per_sample_portability_diagnostics": []}), \
                  mock.patch.object(bridge, "save_train_target_visual_audit", return_value={}):
                 summary = runner.run_pipeline(cfg, preflight_only=True)
-            self.assertFalse(summary["semantic_inference_amp_requested"])
-            self.assertFalse(summary["semantic_inference_amp_enabled"])
-            self.assertTrue(summary["bridge_training_amp_requested"])
-            self.assertFalse(summary["bridge_training_amp_enabled"])
+            self.assertFalse(summary["semantic_inference_backend"]["amp_requested"])
+            self.assertFalse(summary["semantic_inference_backend"]["amp_enabled"])
+            self.assertFalse(summary["semantic_inference_backend"]["matmul_allow_tf32"])
+            self.assertFalse(summary["semantic_inference_backend"]["cudnn_allow_tf32"])
+            self.assertFalse(summary["semantic_inference_backend"]["cudnn_benchmark"])
+            self.assertTrue(summary["semantic_inference_backend"]["cudnn_deterministic"])
+            self.assertTrue(summary["bridge_training"]["amp_requested"])
+            self.assertFalse(summary["bridge_training"]["amp_enabled"])
 
     def test_reserved_full_run_dir_blocker(self):
         bridge, runner = self._mods()
@@ -130,6 +134,10 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
         self.assertEqual(float(cfg["bridge_head"]["remove_threshold"]), 0.50)
         self.assertTrue(all(bool(v) is False for v in (cfg.get("augment") or {}).values()))
         self.assertFalse(bool((cfg.get("semantic_inference") or {}).get("amp", True)))
+        self.assertFalse(bool((cfg.get("semantic_inference") or {}).get("matmul_allow_tf32", True)))
+        self.assertFalse(bool((cfg.get("semantic_inference") or {}).get("cudnn_allow_tf32", True)))
+        self.assertFalse(bool((cfg.get("semantic_inference") or {}).get("cudnn_benchmark", True)))
+        self.assertTrue(bool((cfg.get("semantic_inference") or {}).get("cudnn_deterministic", False)))
 
     def test_run_pipeline_uses_locked_manifest_and_never_regenerates(self):
         bridge, runner = self._mods()

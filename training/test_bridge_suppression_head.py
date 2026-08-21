@@ -74,12 +74,81 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
         self.assertFalse(bridge._semantic_inference_amp_enabled(cfg, torch.device("cuda")))
         self.assertFalse(bridge._semantic_inference_amp_enabled(cfg, torch.device("cpu")))
+        backend = bridge.semantic_inference_backend_summary(cfg, torch.device("cpu"))
+        self.assertFalse(backend["amp_requested"])
+        self.assertFalse(backend["amp_enabled"])
+        self.assertFalse(backend["matmul_allow_tf32"])
+        self.assertFalse(backend["cudnn_allow_tf32"])
+        self.assertFalse(backend["cudnn_benchmark"])
+        self.assertTrue(backend["cudnn_deterministic"])
 
     def test_bridge_training_amp_can_remain_enabled_independently(self):
         bridge, _soft = self._mods()
         cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
         self.assertTrue(bridge._amp_enabled(cfg, torch.device("cuda")))
         self.assertFalse(bridge._semantic_inference_amp_enabled(cfg, torch.device("cuda")))
+
+    def test_semantic_inference_backend_ctx_applies_locked_flags(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        with bridge._semantic_inference_backend_ctx(cfg, torch.device("cpu")):
+            self.assertFalse(torch.backends.cuda.matmul.allow_tf32)
+            self.assertFalse(torch.backends.cudnn.allow_tf32)
+            self.assertFalse(torch.backends.cudnn.benchmark)
+            self.assertTrue(torch.backends.cudnn.deterministic)
+
+    def test_semantic_inference_backend_ctx_restores_prior_flags(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        original = (
+            bool(torch.backends.cuda.matmul.allow_tf32),
+            bool(torch.backends.cudnn.allow_tf32),
+            bool(torch.backends.cudnn.benchmark),
+            bool(torch.backends.cudnn.deterministic),
+        )
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        with bridge._semantic_inference_backend_ctx(cfg, torch.device("cpu")):
+            pass
+        self.assertTrue(torch.backends.cuda.matmul.allow_tf32)
+        self.assertTrue(torch.backends.cudnn.allow_tf32)
+        self.assertTrue(torch.backends.cudnn.benchmark)
+        self.assertFalse(torch.backends.cudnn.deterministic)
+        torch.backends.cuda.matmul.allow_tf32 = original[0]
+        torch.backends.cudnn.allow_tf32 = original[1]
+        torch.backends.cudnn.benchmark = original[2]
+        torch.backends.cudnn.deterministic = original[3]
+
+    def test_semantic_inference_backend_ctx_restores_flags_on_error(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        original = (
+            bool(torch.backends.cuda.matmul.allow_tf32),
+            bool(torch.backends.cudnn.allow_tf32),
+            bool(torch.backends.cudnn.benchmark),
+            bool(torch.backends.cudnn.deterministic),
+        )
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        with self.assertRaises(RuntimeError):
+            with bridge._semantic_inference_backend_ctx(cfg, torch.device("cpu")):
+                raise RuntimeError("boom")
+        self.assertTrue(torch.backends.cuda.matmul.allow_tf32)
+        self.assertTrue(torch.backends.cudnn.allow_tf32)
+        self.assertTrue(torch.backends.cudnn.benchmark)
+        self.assertFalse(torch.backends.cudnn.deterministic)
+        torch.backends.cuda.matmul.allow_tf32 = original[0]
+        torch.backends.cudnn.allow_tf32 = original[1]
+        torch.backends.cudnn.benchmark = original[2]
+        torch.backends.cudnn.deterministic = original[3]
 
     def test_candidate_masked_loss_and_zero_positive_safety(self):
         bridge, _soft = self._mods()
@@ -322,6 +391,69 @@ class TestBridgeSuppressionHead(unittest.TestCase):
                 selected_sample_ids={"m00_p00_s00"},
             )
         self.assertEqual(calls, [False])
+
+    def test_target_construction_uses_locked_backend_contract_not_ambient_flags(self):
+        bridge, _soft = self._mods()
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2.yaml")
+        fake_item = {
+            "sample_id": "m00_p00_s00",
+            "patient_id": "m00_p00",
+            "image_path": "fake_image.png",
+            "mask_path": "fake_mask.png",
+            "instance_path": "fake_inst.png",
+        }
+        seen: list[tuple[bool, bool, bool, bool]] = []
+
+        class FakeModel:
+            def eval(self):
+                return self
+
+            def __call__(self, image_batch):
+                seen.append((
+                    bool(torch.backends.cuda.matmul.allow_tf32),
+                    bool(torch.backends.cudnn.allow_tf32),
+                    bool(torch.backends.cudnn.benchmark),
+                    bool(torch.backends.cudnn.deterministic),
+                ))
+                return {
+                    "p_leaf": torch.zeros((1, 1, 768, 768), dtype=torch.float32, device=image_batch.device),
+                    "x_0_4": torch.zeros((1, 16, 768, 768), dtype=torch.float32, device=image_batch.device),
+                    "x_2_2": torch.zeros((1, 32, 192, 192), dtype=torch.float32, device=image_batch.device),
+                }
+
+        original = (
+            bool(torch.backends.cuda.matmul.allow_tf32),
+            bool(torch.backends.cudnn.allow_tf32),
+            bool(torch.backends.cudnn.benchmark),
+            bool(torch.backends.cudnn.deterministic),
+        )
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        try:
+            with mock.patch.object(bridge, "_build_split_items", return_value=[fake_item]), \
+                 mock.patch.object(bridge, "_load_image_rgb", return_value=np.zeros((768, 768, 3), dtype=np.uint8)), \
+                 mock.patch.object(bridge, "_load_u8", side_effect=[np.zeros((768, 768), dtype=np.uint8), np.zeros((768, 768), dtype=np.uint8)]), \
+                 mock.patch.object(bridge, "run_locked_reconstruction", return_value={"labels": np.zeros((768, 768), dtype=np.uint8)}):
+                bridge.mine_bridge_records_for_split(
+                    cfg=cfg,
+                    split_txt=bridge.DEFAULT_TRAIN_SPLIT,
+                    model=FakeModel(),
+                    device=torch.device("cpu"),
+                    cache_features=False,
+                    selected_sample_ids={"m00_p00_s00"},
+                )
+            self.assertEqual(seen, [(False, False, False, True)])
+            self.assertTrue(torch.backends.cuda.matmul.allow_tf32)
+            self.assertTrue(torch.backends.cudnn.allow_tf32)
+            self.assertTrue(torch.backends.cudnn.benchmark)
+            self.assertFalse(torch.backends.cudnn.deterministic)
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = original[0]
+            torch.backends.cudnn.allow_tf32 = original[1]
+            torch.backends.cudnn.benchmark = original[2]
+            torch.backends.cudnn.deterministic = original[3]
 
     def test_selected_sample_order_is_preserved_for_locked_manifest_resolution(self):
         bridge, _soft = self._mods()

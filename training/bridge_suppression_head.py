@@ -250,6 +250,45 @@ def _semantic_inference_amp_enabled(cfg: dict[str, Any], device: torch.device) -
     return bool(v) and device.type == "cuda"
 
 
+def _semantic_inference_backend_requested(cfg: dict[str, Any]) -> dict[str, Any]:
+    semantic_cfg = cfg.get("semantic_inference") or {}
+    return {
+        "amp_requested": bool(semantic_cfg.get("amp", False)),
+        "matmul_allow_tf32": bool(semantic_cfg.get("matmul_allow_tf32", False)),
+        "cudnn_allow_tf32": bool(semantic_cfg.get("cudnn_allow_tf32", False)),
+        "cudnn_benchmark": bool(semantic_cfg.get("cudnn_benchmark", False)),
+        "cudnn_deterministic": bool(semantic_cfg.get("cudnn_deterministic", True)),
+    }
+
+
+def semantic_inference_backend_summary(cfg: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    requested = _semantic_inference_backend_requested(cfg)
+    return {
+        **requested,
+        "amp_enabled": bool(_semantic_inference_amp_enabled(cfg, device)),
+    }
+
+
+@contextlib.contextmanager
+def _semantic_inference_backend_ctx(cfg: dict[str, Any], device: torch.device):
+    requested = _semantic_inference_backend_requested(cfg)
+    prev_matmul_allow_tf32 = bool(torch.backends.cuda.matmul.allow_tf32)
+    prev_cudnn_allow_tf32 = bool(torch.backends.cudnn.allow_tf32)
+    prev_cudnn_benchmark = bool(torch.backends.cudnn.benchmark)
+    prev_cudnn_deterministic = bool(torch.backends.cudnn.deterministic)
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = bool(requested["matmul_allow_tf32"])
+        torch.backends.cudnn.allow_tf32 = bool(requested["cudnn_allow_tf32"])
+        torch.backends.cudnn.benchmark = bool(requested["cudnn_benchmark"])
+        torch.backends.cudnn.deterministic = bool(requested["cudnn_deterministic"])
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_matmul_allow_tf32
+        torch.backends.cudnn.allow_tf32 = prev_cudnn_allow_tf32
+        torch.backends.cudnn.benchmark = prev_cudnn_benchmark
+        torch.backends.cudnn.deterministic = prev_cudnn_deterministic
+
+
 def _autocast_ctx(device: torch.device, enabled: bool):
     if device.type == "cuda" and bool(enabled):
         return torch.amp.autocast("cuda", enabled=True)
@@ -819,8 +858,9 @@ def mine_bridge_records_for_split(
                 gt_sems.append(gt_sem.astype(np.uint8))
                 gt_insts.append(gt_inst.astype(np.uint8))
             image_batch = torch.from_numpy(np.stack(images_np, axis=0)).float().to(device)
-            with _autocast_ctx(device, enabled=semantic_inference_amp):
-                outputs = model(image_batch)
+            with _semantic_inference_backend_ctx(cfg, device):
+                with _autocast_ctx(device, enabled=semantic_inference_amp):
+                    outputs = model(image_batch)
             p_leaf_batch = outputs["p_leaf"].detach().cpu().numpy().astype(np.float32)
             x04_batch = outputs["x_0_4"].detach().cpu().float() if cache_features else None
             x22_batch = outputs["x_2_2"].detach().cpu().float() if cache_features else None
