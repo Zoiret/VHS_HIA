@@ -23,10 +23,14 @@ def _save_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
         "step",
         "loss",
+        "base_bridge_loss",
         "balanced_bce",
         "dice_loss",
         "positive_bce",
         "negative_bce",
+        "negative_candidate_mean_bce",
+        "negative_candidate_hard_bce",
+        "weighted_preservation_loss",
         "bridge_precision",
         "bridge_recall",
         "bridge_f1",
@@ -61,6 +65,7 @@ def _save_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "negative_num_unchanged",
         "negative_num_regresses",
         "negative_num_component_topology_changes",
+        "safe_checkpoint",
         "all_removed_over_candidate",
         "positive_removed_over_candidate",
         "negative_removed_over_candidate",
@@ -93,12 +98,41 @@ def _micro_augment_flags(cfg: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def _checkpoint_policy(cfg: dict[str, Any]) -> dict[str, Any]:
+    cp = cfg.get("checkpoint_policy") or {}
+    return {
+        "mode": str(cp.get("mode", "legacy_reconstruction")),
+        "safe_remove_threshold": float(cp.get("safe_remove_threshold", float((cfg.get("bridge_head") or {}).get("remove_threshold", bridge.BRIDGE_REMOVE_THRESHOLD)))),
+    }
+
+
+def _safe_checkpoint_status(recon: dict[str, Any]) -> bool:
+    negative_subset = recon["negative_subset"]
+    return (
+        int(negative_subset["num_regresses"]) == 0
+        and int(negative_subset["num_component_topology_changes"]) == 0
+    )
+
+
+def _safe_reconstruction_key(recon: dict[str, Any]) -> tuple[Any, ...]:
+    positive_pred = recon["positive_subset"]["reconstruction"]["p50_minus_predicted_bridge"]
+    overall_pred = recon["reconstruction"]["p50_minus_predicted_bridge"]
+    positive_pixel = recon["positive_subset"]["pixel"]
+    return (
+        int(positive_pred["all_iou_ge_0.50_count"]),
+        float(positive_pred["mean_matched_iou"]),
+        int(overall_pred["all_iou_ge_0.50_count"]),
+        float(overall_pred["mean_matched_iou"]),
+        float(positive_pixel["f1"]),
+    )
+
+
 def _smoke_step(
     *,
     model: bridge.FrozenSemanticBridgeSuppressionModel,
     raw_record: dict[str, Any],
     optimizer: torch.optim.Optimizer,
-    loss_fn: bridge.CandidateBalancedBCEDiceLoss,
+    loss_fn: torch.nn.Module,
     device: torch.device,
     use_amp: bool,
     scaler,
@@ -124,6 +158,7 @@ def _smoke_step(
             bridge_logits=outputs["bridge_logits"],
             bridge_target=bridge_target,
             candidate_mask=outputs["candidate_mask"],
+            bridge_positive=torch.tensor([float(raw_record["bridge_positive"])], device=device),
         )
     if scaler is not None:
         scaler.scale(loss_dict["loss"]).backward()
@@ -158,10 +193,14 @@ def _smoke_step(
         },
         "losses": {
             "total": float(loss_dict["loss"].detach().cpu().item()),
+            "base_bridge_loss": float(loss_dict["base_bridge_loss"].detach().cpu().item()),
             "balanced_bce": float(loss_dict["balanced_bce"].detach().cpu().item()),
             "dice_loss": float(loss_dict["dice_loss"].detach().cpu().item()),
             "positive_bce": float(loss_dict["positive_bce"].detach().cpu().item()),
             "negative_bce": float(loss_dict["negative_bce"].detach().cpu().item()),
+            "negative_candidate_mean_bce": float(loss_dict["negative_candidate_mean_bce"].detach().cpu().item()),
+            "negative_candidate_hard_bce": float(loss_dict["negative_candidate_hard_bce"].detach().cpu().item()),
+            "weighted_preservation_loss": float(loss_dict["weighted_preservation_loss"].detach().cpu().item()),
         },
         "gradients": {
             "context_projection_grad_norm": float(bridge._named_grad_l2_norm(grad_context)),
@@ -185,7 +224,7 @@ def _run_micro_overfit(
     model: bridge.FrozenSemanticBridgeSuppressionModel,
     cached_records: list[dict[str, Any]],
     optimizer: torch.optim.Optimizer,
-    loss_fn: bridge.CandidateBalancedBCEDiceLoss,
+    loss_fn: torch.nn.Module,
     device: torch.device,
     max_steps: int,
     log_every: int,
@@ -200,8 +239,11 @@ def _run_micro_overfit(
     metrics_rows: list[dict[str, Any]] = []
     best_pixel_f1 = float("-inf")
     best_pixel_payload: dict[str, Any] | None = None
+    checkpoint_policy = _checkpoint_policy(cfg)
     best_reconstruction_key = (float("-inf"), float("-inf"))
     best_reconstruction_payload: dict[str, Any] | None = None
+    best_safe_reconstruction_key: tuple[Any, ...] | None = None
+    best_safe_reconstruction_payload: dict[str, Any] | None = None
 
     for step in range(1, int(max_steps) + 1):
         model.train(True)
@@ -215,6 +257,7 @@ def _run_micro_overfit(
             bridge_logits=outputs["bridge_logits"],
             bridge_target=batch["bridge_target"],
             candidate_mask=outputs["candidate_mask"],
+            bridge_positive=batch["bridge_positive"],
         )
         loss = loss_dict["loss"]
         loss.backward()
@@ -233,18 +276,40 @@ def _run_micro_overfit(
                     bridge_probs=bridge_probs,
                     bridge_target=batch["bridge_target"],
                     candidate_mask=batch["candidate_mask"],
+                    threshold=float(checkpoint_policy["safe_remove_threshold"]),
                 )
-                recon = bridge.evaluate_reconstruction_levels_on_cached(model, cached_records, device)
+                recon = bridge.evaluate_reconstruction_levels_on_cached(
+                    model,
+                    cached_records,
+                    device,
+                    threshold=float(checkpoint_policy["safe_remove_threshold"]),
+                )
             positive_subset = recon["positive_subset"]
             negative_subset = recon["negative_subset"]
             removal_calibration = recon["removal_calibration"]
+            safe_checkpoint = _safe_checkpoint_status(recon)
+            negative_sample_details = [
+                {
+                    "sample_id": str(row["sample_id"]),
+                    "removed_pixels": int(row["predicted_removed_pixels"]),
+                    "removed_fraction": float(row["predicted_removed_fraction"]),
+                    "reconstruction_iou_delta": float(row["predicted_mean_iou"] - row["start_mean_iou"]),
+                    "topology_changed": bool(int(row["component_topology_changed"])),
+                }
+                for row in recon.get("per_sample", [])
+                if int(row["bridge_positive"]) == 0
+            ]
             row = {
                 "step": int(step),
                 "loss": float(loss.detach().cpu().item()),
+                "base_bridge_loss": float(loss_dict["base_bridge_loss"].detach().cpu().item()),
                 "balanced_bce": float(loss_dict["balanced_bce"].detach().cpu().item()),
                 "dice_loss": float(loss_dict["dice_loss"].detach().cpu().item()),
                 "positive_bce": float(loss_dict["positive_bce"].detach().cpu().item()),
                 "negative_bce": float(loss_dict["negative_bce"].detach().cpu().item()),
+                "negative_candidate_mean_bce": float(loss_dict["negative_candidate_mean_bce"].detach().cpu().item()),
+                "negative_candidate_hard_bce": float(loss_dict["negative_candidate_hard_bce"].detach().cpu().item()),
+                "weighted_preservation_loss": float(loss_dict["weighted_preservation_loss"].detach().cpu().item()),
                 "bridge_precision": float(pixel["precision"]),
                 "bridge_recall": float(pixel["recall"]),
                 "bridge_f1": float(pixel["f1"]),
@@ -279,10 +344,12 @@ def _run_micro_overfit(
                 "negative_num_unchanged": int(negative_subset["num_unchanged"]),
                 "negative_num_regresses": int(negative_subset["num_regresses"]),
                 "negative_num_component_topology_changes": int(negative_subset["num_component_topology_changes"]),
+                "safe_checkpoint": int(bool(safe_checkpoint)),
                 "all_removed_over_candidate": float(removal_calibration["all_removed_over_candidate"]),
                 "positive_removed_over_candidate": float(removal_calibration["positive_removed_over_candidate"]),
                 "negative_removed_over_candidate": float(removal_calibration["negative_removed_over_candidate"]),
                 "positive_gt_bridge_over_candidate": float(removal_calibration["positive_gt_bridge_over_candidate"]),
+                "negative_sample_details": negative_sample_details,
             }
             metrics_rows.append(row)
             if float(pixel["f1"]) > float(best_pixel_f1):
@@ -296,6 +363,8 @@ def _run_micro_overfit(
                     "negative_subset": negative_subset,
                     "removal_calibration": removal_calibration,
                     "reconstruction": recon["reconstruction"],
+                    "safe_checkpoint": bool(safe_checkpoint),
+                    "negative_sample_details": negative_sample_details,
                 }
                 bridge.save_checkpoint(
                     save_dir / "best_pixel_f1.pth",
@@ -313,7 +382,7 @@ def _run_micro_overfit(
                 best_reconstruction_key = reconstruction_key
                 best_reconstruction_payload = {
                     "step": int(step),
-                    "selection_policy": "reconstruction",
+                    "selection_policy": "unconstrained_reconstruction" if checkpoint_policy["mode"] == "safe_reconstruction_v3" else "reconstruction",
                     "selection_reason": {
                         "predicted_success50": int(reconstruction_key[0]),
                         "predicted_mean_iou": float(reconstruction_key[1]),
@@ -323,15 +392,47 @@ def _run_micro_overfit(
                     "negative_subset": negative_subset,
                     "removal_calibration": removal_calibration,
                     "reconstruction": recon["reconstruction"],
+                    "safe_checkpoint": bool(safe_checkpoint),
+                    "negative_sample_details": negative_sample_details,
                 }
                 bridge.save_checkpoint(
-                    save_dir / "best_reconstruction.pth",
+                    save_dir / ("best_unconstrained_reconstruction.pth" if checkpoint_policy["mode"] == "safe_reconstruction_v3" else "best_reconstruction.pth"),
                     model,
                     optimizer,
                     step,
                     cfg,
                     extra={"best_payload": best_reconstruction_payload},
                 )
+            if checkpoint_policy["mode"] == "safe_reconstruction_v3" and safe_checkpoint:
+                safe_key = _safe_reconstruction_key(recon)
+                if best_safe_reconstruction_key is None or safe_key > best_safe_reconstruction_key:
+                    best_safe_reconstruction_key = safe_key
+                    best_safe_reconstruction_payload = {
+                        "step": int(step),
+                        "selection_policy": "safe_reconstruction",
+                        "selection_reason": {
+                            "positive_success50": int(safe_key[0]),
+                            "positive_mean_iou": float(safe_key[1]),
+                            "overall_success50": int(safe_key[2]),
+                            "overall_mean_iou": float(safe_key[3]),
+                            "positive_pixel_f1": float(safe_key[4]),
+                        },
+                        "pixel": pixel,
+                        "positive_subset": positive_subset,
+                        "negative_subset": negative_subset,
+                        "removal_calibration": removal_calibration,
+                        "reconstruction": recon["reconstruction"],
+                        "safe_checkpoint": True,
+                        "negative_sample_details": negative_sample_details,
+                    }
+                    bridge.save_checkpoint(
+                        save_dir / "best_safe_reconstruction.pth",
+                        model,
+                        optimizer,
+                        step,
+                        cfg,
+                        extra={"best_payload": best_safe_reconstruction_payload},
+                    )
 
     bridge.save_checkpoint(
         save_dir / "last.pth",
@@ -342,17 +443,23 @@ def _run_micro_overfit(
         extra={
             "best_pixel_payload": best_pixel_payload,
             "best_reconstruction_payload": best_reconstruction_payload,
+            "best_safe_reconstruction_payload": best_safe_reconstruction_payload,
+            "no_safe_checkpoint": bool(checkpoint_policy["mode"] == "safe_reconstruction_v3" and best_safe_reconstruction_payload is None),
             "selection_policy": "last",
             "selection_reason": {"step": int(max_steps)},
         },
     )
     _save_metrics_csv(save_dir / "micro_overfit_metrics.csv", metrics_rows)
+    bridge._write_json(save_dir / "micro_overfit_metrics.json", metrics_rows)
     final_row = metrics_rows[-1]
     summary = {
         "initial": metrics_rows[0],
         "final": final_row,
         "best_pixel": best_pixel_payload,
         "best_reconstruction": best_reconstruction_payload,
+        "best_unconstrained_reconstruction": best_reconstruction_payload if checkpoint_policy["mode"] == "safe_reconstruction_v3" else None,
+        "best_safe_reconstruction": best_safe_reconstruction_payload,
+        "no_safe_checkpoint": bool(checkpoint_policy["mode"] == "safe_reconstruction_v3" and best_safe_reconstruction_payload is None),
         "semantic_parameter_max_delta": float(bridge._max_parameter_delta_from_snapshot(semantic_named, semantic_ref)),
         "semantic_bn_max_delta": float(bridge._max_bn_delta(model.base, base_bn_ref)),
         "trainable_grad_finite": bool(bridge._all_grads_finite(trainable_named)),
@@ -393,7 +500,7 @@ def run_pipeline(cfg: dict[str, Any], *, smoke_only: bool = False, preflight_onl
         model,
         bridge._resolve_repo_path((cfg.get("train") or {}).get("init_checkpoint"), bridge.DEFAULT_SEMANTIC_CHECKPOINT),
     )
-    loss_fn = bridge.CandidateBalancedBCEDiceLoss()
+    loss_fn = bridge.build_bridge_loss_from_cfg(cfg)
 
     dataset_cfg = cfg.get("dataset") or {}
     train_split = bridge._resolve_repo_path(dataset_cfg.get("train_txt", bridge.DEFAULT_TRAIN_SPLIT), bridge.DEFAULT_TRAIN_SPLIT)

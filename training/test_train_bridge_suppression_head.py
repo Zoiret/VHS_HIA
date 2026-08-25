@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import sys
 import tempfile
 import unittest
@@ -138,6 +139,39 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
         self.assertFalse(bool((cfg.get("semantic_inference") or {}).get("cudnn_allow_tf32", True)))
         self.assertFalse(bool((cfg.get("semantic_inference") or {}).get("cudnn_benchmark", True)))
         self.assertTrue(bool((cfg.get("semantic_inference") or {}).get("cudnn_deterministic", False)))
+        self.assertEqual(float((cfg.get("loss") or {}).get("lambda_negative_mean", 0.0)), 0.0)
+        self.assertEqual(float((cfg.get("loss") or {}).get("lambda_negative_hard", 0.0)), 0.0)
+        self.assertNotIn("checkpoint_policy", cfg)
+
+    def test_v3_configs_differ_only_in_preservation_weights(self):
+        bridge, _runner = self._mods()
+        cfgs = {
+            name: bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / f"unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_{name}.yaml")
+            for name in ("v3a", "v3b", "v3c", "v3d")
+        }
+        normalized = {}
+        for name, cfg in cfgs.items():
+            current = copy.deepcopy(cfg)
+            current["train"]["save_dir"] = "RUN_DIR"
+            current["reserved_full_run"]["config_path"] = "FULL_CONFIG"
+            current["reserved_full_run"]["save_dir"] = "FULL_RUN_DIR"
+            current["experiment_notes"]["purpose"] = "PURPOSE"
+            current["loss"]["lambda_negative_mean"] = "MEAN"
+            current["loss"]["lambda_negative_hard"] = "HARD"
+            normalized[name] = current
+        self.assertEqual(normalized["v3a"], normalized["v3b"])
+        self.assertEqual(normalized["v3a"], normalized["v3c"])
+        self.assertEqual(normalized["v3a"], normalized["v3d"])
+        self.assertEqual(float(cfgs["v3a"]["loss"]["lambda_negative_mean"]), 1.0)
+        self.assertEqual(float(cfgs["v3a"]["loss"]["lambda_negative_hard"]), 0.0)
+        self.assertEqual(float(cfgs["v3b"]["loss"]["lambda_negative_mean"]), 2.0)
+        self.assertEqual(float(cfgs["v3b"]["loss"]["lambda_negative_hard"]), 0.0)
+        self.assertEqual(float(cfgs["v3c"]["loss"]["lambda_negative_mean"]), 2.0)
+        self.assertEqual(float(cfgs["v3c"]["loss"]["lambda_negative_hard"]), 1.0)
+        self.assertEqual(float(cfgs["v3d"]["loss"]["lambda_negative_mean"]), 4.0)
+        self.assertEqual(float(cfgs["v3d"]["loss"]["lambda_negative_hard"]), 1.0)
+        self.assertTrue(all(float(cfg["loss"]["negative_hard_topk_fraction"]) == 0.01 for cfg in cfgs.values()))
+        self.assertTrue(all(str((cfg.get("checkpoint_policy") or {}).get("mode")) == "safe_reconstruction_v3" for cfg in cfgs.values()))
 
     def test_run_pipeline_uses_locked_manifest_and_never_regenerates(self):
         bridge, runner = self._mods()
@@ -309,6 +343,92 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
         self.assertIn("best_pixel_f1.pth", saved)
         self.assertIn("best_reconstruction.pth", saved)
         self.assertIn("last.pth", saved)
+
+    def test_safe_checkpoint_constraint_helper(self):
+        _bridge, runner = self._mods()
+        self.assertTrue(runner._safe_checkpoint_status({"negative_subset": {"num_regresses": 0, "num_component_topology_changes": 0}}))
+        self.assertFalse(runner._safe_checkpoint_status({"negative_subset": {"num_regresses": 1, "num_component_topology_changes": 0}}))
+        self.assertFalse(runner._safe_checkpoint_status({"negative_subset": {"num_regresses": 0, "num_component_topology_changes": 1}}))
+
+    def test_safe_mode_does_not_write_best_safe_when_safety_fails(self):
+        bridge, runner = self._mods()
+
+        class FakeModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.base = torch.nn.Linear(1, 1)
+                for p in self.base.parameters():
+                    p.requires_grad = False
+                self.context_projection = torch.nn.Conv2d(1, 1, 1)
+                self.bridge_head = torch.nn.Conv2d(1, 1, 1)
+
+            def bridge_forward_from_cached(self, *, x_0_4, x_2_2, p_leaf):
+                logits = self.bridge_head(x_0_4[:, :1])
+                return {"bridge_logits": logits, "candidate_mask": (p_leaf >= 0).float()}
+
+        model = FakeModel()
+        optimizer = torch.optim.SGD([p for p in model.parameters() if p.requires_grad], lr=0.1)
+        cached_records = [
+            {
+                "sample_id": "s1",
+                "x_0_4": torch.ones((1, 2, 2), dtype=torch.float32),
+                "x_2_2": torch.ones((1, 1, 1), dtype=torch.float32),
+                "p_leaf": torch.ones((1, 2, 2), dtype=torch.float32),
+                "candidate_mask": torch.ones((1, 2, 2), dtype=torch.float32),
+                "bridge_target": torch.zeros((1, 2, 2), dtype=torch.float32),
+                "gt_instances": __import__("numpy").ones((2, 2), dtype="uint8"),
+                "candidate_mask_np": __import__("numpy").ones((2, 2), dtype="uint8"),
+                "oracle_removed_mask": __import__("numpy").ones((2, 2), dtype="uint8"),
+                "image_path": "x",
+                "patient_id": "p1",
+                "gt_count": 2,
+                "bridge_positive": 0,
+                "candidate_pixels": 4,
+                "bridge_pixels": 0,
+            }
+        ]
+        loss_fn = bridge.CandidateBalancedBCEDiceLoss()
+        recon_seq = [
+            {
+                "positive_subset": {"pixel": {"precision": 0.0, "recall": 0.0, "f1": 0.0, "dice": 0.0, "tp": 0, "fp": 0, "fn": 0}, "reconstruction": {"p50_start": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}, "p50_minus_predicted_bridge": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}, "p50_minus_gt_oracle_bridge": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}}},
+                "negative_subset": {"predicted_bridge_pixels": 1, "fraction_of_candidate_pixels_removed": 0.25, "samples_with_zero_predicted_removal": 0, "starting_mean_matched_iou": 0.8, "refined_mean_matched_iou": 0.6, "num_improves": 0, "num_unchanged": 0, "num_regresses": 1, "num_component_topology_changes": 1},
+                "removal_calibration": {"all_removed_over_candidate": 0.25, "positive_removed_over_candidate": 0.0, "negative_removed_over_candidate": 0.25, "positive_gt_bridge_over_candidate": 0.0},
+                "reconstruction": {"p50_start": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}, "p50_minus_predicted_bridge": {"mean_matched_iou": 0.6, "all_iou_ge_0.50_count": 0}, "p50_minus_gt_oracle_bridge": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}},
+                "per_sample": [{"sample_id": "s1", "bridge_positive": 0, "predicted_removed_pixels": 1, "predicted_removed_fraction": 0.25, "predicted_mean_iou": 0.6, "start_mean_iou": 0.8, "component_topology_changed": 1}],
+            },
+            {
+                "positive_subset": {"pixel": {"precision": 0.0, "recall": 0.0, "f1": 0.0, "dice": 0.0, "tp": 0, "fp": 0, "fn": 0}, "reconstruction": {"p50_start": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}, "p50_minus_predicted_bridge": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}, "p50_minus_gt_oracle_bridge": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}}},
+                "negative_subset": {"predicted_bridge_pixels": 1, "fraction_of_candidate_pixels_removed": 0.25, "samples_with_zero_predicted_removal": 0, "starting_mean_matched_iou": 0.8, "refined_mean_matched_iou": 0.6, "num_improves": 0, "num_unchanged": 0, "num_regresses": 1, "num_component_topology_changes": 1},
+                "removal_calibration": {"all_removed_over_candidate": 0.25, "positive_removed_over_candidate": 0.0, "negative_removed_over_candidate": 0.25, "positive_gt_bridge_over_candidate": 0.0},
+                "reconstruction": {"p50_start": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}, "p50_minus_predicted_bridge": {"mean_matched_iou": 0.6, "all_iou_ge_0.50_count": 0}, "p50_minus_gt_oracle_bridge": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}},
+                "per_sample": [{"sample_id": "s1", "bridge_positive": 0, "predicted_removed_pixels": 1, "predicted_removed_fraction": 0.25, "predicted_mean_iou": 0.6, "start_mean_iou": 0.8, "component_topology_changed": 1}],
+            },
+        ]
+        pixel_seq = [
+            {"precision": 0.4, "recall": 0.4, "f1": 0.4, "dice": 0.4, "tp": 1, "fp": 1, "fn": 1},
+            {"precision": 0.3, "recall": 0.3, "f1": 0.3, "dice": 0.3, "tp": 1, "fp": 2, "fn": 2},
+        ]
+        saved = []
+        cfg = {"seed": 1337, "checkpoint_policy": {"mode": "safe_reconstruction_v3", "safe_remove_threshold": 0.50}}
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(bridge, "evaluate_reconstruction_levels_on_cached", side_effect=recon_seq), \
+             mock.patch.object(bridge, "compute_binary_metrics_from_domain", side_effect=pixel_seq), \
+             mock.patch.object(bridge, "save_checkpoint", side_effect=lambda path, *args, **kwargs: saved.append(Path(path).name)):
+            summary = runner._run_micro_overfit(
+                model=model,
+                cached_records=cached_records,
+                optimizer=optimizer,
+                loss_fn=loss_fn,
+                device=torch.device("cpu"),
+                max_steps=2,
+                log_every=1,
+                save_dir=Path(td),
+                cfg=cfg,
+            )
+        self.assertTrue(summary["no_safe_checkpoint"])
+        self.assertIsNone(summary["best_safe_reconstruction"])
+        self.assertIn("best_unconstrained_reconstruction.pth", saved)
+        self.assertNotIn("best_safe_reconstruction.pth", saved)
 
 
 if __name__ == "__main__":

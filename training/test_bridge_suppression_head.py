@@ -161,6 +161,93 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         self.assertEqual(float(out["positive_count"].item()), 0.0)
         self.assertEqual(float(out["candidate_count"].item()), 2.0)
 
+    def test_negative_preservation_loss_uses_only_bridge_negative_samples(self):
+        bridge, _soft = self._mods()
+        loss_fn = bridge.CandidateBalancedBCEDiceLoss(lambda_negative_mean=1.0, lambda_negative_hard=0.0, negative_hard_topk_fraction=0.5)
+        logits = torch.tensor(
+            [
+                [[[5.0, -5.0]]],
+                [[[1.0, -1.0]]],
+            ],
+            dtype=torch.float32,
+        )
+        target = torch.tensor(
+            [
+                [[[1.0, 0.0]]],
+                [[[0.0, 0.0]]],
+            ],
+            dtype=torch.float32,
+        )
+        candidate = torch.ones_like(target)
+        out = loss_fn(
+            bridge_logits=logits,
+            bridge_target=target,
+            candidate_mask=candidate,
+            bridge_positive=torch.tensor([1.0, 0.0], dtype=torch.float32),
+        )
+        expected = torch.nn.functional.binary_cross_entropy_with_logits(logits[1, 0], torch.zeros_like(logits[1, 0]), reduction="mean")
+        self.assertAlmostEqual(float(out["negative_candidate_mean_bce"].item()), float(expected.item()), places=6)
+
+    def test_negative_preservation_loss_is_normalized_per_sample(self):
+        bridge, _soft = self._mods()
+        loss_fn = bridge.CandidateBalancedBCEDiceLoss(lambda_negative_mean=1.0, lambda_negative_hard=0.0, negative_hard_topk_fraction=0.5)
+        logits = torch.tensor(
+            [
+                [[[2.0, 2.0, 2.0, 2.0]]],
+                [[[0.0, 0.0, 0.0, 0.0]]],
+            ],
+            dtype=torch.float32,
+        )
+        target = torch.zeros_like(logits)
+        candidate = torch.tensor(
+            [
+                [[[1.0, 1.0, 1.0, 1.0]]],
+                [[[1.0, 0.0, 0.0, 0.0]]],
+            ],
+            dtype=torch.float32,
+        )
+        out = loss_fn(
+            bridge_logits=logits,
+            bridge_target=target,
+            candidate_mask=candidate,
+            bridge_positive=torch.tensor([0.0, 0.0], dtype=torch.float32),
+        )
+        loss_a = torch.nn.functional.binary_cross_entropy_with_logits(logits[0, 0, 0, :4], torch.zeros((4,), dtype=torch.float32), reduction="mean")
+        loss_b = torch.nn.functional.binary_cross_entropy_with_logits(logits[1, 0, 0, :1], torch.zeros((1,), dtype=torch.float32), reduction="mean")
+        expected = 0.5 * (loss_a + loss_b)
+        self.assertAlmostEqual(float(out["negative_candidate_mean_bce"].item()), float(expected.item()), places=6)
+
+    def test_negative_hard_topk_selects_highest_scoring_candidate_logits(self):
+        bridge, _soft = self._mods()
+        loss_fn = bridge.CandidateBalancedBCEDiceLoss(lambda_negative_mean=0.0, lambda_negative_hard=1.0, negative_hard_topk_fraction=0.25)
+        logits = torch.tensor([[[[-3.0, 2.0, 5.0, 1.0]]]], dtype=torch.float32)
+        target = torch.zeros_like(logits)
+        candidate = torch.ones_like(logits)
+        out = loss_fn(
+            bridge_logits=logits,
+            bridge_target=target,
+            candidate_mask=candidate,
+            bridge_positive=torch.tensor([0.0], dtype=torch.float32),
+        )
+        expected = torch.nn.functional.binary_cross_entropy_with_logits(torch.tensor([5.0]), torch.tensor([0.0]), reduction="mean")
+        self.assertAlmostEqual(float(out["negative_candidate_hard_bce"].item()), float(expected.item()), places=6)
+
+    def test_all_zero_bridge_target_has_finite_gradients(self):
+        bridge, _soft = self._mods()
+        loss_fn = bridge.CandidateBalancedBCEDiceLoss(lambda_negative_mean=2.0, lambda_negative_hard=1.0, negative_hard_topk_fraction=0.5)
+        logits = torch.zeros((2, 1, 2, 2), dtype=torch.float32, requires_grad=True)
+        target = torch.zeros((2, 1, 2, 2), dtype=torch.float32)
+        candidate = torch.ones((2, 1, 2, 2), dtype=torch.float32)
+        out = loss_fn(
+            bridge_logits=logits,
+            bridge_target=target,
+            candidate_mask=candidate,
+            bridge_positive=torch.tensor([0.0, 0.0], dtype=torch.float32),
+        )
+        out["loss"].backward()
+        self.assertTrue(torch.isfinite(out["loss"]).all().item())
+        self.assertTrue(torch.isfinite(logits.grad).all().item())
+
     def test_no_gt_labels_enter_inference_and_removal_only(self):
         bridge, _soft = self._mods()
         candidate = np.array([[1, 1], [0, 1]], dtype=np.uint8)

@@ -583,11 +583,77 @@ def load_semantic_checkpoint(model: FrozenSemanticBridgeSuppressionModel, checkp
 
 
 class CandidateBalancedBCEDiceLoss(nn.Module):
-    def __init__(self, eps: float = 1.0e-6) -> None:
+    def __init__(
+        self,
+        eps: float = 1.0e-6,
+        *,
+        lambda_negative_mean: float = 0.0,
+        lambda_negative_hard: float = 0.0,
+        negative_hard_topk_fraction: float = 0.01,
+    ) -> None:
         super().__init__()
         self.eps = float(eps)
+        self.lambda_negative_mean = float(lambda_negative_mean)
+        self.lambda_negative_hard = float(lambda_negative_hard)
+        self.negative_hard_topk_fraction = float(negative_hard_topk_fraction)
 
-    def forward(self, *, bridge_logits: torch.Tensor, bridge_target: torch.Tensor, candidate_mask: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _negative_sample_bce_terms(
+        self,
+        *,
+        bridge_logits: torch.Tensor,
+        bridge_target: torch.Tensor,
+        candidate_mask: torch.Tensor,
+        bridge_positive: torch.Tensor | None,
+    ) -> dict[str, torch.Tensor]:
+        device = bridge_logits.device
+        zero = bridge_logits.sum() * 0.0
+        logits_flat = bridge_logits[:, 0]
+        target_flat = bridge_target[:, 0]
+        candidate_flat = candidate_mask[:, 0] > 0.5
+        target_positive = (target_flat > 0.5) & candidate_flat
+        if bridge_positive is None:
+            bridge_positive = torch.any(target_positive.reshape(target_positive.shape[0], -1), dim=1)
+        else:
+            bridge_positive = bridge_positive.to(device=device).bool().reshape(-1)
+        negative_sample_mask = ~bridge_positive
+        if int(torch.sum(negative_sample_mask).item()) == 0:
+            return {
+                "negative_candidate_mean_bce": zero,
+                "negative_candidate_hard_bce": zero,
+                "negative_sample_count": torch.tensor(0.0, device=device),
+            }
+        sample_mean_losses: list[torch.Tensor] = []
+        sample_hard_losses: list[torch.Tensor] = []
+        for idx in torch.nonzero(negative_sample_mask, as_tuple=False).reshape(-1):
+            sample_logits = logits_flat[int(idx)]
+            sample_candidate = candidate_flat[int(idx)]
+            sample_logits = sample_logits[sample_candidate]
+            if int(sample_logits.numel()) == 0:
+                sample_mean_losses.append(zero)
+                sample_hard_losses.append(zero)
+                continue
+            sample_mean_losses.append(
+                F.binary_cross_entropy_with_logits(sample_logits, torch.zeros_like(sample_logits), reduction="mean")
+            )
+            k = max(1, int(math.ceil(float(sample_logits.numel()) * self.negative_hard_topk_fraction)))
+            top_logits = torch.topk(sample_logits, k=k, largest=True).values
+            sample_hard_losses.append(
+                F.binary_cross_entropy_with_logits(top_logits, torch.zeros_like(top_logits), reduction="mean")
+            )
+        return {
+            "negative_candidate_mean_bce": torch.stack(sample_mean_losses).mean() if sample_mean_losses else zero,
+            "negative_candidate_hard_bce": torch.stack(sample_hard_losses).mean() if sample_hard_losses else zero,
+            "negative_sample_count": torch.tensor(float(len(sample_mean_losses)), device=device),
+        }
+
+    def forward(
+        self,
+        *,
+        bridge_logits: torch.Tensor,
+        bridge_target: torch.Tensor,
+        candidate_mask: torch.Tensor,
+        bridge_positive: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         candidate = candidate_mask > 0.5
         logits_flat = bridge_logits[candidate]
         target_flat = bridge_target[candidate]
@@ -599,9 +665,14 @@ class CandidateBalancedBCEDiceLoss(nn.Module):
                 "dice_loss": zero,
                 "positive_bce": zero,
                 "negative_bce": zero,
+                "base_bridge_loss": zero,
+                "negative_candidate_mean_bce": zero,
+                "negative_candidate_hard_bce": zero,
+                "weighted_preservation_loss": zero,
                 "candidate_count": torch.tensor(0, device=bridge_logits.device, dtype=torch.float32),
                 "positive_count": torch.tensor(0, device=bridge_logits.device, dtype=torch.float32),
                 "negative_count": torch.tensor(0, device=bridge_logits.device, dtype=torch.float32),
+                "negative_sample_count": torch.tensor(0, device=bridge_logits.device, dtype=torch.float32),
             }
         pos = target_flat > 0.5
         neg = ~pos
@@ -619,17 +690,43 @@ class CandidateBalancedBCEDiceLoss(nn.Module):
         intersection = torch.sum(probs * target_float)
         dice_coeff = (2.0 * intersection + self.eps) / (torch.sum(probs) + torch.sum(target_float) + self.eps)
         dice_loss = 1.0 - dice_coeff
-        total = balanced_bce + dice_loss
+        base_bridge_loss = balanced_bce + dice_loss
+        preservation = self._negative_sample_bce_terms(
+            bridge_logits=bridge_logits,
+            bridge_target=bridge_target,
+            candidate_mask=candidate_mask,
+            bridge_positive=bridge_positive,
+        )
+        weighted_preservation_loss = (
+            float(self.lambda_negative_mean) * preservation["negative_candidate_mean_bce"]
+            + float(self.lambda_negative_hard) * preservation["negative_candidate_hard_bce"]
+        )
+        total = base_bridge_loss + weighted_preservation_loss
         return {
             "loss": total,
+            "base_bridge_loss": base_bridge_loss,
             "balanced_bce": balanced_bce,
             "dice_loss": dice_loss,
             "positive_bce": pos_loss,
             "negative_bce": neg_loss,
+            "negative_candidate_mean_bce": preservation["negative_candidate_mean_bce"],
+            "negative_candidate_hard_bce": preservation["negative_candidate_hard_bce"],
+            "weighted_preservation_loss": weighted_preservation_loss,
             "candidate_count": torch.tensor(float(logits_flat.numel()), device=bridge_logits.device),
             "positive_count": torch.tensor(float(torch.sum(pos).item()), device=bridge_logits.device),
             "negative_count": torch.tensor(float(torch.sum(neg).item()), device=bridge_logits.device),
+            "negative_sample_count": preservation["negative_sample_count"],
         }
+
+
+def build_bridge_loss_from_cfg(cfg: dict[str, Any]) -> CandidateBalancedBCEDiceLoss:
+    loss_cfg = cfg.get("loss") or {}
+    return CandidateBalancedBCEDiceLoss(
+        eps=float(loss_cfg.get("eps", 1.0e-6)),
+        lambda_negative_mean=float(loss_cfg.get("lambda_negative_mean", 0.0)),
+        lambda_negative_hard=float(loss_cfg.get("lambda_negative_hard", 0.0)),
+        negative_hard_topk_fraction=float(loss_cfg.get("negative_hard_topk_fraction", 0.01)),
+    )
 
 
 def build_optimizer(model: FrozenSemanticBridgeSuppressionModel, cfg: dict[str, Any]) -> tuple[torch.optim.Optimizer, dict[str, Any]]:
@@ -1286,6 +1383,7 @@ def stack_cached_batch(records: list[dict[str, Any]], device: torch.device) -> d
         "p_leaf": torch.stack([row["p_leaf"] for row in records], dim=0).to(device),
         "candidate_mask": torch.stack([row["candidate_mask"] for row in records], dim=0).to(device),
         "bridge_target": torch.stack([row["bridge_target"] for row in records], dim=0).to(device),
+        "bridge_positive": torch.tensor([int(row["bridge_positive"]) for row in records], device=device, dtype=torch.float32),
         "sample_ids": [str(row["sample_id"]) for row in records],
     }
 
