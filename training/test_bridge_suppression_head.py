@@ -780,7 +780,8 @@ class TestBridgeSuppressionHead(unittest.TestCase):
                 }
             }
 
-        with mock.patch.object(bridge, "run_locked_reconstruction", side_effect=fake_reconstruction):
+        with mock.patch.object(bridge, "run_locked_reconstruction", side_effect=fake_reconstruction), \
+             mock.patch.object(bridge, "run_locked_reconstruction_with_timing", side_effect=lambda pred_leaf01, gt_inst_u8: {"result": fake_reconstruction(pred_leaf01, gt_inst_u8), "timing": {"normalization_seconds": 1.0, "metrics_seconds": 2.0, "topology_seconds": 3.0, "total_seconds": 6.0}}):
             out = bridge.evaluate_reconstruction_levels_on_cached(FakeModel(), records, torch.device("cpu"))
         self.assertEqual(out["positive_subset"]["pixel"]["tp"], 1)
         self.assertEqual(out["negative_subset"]["predicted_bridge_pixels"], 0)
@@ -788,6 +789,54 @@ class TestBridgeSuppressionHead(unittest.TestCase):
         self.assertEqual(out["negative_subset"]["num_unchanged"], 1)
         self.assertEqual(out["negative_subset"]["num_component_topology_changes"], 0)
         self.assertAlmostEqual(out["removal_calibration"]["negative_removed_over_candidate"], 0.0)
+        self.assertIn("timing", out)
+        self.assertIn("reconstruction_per_sample_seconds", out["timing"])
+
+    def test_cached_invariant_reconstruction_parity(self):
+        bridge, _soft = self._mods()
+
+        class FakeModel:
+            def eval(self):
+                return self
+
+            def bridge_forward_from_cached(self, *, x_0_4, x_2_2, p_leaf):
+                logits = torch.tensor([[[[2.0, -2.0], [-2.0, -2.0]]]], dtype=torch.float32)
+                return {"bridge_logits": logits}
+
+        records = [
+            {
+                "sample_id": "pos",
+                "patient_id": "p1",
+                "gt_count": 2,
+                "bridge_positive": 1,
+                "candidate_pixels": 4,
+                "bridge_pixels": 2,
+                "x_0_4": torch.zeros((16, 2, 2), dtype=torch.float32),
+                "x_2_2": torch.zeros((32, 1, 1), dtype=torch.float32),
+                "p_leaf": torch.ones((1, 2, 2), dtype=torch.float32),
+                "candidate_mask": torch.ones((1, 2, 2), dtype=torch.float32),
+                "bridge_target": torch.tensor([[[1.0, 0.0], [1.0, 0.0]]], dtype=torch.float32),
+                "gt_instances": np.ones((2, 2), dtype=np.uint8),
+                "candidate_mask_np": np.ones((2, 2), dtype=np.uint8),
+                "oracle_removed_mask": np.array([[0, 0], [1, 1]], dtype=np.uint8),
+                "image_path": "x",
+            }
+        ]
+
+        def fake_reconstruction(pred_leaf01, gt_inst_u8):
+            fg = int(np.sum(pred_leaf01))
+            mean_iou = {4: 0.30, 3: 0.55, 2: 0.90}[fg]
+            return {"metrics": {"instance_mean_matched_iou": float(mean_iou), "all_iou_ge_0.50": bool(mean_iou >= 0.50)}}
+
+        cached = []
+        for row in records:
+            cached.append({**row, "component_count_start": 1, "start_reconstruction": fake_reconstruction(row["candidate_mask_np"], row["gt_instances"]), "oracle_reconstruction": fake_reconstruction(row["oracle_removed_mask"], row["gt_instances"])})
+        with mock.patch.object(bridge, "run_locked_reconstruction", side_effect=fake_reconstruction), \
+             mock.patch.object(bridge, "run_locked_reconstruction_with_timing", side_effect=lambda pred_leaf01, gt_inst_u8: {"result": fake_reconstruction(pred_leaf01, gt_inst_u8), "timing": {"normalization_seconds": 1.0, "metrics_seconds": 2.0, "topology_seconds": 3.0, "total_seconds": 6.0}}):
+            out = bridge.evaluate_reconstruction_levels_on_cached(FakeModel(), cached, torch.device("cpu"))
+        self.assertAlmostEqual(out["reconstruction"]["p50_start"]["mean_matched_iou"], 0.30)
+        self.assertAlmostEqual(out["reconstruction"]["p50_minus_gt_oracle_bridge"]["mean_matched_iou"], 0.90)
+        self.assertAlmostEqual(out["reconstruction"]["p50_minus_predicted_bridge"]["mean_matched_iou"], 0.55)
 
 
 if __name__ == "__main__":

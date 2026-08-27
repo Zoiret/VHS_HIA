@@ -370,6 +370,39 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
         self.assertEqual(runner._format_hhmmss(59.4), "00:00:59")
         self.assertEqual(runner._format_hhmmss(3661.1), "01:01:01")
 
+    def test_eta_includes_scheduled_evaluation_cost(self):
+        _bridge, runner = self._mods()
+        eta = runner._progress_eta_seconds(
+            current_step=100,
+            max_steps=300,
+            log_every=10,
+            mean_step_seconds=1.0,
+            recent_eval_seconds=[120.0, 180.0],
+        )
+        self.assertGreaterEqual(eta, 200.0 + 20 * 150.0)
+
+    def test_progress_logging_still_uses_plain_print(self):
+        _bridge, runner = self._mods()
+        loss_dict = {
+            "loss": torch.tensor(1.0),
+            "negative_candidate_mean_bce": torch.tensor(0.2),
+            "negative_candidate_hard_bce": torch.tensor(0.3),
+            "weighted_preservation_loss": torch.tensor(0.4),
+        }
+        line = runner._progress_line(
+            step=111,
+            max_steps=300,
+            progress_epochs=100,
+            elapsed_seconds=10.0,
+            eta_seconds=20.0,
+            loss_dict=loss_dict,
+            eval_row=None,
+        )
+        self.assertIn("Epoch 037/100", line)
+        self.assertIn("step 111/300", line)
+        self.assertIn("elapsed 00:00:10", line)
+        self.assertIn("ETA 00:00:20", line)
+
     def test_safe_mode_does_not_write_best_safe_when_safety_fails(self):
         bridge, runner = self._mods()
 

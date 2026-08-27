@@ -207,6 +207,41 @@ def _final_human_summary(summary: dict[str, Any], *, total_training_time_seconds
     )
 
 
+def _progress_eta_seconds(
+    *,
+    current_step: int,
+    max_steps: int,
+    log_every: int,
+    mean_step_seconds: float,
+    recent_eval_seconds: list[float],
+) -> float:
+    remaining_steps = max(0, int(max_steps) - int(current_step))
+    step_eta = float(remaining_steps) * float(mean_step_seconds)
+    if int(current_step) >= int(max_steps):
+        return 0.0
+    future_eval_steps = [
+        step for step in range(int(current_step) + 1, int(max_steps) + 1)
+        if _is_eval_step(step, max_steps, log_every)
+    ]
+    eval_eta = float(len(future_eval_steps)) * float(sum(recent_eval_seconds) / max(len(recent_eval_seconds), 1)) if recent_eval_seconds else 0.0
+    return max(0.0, step_eta + eval_eta)
+
+
+def _print_eval_timing(step: int, timing: dict[str, Any]) -> None:
+    print(
+        "Eval timing | "
+        f"step {int(step)} | "
+        f"total {float(timing.get('total_seconds', 0.0)):.1f}s | "
+        f"forward {float(timing.get('forward_seconds', 0.0)):.1f}s | "
+        f"threshold {float(timing.get('threshold_seconds', 0.0)):.1f}s | "
+        f"cc/reconstruction {float(timing.get('reconstruction_seconds', 0.0)):.1f}s | "
+        f"metrics {float(timing.get('metrics_seconds', 0.0)):.1f}s | "
+        f"diagnostics {float(timing.get('diagnostics_seconds', 0.0)):.1f}s | "
+        f"checkpoint {float(timing.get('checkpoint_seconds', 0.0)):.1f}s",
+        flush=True,
+    )
+
+
 def _smoke_step(
     *,
     model: bridge.FrozenSemanticBridgeSuppressionModel,
@@ -329,6 +364,8 @@ def _run_micro_overfit(
     last_reported_epoch = 0
     last_eval_row: dict[str, Any] | None = None
     step_times: deque[float] = deque(maxlen=25)
+    recent_eval_seconds: deque[float] = deque(maxlen=5)
+    eval_timing_rows: list[dict[str, Any]] = []
     train_start_time = time.perf_counter()
 
     for step in range(1, int(max_steps) + 1):
@@ -353,6 +390,7 @@ def _run_micro_overfit(
 
         if _is_eval_step(step, max_steps, log_every):
             model.eval()
+            checkpoint_seconds = 0.0
             with torch.no_grad():
                 eval_outputs = model.bridge_forward_from_cached(
                     x_0_4=batch["x_0_4"],
@@ -455,6 +493,7 @@ def _run_micro_overfit(
                     "safe_checkpoint": bool(safe_checkpoint),
                     "negative_sample_details": negative_sample_details,
                 }
+                ckpt_t0 = time.perf_counter()
                 bridge.save_checkpoint(
                     save_dir / "best_pixel_f1.pth",
                     model,
@@ -463,6 +502,7 @@ def _run_micro_overfit(
                     cfg,
                     extra={"best_payload": best_pixel_payload},
                 )
+                checkpoint_seconds += float(time.perf_counter() - ckpt_t0)
             reconstruction_key = (
                 int(recon["reconstruction"]["p50_minus_predicted_bridge"]["all_iou_ge_0.50_count"]),
                 float(recon["reconstruction"]["p50_minus_predicted_bridge"]["mean_matched_iou"]),
@@ -484,6 +524,7 @@ def _run_micro_overfit(
                     "safe_checkpoint": bool(safe_checkpoint),
                     "negative_sample_details": negative_sample_details,
                 }
+                ckpt_t0 = time.perf_counter()
                 bridge.save_checkpoint(
                     save_dir / ("best_unconstrained_reconstruction.pth" if checkpoint_policy["mode"] == "safe_reconstruction_v3" else "best_reconstruction.pth"),
                     model,
@@ -492,6 +533,7 @@ def _run_micro_overfit(
                     cfg,
                     extra={"best_payload": best_reconstruction_payload},
                 )
+                checkpoint_seconds += float(time.perf_counter() - ckpt_t0)
             if checkpoint_policy["mode"] == "safe_reconstruction_v3" and safe_checkpoint:
                 safe_key = _safe_reconstruction_key(recon)
                 if best_safe_reconstruction_key is None or safe_key > best_safe_reconstruction_key:
@@ -514,6 +556,7 @@ def _run_micro_overfit(
                         "safe_checkpoint": True,
                         "negative_sample_details": negative_sample_details,
                     }
+                    ckpt_t0 = time.perf_counter()
                     bridge.save_checkpoint(
                         save_dir / "best_safe_reconstruction.pth",
                         model,
@@ -522,6 +565,27 @@ def _run_micro_overfit(
                         cfg,
                         extra={"best_payload": best_safe_reconstruction_payload},
                     )
+                    checkpoint_seconds += float(time.perf_counter() - ckpt_t0)
+            timing_row = {
+                "step": int(step),
+                **dict(recon.get("timing", {})),
+                "checkpoint_seconds": float(checkpoint_seconds),
+                "sample_component_counts": [
+                    {
+                        "sample_id": str(v["sample_id"]),
+                        "bridge_positive": int(v["bridge_positive"]),
+                        "predicted_removed_pixels": int(v["predicted_removed_pixels"]),
+                        "component_count_start": int(v.get("component_count_start", 0)),
+                        "component_count_predicted": int(v.get("component_count_predicted", 0)),
+                        "candidate_components_entering_normalization": int(v.get("component_count_predicted", 0)),
+                        "predicted_reconstruction_runtime_seconds": float(v.get("predicted_reconstruction_runtime_seconds", 0.0)),
+                    }
+                    for v in recon.get("per_sample", [])
+                ],
+            }
+            recent_eval_seconds.append(float(recon.get("timing", {}).get("total_seconds", 0.0)) + float(checkpoint_seconds))
+            eval_timing_rows.append(timing_row)
+            _print_eval_timing(step, timing_row)
 
         if _should_emit_progress_report(
             step=step,
@@ -531,7 +595,13 @@ def _run_micro_overfit(
         ):
             elapsed_seconds = float(time.perf_counter() - train_start_time)
             mean_step_seconds = float(sum(step_times) / max(len(step_times), 1))
-            eta_seconds = max(0.0, float(max_steps - step) * mean_step_seconds)
+            eta_seconds = _progress_eta_seconds(
+                current_step=step,
+                max_steps=max_steps,
+                log_every=log_every,
+                mean_step_seconds=mean_step_seconds,
+                recent_eval_seconds=list(recent_eval_seconds),
+            )
             print(
                 _progress_line(
                     step=step,
@@ -563,6 +633,7 @@ def _run_micro_overfit(
     )
     _save_metrics_csv(save_dir / "micro_overfit_metrics.csv", metrics_rows)
     bridge._write_json(save_dir / "micro_overfit_metrics.json", metrics_rows)
+    bridge._write_json(save_dir / "evaluation_timing_diagnostics.json", eval_timing_rows)
     final_row = metrics_rows[-1]
     total_training_time_seconds = float(time.perf_counter() - train_start_time)
     summary = {

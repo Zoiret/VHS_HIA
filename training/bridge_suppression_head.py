@@ -8,6 +8,7 @@ import math
 import os
 import random
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -407,17 +408,36 @@ def refine_candidate_with_bridge_probs(candidate_mask01: np.ndarray, bridge_prob
 
 
 def run_locked_reconstruction(pred_leaf01: np.ndarray, gt_inst_u8: np.ndarray) -> dict[str, Any]:
-    gt_k = int(len(topo_aux._positive_instance_ids(gt_inst_u8.astype(np.uint8))))
-    normalized = postrun.run_locked_normalization(pred_leaf01.astype(np.uint8), gt_k)
+    return run_locked_reconstruction_with_timing(pred_leaf01, gt_inst_u8)["result"]
+
+
+def run_locked_reconstruction_with_timing(pred_leaf01: np.ndarray, gt_inst_u8: np.ndarray) -> dict[str, Any]:
+    pred_leaf01 = pred_leaf01.astype(np.uint8)
+    gt_inst_u8 = gt_inst_u8.astype(np.uint8)
+    t0 = time.perf_counter()
+    gt_k = int(len(topo_aux._positive_instance_ids(gt_inst_u8)))
+    normalized = postrun.run_locked_normalization(pred_leaf01, gt_k)
+    t1 = time.perf_counter()
     pred_inst = normalized["labels"].astype(np.uint8)
-    metrics = base_audit.compute_detailed_instance_metrics(gt_inst_u8.astype(np.uint8), pred_inst, gt_k=gt_k, pred_k=int(normalized["final_group_count"]))
-    topology = forensic.classify_semantic_topology(gt_inst_u8.astype(np.uint8), pred_leaf01.astype(np.uint8))
-    return {
+    metrics = base_audit.compute_detailed_instance_metrics(gt_inst_u8, pred_inst, gt_k=gt_k, pred_k=int(normalized["final_group_count"]))
+    t2 = time.perf_counter()
+    topology = forensic.classify_semantic_topology(gt_inst_u8, pred_leaf01)
+    t3 = time.perf_counter()
+    result = {
         "gt_k": gt_k,
         "pred_k": int(normalized["final_group_count"]),
         "labels": pred_inst,
         "metrics": metrics,
         "topology": topology,
+    }
+    return {
+        "result": result,
+        "timing": {
+            "normalization_seconds": float(t1 - t0),
+            "metrics_seconds": float(t2 - t1),
+            "topology_seconds": float(t3 - t2),
+            "total_seconds": float(t3 - t0),
+        },
     }
 
 
@@ -1354,6 +1374,11 @@ def write_micro_manifest(records: list[dict[str, Any]], path: Path) -> dict[str,
 def cache_microset_features(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in records:
+        candidate_mask_np = row["candidate_mask"].astype(np.uint8)
+        oracle_removed_mask = row["oracle_removed_mask"].astype(np.uint8)
+        gt_instances = row["gt_instances"].astype(np.uint8)
+        start_reconstruction = run_locked_reconstruction(candidate_mask_np, gt_instances)
+        oracle_reconstruction = run_locked_reconstruction(oracle_removed_mask, gt_instances)
         out.append(
             {
                 "sample_id": str(row["sample_id"]),
@@ -1365,11 +1390,14 @@ def cache_microset_features(records: list[dict[str, Any]]) -> list[dict[str, Any
                 "x_0_4": row["x_0_4"].clone(),
                 "x_2_2": row["x_2_2"].clone(),
                 "p_leaf": torch.from_numpy(row["p_leaf"][None, ...]).float(),
-                "candidate_mask": torch.from_numpy(row["candidate_mask"][None, ...].astype(np.float32)),
+                "candidate_mask": torch.from_numpy(candidate_mask_np[None, ...].astype(np.float32)),
                 "bridge_target": torch.from_numpy(row["bridge_target"][None, ...].astype(np.float32)),
-                "gt_instances": row["gt_instances"].astype(np.uint8),
-                "candidate_mask_np": row["candidate_mask"].astype(np.uint8),
-                "oracle_removed_mask": row["oracle_removed_mask"].astype(np.uint8),
+                "gt_instances": gt_instances,
+                "candidate_mask_np": candidate_mask_np,
+                "oracle_removed_mask": oracle_removed_mask,
+                "component_count_start": int(_connected_components(candidate_mask_np)[1]),
+                "start_reconstruction": start_reconstruction,
+                "oracle_reconstruction": oracle_reconstruction,
                 "image_path": str(row["image_path"]),
             }
         )
@@ -1450,6 +1478,15 @@ def _subset_reconstruction_summary(rows: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
+def _ensure_cached_reconstruction_invariants(row: dict[str, Any]) -> None:
+    if "component_count_start" not in row:
+        row["component_count_start"] = int(_connected_components(row["candidate_mask_np"].astype(np.uint8))[1])
+    if "start_reconstruction" not in row:
+        row["start_reconstruction"] = run_locked_reconstruction(row["candidate_mask_np"].astype(np.uint8), row["gt_instances"].astype(np.uint8))
+    if "oracle_reconstruction" not in row:
+        row["oracle_reconstruction"] = run_locked_reconstruction(row["oracle_removed_mask"].astype(np.uint8), row["gt_instances"].astype(np.uint8))
+
+
 def evaluate_reconstruction_levels_on_cached(
     model: FrozenSemanticBridgeSuppressionModel,
     records: list[dict[str, Any]],
@@ -1458,7 +1495,9 @@ def evaluate_reconstruction_levels_on_cached(
     threshold: float = BRIDGE_REMOVE_THRESHOLD,
 ) -> dict[str, Any]:
     model.eval()
+    t_eval_start = time.perf_counter()
     batch = stack_cached_batch(records, device)
+    t_forward_start = time.perf_counter()
     with torch.no_grad():
         outputs = model.bridge_forward_from_cached(
             x_0_4=batch["x_0_4"],
@@ -1466,6 +1505,11 @@ def evaluate_reconstruction_levels_on_cached(
             p_leaf=batch["p_leaf"],
         )
         bridge_probs = torch.sigmoid(outputs["bridge_logits"]).detach().cpu()
+    t_forward_end = time.perf_counter()
+    threshold_seconds = 0.0
+    reconstruction_seconds = 0.0
+    metrics_seconds = 0.0
+    diagnostics_seconds = 0.0
     predicted_metrics: list[dict[str, Any]] = []
     start_metrics: list[dict[str, Any]] = []
     oracle_metrics: list[dict[str, Any]] = []
@@ -1480,18 +1524,26 @@ def evaluate_reconstruction_levels_on_cached(
     negative_candidate_pixels = 0
     positive_gt_bridge_pixels = 0
     for idx, row in enumerate(records):
+        _ensure_cached_reconstruction_invariants(row)
         candidate_mask = row["candidate_mask_np"].astype(np.uint8)
+        t_threshold_start = time.perf_counter()
         pred_remove = (bridge_probs[idx, 0].numpy() >= float(threshold)).astype(np.uint8)
         refined = ((candidate_mask > 0) & (pred_remove == 0)).astype(np.uint8)
+        t_threshold_end = time.perf_counter()
+        threshold_seconds += float(t_threshold_end - t_threshold_start)
         predicted_removed_pixels = int(np.sum((candidate_mask > 0) & (pred_remove > 0)))
         candidate_pixels = int(row["candidate_pixels"])
         total_removed_pixels += predicted_removed_pixels
         total_candidate_pixels += candidate_pixels
-        comp_before = _connected_components(candidate_mask.astype(np.uint8))[1]
+        t_recon_start = time.perf_counter()
+        comp_before = int(row["component_count_start"])
         comp_after = _connected_components(refined.astype(np.uint8))[1]
-        start = run_locked_reconstruction(candidate_mask, row["gt_instances"])
-        pred = run_locked_reconstruction(refined, row["gt_instances"])
-        oracle = run_locked_reconstruction(row["oracle_removed_mask"], row["gt_instances"])
+        pred_timed = run_locked_reconstruction_with_timing(refined, row["gt_instances"])
+        pred = pred_timed["result"]
+        start = row["start_reconstruction"]
+        oracle = row["oracle_reconstruction"]
+        t_recon_end = time.perf_counter()
+        reconstruction_seconds += float(t_recon_end - t_recon_start)
         start_metrics.append({"sample_id": row["sample_id"], "gt_count": row["gt_count"], **start["metrics"]})
         predicted_metrics.append({"sample_id": row["sample_id"], "gt_count": row["gt_count"], **pred["metrics"]})
         oracle_metrics.append({"sample_id": row["sample_id"], "gt_count": row["gt_count"], **oracle["metrics"]})
@@ -1504,6 +1556,7 @@ def evaluate_reconstruction_levels_on_cached(
             negative_indices.append(idx)
             negative_removed_pixels += predicted_removed_pixels
             negative_candidate_pixels += candidate_pixels
+        t_diag_start = time.perf_counter()
         per_sample.append(
             {
                 "sample_id": str(row["sample_id"]),
@@ -1522,9 +1575,15 @@ def evaluate_reconstruction_levels_on_cached(
                 "component_count_start": int(comp_before),
                 "component_count_predicted": int(comp_after),
                 "component_topology_changed": int(comp_before != comp_after),
+                "predicted_reconstruction_runtime_seconds": float(pred_timed["timing"]["total_seconds"]),
+                "predicted_normalization_runtime_seconds": float(pred_timed["timing"]["normalization_seconds"]),
+                "predicted_metric_runtime_seconds": float(pred_timed["timing"]["metrics_seconds"]),
+                "predicted_topology_runtime_seconds": float(pred_timed["timing"]["topology_seconds"]),
             }
         )
+        diagnostics_seconds += float(time.perf_counter() - t_diag_start)
 
+    t_metrics_start = time.perf_counter()
     binary = compute_binary_metrics_from_domain(
         bridge_probs=bridge_probs,
         bridge_target=batch["bridge_target"].cpu(),
@@ -1542,7 +1601,8 @@ def evaluate_reconstruction_levels_on_cached(
     positive_start = [row for row in start_metrics if str(row["sample_id"]) in {str(v["sample_id"]) for v in per_sample if int(v["bridge_positive"]) == 1}]
     positive_pred = [row for row in predicted_metrics if str(row["sample_id"]) in {str(v["sample_id"]) for v in per_sample if int(v["bridge_positive"]) == 1}]
     positive_oracle = [row for row in oracle_metrics if str(row["sample_id"]) in {str(v["sample_id"]) for v in per_sample if int(v["bridge_positive"]) == 1}]
-    return {
+    metrics_seconds += float(time.perf_counter() - t_metrics_start)
+    out = {
         "pixel": binary,
         "positive_subset": {
             "pixel": positive_pixel,
@@ -1579,6 +1639,20 @@ def evaluate_reconstruction_levels_on_cached(
         },
         "per_sample": per_sample,
     }
+    output_timing = {
+        "forward_seconds": float(t_forward_end - t_forward_start),
+        "threshold_seconds": float(threshold_seconds),
+        "reconstruction_seconds": float(reconstruction_seconds),
+        "metrics_seconds": float(metrics_seconds),
+        "diagnostics_seconds": float(diagnostics_seconds),
+        "total_seconds": float(time.perf_counter() - t_eval_start),
+        "reconstruction_per_sample_seconds": {
+            str(row["sample_id"]): float(row["predicted_reconstruction_runtime_seconds"])
+            for row in per_sample
+        },
+    }
+    out["timing"] = output_timing
+    return out
 
 
 def build_validation_audit(
