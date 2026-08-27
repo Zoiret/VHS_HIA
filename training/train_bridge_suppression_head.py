@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -127,6 +130,83 @@ def _safe_reconstruction_key(recon: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _format_hhmmss(seconds: float) -> str:
+    total = max(0, int(round(float(seconds))))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _progress_epoch_for_step(step: int, max_steps: int, progress_epochs: int) -> int:
+    if int(max_steps) <= 0 or int(progress_epochs) <= 0:
+        return 0
+    return max(1, min(int(progress_epochs), int(math.ceil((int(step) * int(progress_epochs)) / float(max_steps)))))
+
+
+def _should_emit_progress_report(*, step: int, last_reported_epoch: int, max_steps: int, progress_epochs: int) -> bool:
+    current_epoch = _progress_epoch_for_step(step, max_steps, progress_epochs)
+    return bool(current_epoch > int(last_reported_epoch))
+
+
+def _is_eval_step(step: int, max_steps: int, log_every: int) -> bool:
+    return bool(int(step) == 1 or int(step) % max(1, int(log_every)) == 0 or int(step) == int(max_steps))
+
+
+def _progress_line(
+    *,
+    step: int,
+    max_steps: int,
+    progress_epochs: int,
+    elapsed_seconds: float,
+    eta_seconds: float,
+    loss_dict: dict[str, torch.Tensor],
+    eval_row: dict[str, Any] | None,
+) -> str:
+    epoch = _progress_epoch_for_step(step, max_steps, progress_epochs)
+    pct = 100.0 * float(step) / max(float(max_steps), 1.0)
+    line = (
+        f"Epoch {epoch:03d}/{int(progress_epochs):03d} | "
+        f"step {int(step)}/{int(max_steps)} | "
+        f"{pct:.1f}% | "
+        f"elapsed {_format_hhmmss(elapsed_seconds)} | "
+        f"ETA {_format_hhmmss(eta_seconds)} | "
+        f"loss {float(loss_dict['loss'].detach().cpu().item()):.4f} | "
+        f"neg_mean {float(loss_dict['negative_candidate_mean_bce'].detach().cpu().item()):.4f} | "
+        f"neg_hard {float(loss_dict['negative_candidate_hard_bce'].detach().cpu().item()):.4f}"
+    )
+    if "weighted_preservation_loss" in loss_dict:
+        line += f" | pres {float(loss_dict['weighted_preservation_loss'].detach().cpu().item()):.4f}"
+    if eval_row is not None:
+        line += (
+            f" | pos_s50 {int(eval_row['positive_pred_success50'])}/6"
+            f" | pos_iou {float(eval_row['positive_pred_mean_iou']):.4f}"
+            f" | neg_removed {float(eval_row['negative_removed_fraction']):.4f}"
+            f" | neg_reg {int(eval_row['negative_num_regresses'])}"
+            f" | neg_topo {int(eval_row['negative_num_component_topology_changes'])}"
+            f" | safe {'YES' if int(eval_row['safe_checkpoint']) == 1 else 'NO'}"
+        )
+    return line
+
+
+def _final_human_summary(summary: dict[str, Any], *, total_training_time_seconds: float) -> str:
+    best_safe = summary.get("best_safe_reconstruction")
+    best_unconstrained = summary.get("best_unconstrained_reconstruction") or summary.get("best_reconstruction")
+    final_row = summary["final"]
+    best_safe_step = "NONE" if not isinstance(best_safe, dict) else str(int(best_safe["step"]))
+    best_unconstrained_step = "NONE" if not isinstance(best_unconstrained, dict) else str(int(best_unconstrained["step"]))
+    return (
+        "Final summary | "
+        f"total {_format_hhmmss(float(total_training_time_seconds))} | "
+        f"best_safe {best_safe_step} | "
+        f"best_unconstrained {best_unconstrained_step} | "
+        f"pos_s50 {int(final_row['positive_pred_success50'])}/6 | "
+        f"pos_iou {float(final_row['positive_pred_mean_iou']):.4f} | "
+        f"neg_reg {int(final_row['negative_num_regresses'])} | "
+        f"neg_topo {int(final_row['negative_num_component_topology_changes'])}"
+    )
+
+
 def _smoke_step(
     *,
     model: bridge.FrozenSemanticBridgeSuppressionModel,
@@ -232,6 +312,8 @@ def _run_micro_overfit(
     cfg: dict[str, Any],
 ) -> dict[str, Any]:
     batch = bridge.stack_cached_batch(cached_records, device)
+    micro_cfg = cfg.get("micro_overfit") or {}
+    progress_epochs = int(micro_cfg.get("progress_epochs", 100))
     trainable_named = [(name, p) for name, p in model.named_parameters() if (name.startswith("context_projection.") or name.startswith("bridge_head."))]
     semantic_named = [(name, p) for name, p in model.named_parameters() if name.startswith("base.")]
     semantic_ref = bridge._snapshot_named_parameters(semantic_named)
@@ -244,8 +326,13 @@ def _run_micro_overfit(
     best_reconstruction_payload: dict[str, Any] | None = None
     best_safe_reconstruction_key: tuple[Any, ...] | None = None
     best_safe_reconstruction_payload: dict[str, Any] | None = None
+    last_reported_epoch = 0
+    last_eval_row: dict[str, Any] | None = None
+    step_times: deque[float] = deque(maxlen=25)
+    train_start_time = time.perf_counter()
 
     for step in range(1, int(max_steps) + 1):
+        step_start_time = time.perf_counter()
         model.train(True)
         optimizer.zero_grad(set_to_none=True)
         outputs = model.bridge_forward_from_cached(
@@ -262,8 +349,9 @@ def _run_micro_overfit(
         loss = loss_dict["loss"]
         loss.backward()
         optimizer.step()
+        step_times.append(float(time.perf_counter() - step_start_time))
 
-        if step == 1 or step % int(log_every) == 0 or step == int(max_steps):
+        if _is_eval_step(step, max_steps, log_every):
             model.eval()
             with torch.no_grad():
                 eval_outputs = model.bridge_forward_from_cached(
@@ -352,6 +440,7 @@ def _run_micro_overfit(
                 "negative_sample_details": negative_sample_details,
             }
             metrics_rows.append(row)
+            last_eval_row = row
             if float(pixel["f1"]) > float(best_pixel_f1):
                 best_pixel_f1 = float(pixel["f1"])
                 best_pixel_payload = {
@@ -434,6 +523,29 @@ def _run_micro_overfit(
                         extra={"best_payload": best_safe_reconstruction_payload},
                     )
 
+        if _should_emit_progress_report(
+            step=step,
+            last_reported_epoch=last_reported_epoch,
+            max_steps=max_steps,
+            progress_epochs=progress_epochs,
+        ):
+            elapsed_seconds = float(time.perf_counter() - train_start_time)
+            mean_step_seconds = float(sum(step_times) / max(len(step_times), 1))
+            eta_seconds = max(0.0, float(max_steps - step) * mean_step_seconds)
+            print(
+                _progress_line(
+                    step=step,
+                    max_steps=max_steps,
+                    progress_epochs=progress_epochs,
+                    elapsed_seconds=elapsed_seconds,
+                    eta_seconds=eta_seconds,
+                    loss_dict=loss_dict,
+                    eval_row=last_eval_row if _is_eval_step(step, max_steps, log_every) else None,
+                ),
+                flush=True,
+            )
+            last_reported_epoch = _progress_epoch_for_step(step, max_steps, progress_epochs)
+
     bridge.save_checkpoint(
         save_dir / "last.pth",
         model,
@@ -452,6 +564,7 @@ def _run_micro_overfit(
     _save_metrics_csv(save_dir / "micro_overfit_metrics.csv", metrics_rows)
     bridge._write_json(save_dir / "micro_overfit_metrics.json", metrics_rows)
     final_row = metrics_rows[-1]
+    total_training_time_seconds = float(time.perf_counter() - train_start_time)
     summary = {
         "initial": metrics_rows[0],
         "final": final_row,
@@ -464,6 +577,7 @@ def _run_micro_overfit(
         "semantic_bn_max_delta": float(bridge._max_bn_delta(model.base, base_bn_ref)),
         "trainable_grad_finite": bool(bridge._all_grads_finite(trainable_named)),
     }
+    print(_final_human_summary(summary, total_training_time_seconds=total_training_time_seconds), flush=True)
     bridge._write_json(save_dir / "summary.json", summary)
     return summary
 

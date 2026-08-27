@@ -58,6 +58,7 @@ checkpoint_policy:
 micro_overfit:
   manifest_path: training/manifests/bridge_suppression_micro_overfit_v2_manifest.json
   max_steps: 300
+  progress_epochs: 100
   log_every: 10
 
 reserved_full_run:

@@ -172,6 +172,7 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
         self.assertEqual(float(cfgs["v3d"]["loss"]["lambda_negative_hard"]), 1.0)
         self.assertTrue(all(float(cfg["loss"]["negative_hard_topk_fraction"]) == 0.01 for cfg in cfgs.values()))
         self.assertTrue(all(str((cfg.get("checkpoint_policy") or {}).get("mode")) == "safe_reconstruction_v3" for cfg in cfgs.values()))
+        self.assertTrue(all(int((cfg.get("micro_overfit") or {}).get("progress_epochs", 0)) == 100 for cfg in cfgs.values()))
 
     def test_run_pipeline_uses_locked_manifest_and_never_regenerates(self):
         bridge, runner = self._mods()
@@ -350,6 +351,25 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
         self.assertFalse(runner._safe_checkpoint_status({"negative_subset": {"num_regresses": 1, "num_component_topology_changes": 0}}))
         self.assertFalse(runner._safe_checkpoint_status({"negative_subset": {"num_regresses": 0, "num_component_topology_changes": 1}}))
 
+    def test_progress_epoch_mapping_300_steps_to_100_reports(self):
+        _bridge, runner = self._mods()
+        epochs = [runner._progress_epoch_for_step(step, 300, 100) for step in range(1, 301)]
+        report_steps = []
+        last_epoch = 0
+        for step in range(1, 301):
+            if runner._should_emit_progress_report(step=step, last_reported_epoch=last_epoch, max_steps=300, progress_epochs=100):
+                report_steps.append(step)
+                last_epoch = runner._progress_epoch_for_step(step, 300, 100)
+        self.assertEqual(len(set(epochs)), 100)
+        self.assertEqual(len(report_steps), 100)
+        self.assertEqual(runner._progress_epoch_for_step(111, 300, 100), 37)
+
+    def test_elapsed_eta_formatting(self):
+        _bridge, runner = self._mods()
+        self.assertEqual(runner._format_hhmmss(0), "00:00:00")
+        self.assertEqual(runner._format_hhmmss(59.4), "00:00:59")
+        self.assertEqual(runner._format_hhmmss(3661.1), "01:01:01")
+
     def test_safe_mode_does_not_write_best_safe_when_safety_fails(self):
         bridge, runner = self._mods()
 
@@ -429,6 +449,150 @@ class TestTrainBridgeSuppressionHead(unittest.TestCase):
         self.assertIsNone(summary["best_safe_reconstruction"])
         self.assertIn("best_unconstrained_reconstruction.pth", saved)
         self.assertNotIn("best_safe_reconstruction.pth", saved)
+
+    def test_progress_logging_does_not_add_extra_evaluation_calls(self):
+        bridge, runner = self._mods()
+
+        class FakeModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.base = torch.nn.Linear(1, 1)
+                for p in self.base.parameters():
+                    p.requires_grad = False
+                self.context_projection = torch.nn.Conv2d(1, 1, 1)
+                self.bridge_head = torch.nn.Conv2d(1, 1, 1)
+
+            def bridge_forward_from_cached(self, *, x_0_4, x_2_2, p_leaf):
+                logits = self.bridge_head(x_0_4[:, :1])
+                return {"bridge_logits": logits, "candidate_mask": (p_leaf >= 0).float()}
+
+        model = FakeModel()
+        optimizer = torch.optim.SGD([p for p in model.parameters() if p.requires_grad], lr=0.1)
+        cached_records = [
+            {
+                "sample_id": "s1",
+                "x_0_4": torch.ones((1, 2, 2), dtype=torch.float32),
+                "x_2_2": torch.ones((1, 1, 1), dtype=torch.float32),
+                "p_leaf": torch.ones((1, 2, 2), dtype=torch.float32),
+                "candidate_mask": torch.ones((1, 2, 2), dtype=torch.float32),
+                "bridge_target": torch.zeros((1, 2, 2), dtype=torch.float32),
+                "gt_instances": __import__("numpy").ones((2, 2), dtype="uint8"),
+                "candidate_mask_np": __import__("numpy").ones((2, 2), dtype="uint8"),
+                "oracle_removed_mask": __import__("numpy").ones((2, 2), dtype="uint8"),
+                "image_path": "x",
+                "patient_id": "p1",
+                "gt_count": 2,
+                "bridge_positive": 0,
+                "candidate_pixels": 4,
+                "bridge_pixels": 0,
+            }
+        ]
+        loss_fn = bridge.CandidateBalancedBCEDiceLoss()
+        recon_payload = {
+            "positive_subset": {"pixel": {"precision": 0.0, "recall": 0.0, "f1": 0.0, "dice": 0.0, "tp": 0, "fp": 0, "fn": 0}, "reconstruction": {"p50_start": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}, "p50_minus_predicted_bridge": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}, "p50_minus_gt_oracle_bridge": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}}},
+            "negative_subset": {"predicted_bridge_pixels": 0, "fraction_of_candidate_pixels_removed": 0.0, "samples_with_zero_predicted_removal": 1, "starting_mean_matched_iou": 0.8, "refined_mean_matched_iou": 0.8, "num_improves": 0, "num_unchanged": 1, "num_regresses": 0, "num_component_topology_changes": 0},
+            "removal_calibration": {"all_removed_over_candidate": 0.0, "positive_removed_over_candidate": 0.0, "negative_removed_over_candidate": 0.0, "positive_gt_bridge_over_candidate": 0.0},
+            "reconstruction": {"p50_start": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}, "p50_minus_predicted_bridge": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}, "p50_minus_gt_oracle_bridge": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}},
+            "per_sample": [{"sample_id": "s1", "bridge_positive": 0, "predicted_removed_pixels": 0, "predicted_removed_fraction": 0.0, "predicted_mean_iou": 0.8, "start_mean_iou": 0.8, "component_topology_changed": 0}],
+        }
+        cfg = {"seed": 1337, "micro_overfit": {"progress_epochs": 6}, "checkpoint_policy": {"mode": "safe_reconstruction_v3", "safe_remove_threshold": 0.50}}
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(bridge, "evaluate_reconstruction_levels_on_cached", return_value=recon_payload) as eval_mock, \
+             mock.patch.object(bridge, "compute_binary_metrics_from_domain", return_value={"precision": 0.4, "recall": 0.4, "f1": 0.4, "dice": 0.4, "tp": 1, "fp": 1, "fn": 1}), \
+             mock.patch.object(bridge, "save_checkpoint"), \
+             mock.patch("builtins.print"):
+            runner._run_micro_overfit(
+                model=model,
+                cached_records=cached_records,
+                optimizer=optimizer,
+                loss_fn=loss_fn,
+                device=torch.device("cpu"),
+                max_steps=6,
+                log_every=3,
+                save_dir=Path(td),
+                cfg=cfg,
+            )
+        self.assertEqual(eval_mock.call_count, 3)
+
+    def test_final_json_content_unchanged_by_progress_logging(self):
+        bridge, runner = self._mods()
+
+        class FakeModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.base = torch.nn.Linear(1, 1)
+                for p in self.base.parameters():
+                    p.requires_grad = False
+                self.context_projection = torch.nn.Conv2d(1, 1, 1)
+                self.bridge_head = torch.nn.Conv2d(1, 1, 1)
+
+            def bridge_forward_from_cached(self, *, x_0_4, x_2_2, p_leaf):
+                logits = self.bridge_head(x_0_4[:, :1])
+                return {"bridge_logits": logits, "candidate_mask": (p_leaf >= 0).float()}
+
+        model = FakeModel()
+        optimizer = torch.optim.SGD([p for p in model.parameters() if p.requires_grad], lr=0.1)
+        cached_records = [
+            {
+                "sample_id": "s1",
+                "x_0_4": torch.ones((1, 2, 2), dtype=torch.float32),
+                "x_2_2": torch.ones((1, 1, 1), dtype=torch.float32),
+                "p_leaf": torch.ones((1, 2, 2), dtype=torch.float32),
+                "candidate_mask": torch.ones((1, 2, 2), dtype=torch.float32),
+                "bridge_target": torch.zeros((1, 2, 2), dtype=torch.float32),
+                "gt_instances": __import__("numpy").ones((2, 2), dtype="uint8"),
+                "candidate_mask_np": __import__("numpy").ones((2, 2), dtype="uint8"),
+                "oracle_removed_mask": __import__("numpy").ones((2, 2), dtype="uint8"),
+                "image_path": "x",
+                "patient_id": "p1",
+                "gt_count": 2,
+                "bridge_positive": 0,
+                "candidate_pixels": 4,
+                "bridge_pixels": 0,
+            }
+        ]
+        loss_fn = bridge.CandidateBalancedBCEDiceLoss()
+        recon_payload = {
+            "positive_subset": {"pixel": {"precision": 0.0, "recall": 0.0, "f1": 0.0, "dice": 0.0, "tp": 0, "fp": 0, "fn": 0}, "reconstruction": {"p50_start": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}, "p50_minus_predicted_bridge": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}, "p50_minus_gt_oracle_bridge": {"mean_matched_iou": 0.0, "all_iou_ge_0.50_count": 0}}},
+            "negative_subset": {"predicted_bridge_pixels": 0, "fraction_of_candidate_pixels_removed": 0.0, "samples_with_zero_predicted_removal": 1, "starting_mean_matched_iou": 0.8, "refined_mean_matched_iou": 0.8, "num_improves": 0, "num_unchanged": 1, "num_regresses": 0, "num_component_topology_changes": 0},
+            "removal_calibration": {"all_removed_over_candidate": 0.0, "positive_removed_over_candidate": 0.0, "negative_removed_over_candidate": 0.0, "positive_gt_bridge_over_candidate": 0.0},
+            "reconstruction": {"p50_start": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}, "p50_minus_predicted_bridge": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}, "p50_minus_gt_oracle_bridge": {"mean_matched_iou": 0.8, "all_iou_ge_0.50_count": 1}},
+            "per_sample": [{"sample_id": "s1", "bridge_positive": 0, "predicted_removed_pixels": 0, "predicted_removed_fraction": 0.0, "predicted_mean_iou": 0.8, "start_mean_iou": 0.8, "component_topology_changed": 0}],
+        }
+        writes = []
+        cfg = {"seed": 1337, "micro_overfit": {"progress_epochs": 2}, "checkpoint_policy": {"mode": "safe_reconstruction_v3", "safe_remove_threshold": 0.50}}
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(bridge, "evaluate_reconstruction_levels_on_cached", return_value=recon_payload), \
+             mock.patch.object(bridge, "compute_binary_metrics_from_domain", return_value={"precision": 0.4, "recall": 0.4, "f1": 0.4, "dice": 0.4, "tp": 1, "fp": 1, "fn": 1}), \
+             mock.patch.object(bridge, "save_checkpoint"), \
+             mock.patch.object(bridge, "_write_json", side_effect=lambda path, payload: writes.append((Path(path).name, payload))), \
+             mock.patch("builtins.print"):
+            summary = runner._run_micro_overfit(
+                model=model,
+                cached_records=cached_records,
+                optimizer=optimizer,
+                loss_fn=loss_fn,
+                device=torch.device("cpu"),
+                max_steps=2,
+                log_every=1,
+                save_dir=Path(td),
+                cfg=cfg,
+            )
+        summary_write = [payload for name, payload in writes if name == "summary.json"]
+        self.assertEqual(len(summary_write), 1)
+        self.assertEqual(summary_write[0], summary)
+        self.assertEqual(set(summary.keys()), {
+            "initial",
+            "final",
+            "best_pixel",
+            "best_reconstruction",
+            "best_unconstrained_reconstruction",
+            "best_safe_reconstruction",
+            "no_safe_checkpoint",
+            "semantic_parameter_max_delta",
+            "semantic_bn_max_delta",
+            "trainable_grad_finite",
+        })
 
 
 if __name__ == "__main__":
