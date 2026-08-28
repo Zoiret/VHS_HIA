@@ -166,6 +166,27 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def canonical_model_state_sha256(state_dict: dict[str, Any]) -> str:
+    """Historical semantic hash for model state payloads.
+
+    This intentionally matches the V2 threshold-sweep contract:
+    sorted keys, UTF-8 key bytes, dtype text, JSON shape text, and raw
+    contiguous CPU tensor bytes.
+    """
+    h = hashlib.sha256()
+    for key in sorted(state_dict.keys()):
+        value = state_dict[key]
+        h.update(str(key).encode("utf-8"))
+        if torch.is_tensor(value):
+            arr = value.detach().cpu().contiguous()
+            h.update(str(arr.dtype).encode("utf-8"))
+            h.update(json.dumps(list(arr.shape)).encode("utf-8"))
+            h.update(arr.numpy().tobytes(order="C"))
+        else:
+            h.update(repr(value).encode("utf-8"))
+    return h.hexdigest()
+
+
 def _canonical_split_rows(path: Path) -> list[str]:
     return [
         row.strip()

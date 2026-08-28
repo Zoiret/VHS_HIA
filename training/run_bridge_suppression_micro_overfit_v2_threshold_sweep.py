@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -35,21 +34,6 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) ->
             writer.writerow({key: row.get(key) for key in fieldnames})
 
 
-def _state_dict_sha256(state_dict: dict[str, Any]) -> str:
-    h = hashlib.sha256()
-    for key in sorted(state_dict.keys()):
-        value = state_dict[key]
-        h.update(str(key).encode("utf-8"))
-        if torch.is_tensor(value):
-            arr = value.detach().cpu().contiguous()
-            h.update(str(arr.dtype).encode("utf-8"))
-            h.update(json.dumps(list(arr.shape)).encode("utf-8"))
-            h.update(arr.numpy().tobytes(order="C"))
-        else:
-            h.update(repr(value).encode("utf-8"))
-    return h.hexdigest()
-
-
 def inspect_checkpoint(path: Path) -> dict[str, Any]:
     path = path.resolve()
     payload = torch.load(str(path), map_location="cpu")
@@ -62,7 +46,7 @@ def inspect_checkpoint(path: Path) -> dict[str, Any]:
         "path": str(path),
         "name": path.name,
         "file_sha256": bridge._sha256_file(path),
-        "model_state_sha256": _state_dict_sha256(model_state),
+        "model_state_sha256": bridge.canonical_model_state_sha256(model_state),
         "step": int(payload.get("step", -1)),
         "extra": payload.get("extra", {}),
     }

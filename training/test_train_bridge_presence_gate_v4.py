@@ -4,7 +4,6 @@ import sys
 import tempfile
 import unittest
 import hashlib
-from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
@@ -21,6 +20,51 @@ import train_bridge_presence_gate_v4 as runner
 
 
 class TestTrainBridgePresenceGateV4(unittest.TestCase):
+    def test_canonical_model_state_hash_ignores_insertion_order(self):
+        state_a = {
+            "b.bias": torch.tensor([3], dtype=torch.int64),
+            "a.weight": torch.tensor([[1.0, 2.0]], dtype=torch.float32),
+        }
+        state_b = {
+            "a.weight": torch.tensor([[1.0, 2.0]], dtype=torch.float32),
+            "b.bias": torch.tensor([3], dtype=torch.int64),
+        }
+        self.assertEqual(
+            bridge.canonical_model_state_sha256(state_a),
+            bridge.canonical_model_state_sha256(state_b),
+        )
+
+    def test_canonical_model_state_hash_changes_for_key_value_shape_and_dtype(self):
+        base = {"a.weight": torch.tensor([[1.0, 2.0]], dtype=torch.float32)}
+        renamed = {"z.weight": torch.tensor([[1.0, 2.0]], dtype=torch.float32)}
+        changed_value = {"a.weight": torch.tensor([[1.0, 9.0]], dtype=torch.float32)}
+        changed_shape = {"a.weight": torch.tensor([1.0, 2.0], dtype=torch.float32)}
+        changed_dtype = {"a.weight": torch.tensor([[1.0, 2.0]], dtype=torch.float64)}
+        base_hash = bridge.canonical_model_state_sha256(base)
+        self.assertNotEqual(base_hash, bridge.canonical_model_state_sha256(renamed))
+        self.assertNotEqual(base_hash, bridge.canonical_model_state_sha256(changed_value))
+        self.assertNotEqual(base_hash, bridge.canonical_model_state_sha256(changed_shape))
+        self.assertNotEqual(base_hash, bridge.canonical_model_state_sha256(changed_dtype))
+
+    def test_canonical_model_state_hash_locked_synthetic_sha(self):
+        state = {
+            "a.weight": torch.tensor([[1.0, 2.0]], dtype=torch.float32),
+            "b.bias": torch.tensor([3], dtype=torch.int64),
+        }
+        self.assertEqual(
+            bridge.canonical_model_state_sha256(state),
+            "4b3a4ad7e32b620c0de55eb8c3ec4cc6b30950b7b54a324afaf3ea01d1274159",
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    def test_canonical_model_state_hash_is_device_independent(self):
+        cpu_state = {"a.weight": torch.tensor([[1.0, 2.0]], dtype=torch.float32)}
+        cuda_state = {"a.weight": cpu_state["a.weight"].to("cuda")}
+        self.assertEqual(
+            bridge.canonical_model_state_sha256(cpu_state),
+            bridge.canonical_model_state_sha256(cuda_state),
+        )
+
     def test_v4_config_no_test_or_holdout_and_locked_manifest(self):
         cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_micro_overfit.yaml")
         self.assertIn("bridge_suppression_micro_overfit_v2_manifest.json", str(cfg["micro_overfit"]["manifest_path"]))
@@ -78,13 +122,21 @@ class TestTrainBridgePresenceGateV4(unittest.TestCase):
             state = {"layer.weight": torch.ones((2, 2), dtype=torch.float32)}
             torch.save({"model": state, "step": 300}, str(path))
             info = gate_v4.inspect_bridge_checkpoint(path)
-            buf = BytesIO()
-            torch.save(state, buf)
             self.assertEqual(info["checkpoint_path"], str(path.resolve()))
             self.assertEqual(info["checkpoint_file_sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
-            self.assertEqual(info["checkpoint_model_state_sha256"], hashlib.sha256(buf.getvalue()).hexdigest())
+            self.assertEqual(info["checkpoint_model_state_sha256"], bridge.canonical_model_state_sha256(state))
             self.assertEqual(info["step"], 300)
             self.assertEqual(info["state_dict_key"], "model")
+
+    def test_inspect_bridge_checkpoint_uses_shared_canonical_hash_function(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "best_reconstruction.pth"
+            state = {"layer.weight": torch.ones((2, 2), dtype=torch.float32)}
+            torch.save({"model": state, "step": 300}, str(path))
+            with mock.patch.object(bridge, "canonical_model_state_sha256", return_value="shared-sha") as hash_mock:
+                info = gate_v4.inspect_bridge_checkpoint(path)
+            hash_mock.assert_called_once()
+            self.assertEqual(info["checkpoint_model_state_sha256"], "shared-sha")
 
     def test_gate_only_gradients(self):
         gate = gate_v4.SampleLevelBridgePresenceGate(input_dim=4, hidden_dim=4, dropout_p=0.0)

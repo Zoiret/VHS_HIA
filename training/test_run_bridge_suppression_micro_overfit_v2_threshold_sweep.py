@@ -242,6 +242,16 @@ class TestBridgeThresholdSweep(unittest.TestCase):
             self.assertTrue(info["best_pixel_best_reconstruction_last_identical"])
             self.assertEqual(Path(info["evaluated"]["path"]).name, "best_reconstruction.pth")
 
+    def test_inspect_checkpoint_uses_shared_canonical_model_hash(self):
+        bridge, sweep = self._mods()
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "best_reconstruction.pth"
+            torch.save({"model": {"x": torch.tensor([1.0, 2.0])}, "step": 300}, path)
+            with mock.patch.object(bridge, "canonical_model_state_sha256", return_value="historical-sha") as hash_mock:
+                info = sweep.inspect_checkpoint(path)
+            hash_mock.assert_called_once()
+            self.assertEqual(info["model_state_sha256"], "historical-sha")
+
     def test_locked_v2_manifest_counts_and_ids_unchanged(self):
         _bridge, _sweep = self._mods()
         manifest_path = Path("training/manifests/bridge_suppression_micro_overfit_v2_manifest.json").resolve()

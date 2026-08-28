@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import sys
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -75,12 +73,10 @@ def inspect_bridge_checkpoint(path: Path) -> dict[str, Any]:
     best_payload = extra.get("best_payload") if isinstance(extra, dict) else None
     if not isinstance(best_payload, dict):
         best_payload = None
-    buffer = BytesIO()
-    torch.save(state, buffer)
     return {
         "checkpoint_path": str(path),
-        "checkpoint_file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "checkpoint_model_state_sha256": hashlib.sha256(buffer.getvalue()).hexdigest(),
+        "checkpoint_file_sha256": bridge._sha256_file(path),
+        "checkpoint_model_state_sha256": bridge.canonical_model_state_sha256(state),
         "step": int(ckpt.get("step", -1)) if isinstance(ckpt, dict) else -1,
         "state_dict_key": pixel_key,
         "selection_policy": None if best_payload is None else best_payload.get("selection_policy"),
