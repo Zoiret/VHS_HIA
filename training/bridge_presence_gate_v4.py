@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import sys
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ DEFAULT_V2_PIXEL_HEAD_CHECKPOINT = (
     / "training"
     / "runs"
     / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2"
-    / "best_unconstrained_reconstruction.pth"
+    / "best_reconstruction.pth"
 )
 
 SCALAR_FEATURE_NAMES = [
@@ -63,16 +65,58 @@ class SampleLevelBridgePresenceGate(nn.Module):
 def inspect_bridge_checkpoint(path: Path) -> dict[str, Any]:
     path = path.resolve()
     ckpt = torch.load(str(path), map_location="cpu")
+    if not isinstance(ckpt, dict):
+        raise SystemExit(f"Unsupported frozen V2 checkpoint payload: {path}")
+    pixel_key = "model"
+    state = ckpt.get(pixel_key)
+    if not isinstance(state, dict):
+        raise SystemExit(f"Frozen V2 checkpoint missing state-dict key '{pixel_key}': {path}")
     extra = ckpt.get("extra", {}) if isinstance(ckpt, dict) else {}
     best_payload = extra.get("best_payload") if isinstance(extra, dict) else None
     if not isinstance(best_payload, dict):
         best_payload = None
+    buffer = BytesIO()
+    torch.save(state, buffer)
     return {
         "checkpoint_path": str(path),
-        "checkpoint_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "checkpoint_file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "checkpoint_model_state_sha256": hashlib.sha256(buffer.getvalue()).hexdigest(),
         "step": int(ckpt.get("step", -1)) if isinstance(ckpt, dict) else -1,
+        "state_dict_key": pixel_key,
         "selection_policy": None if best_payload is None else best_payload.get("selection_policy"),
         "selection_reason": None if best_payload is None else best_payload.get("selection_reason"),
+    }
+
+
+def validate_expected_bridge_checkpoint_provenance(cfg: dict[str, Any], info: dict[str, Any]) -> dict[str, Any]:
+    pixel_cfg = cfg.get("frozen_v2_pixel_head") or {}
+    expected_file_sha = str(pixel_cfg.get("expected_file_sha256", "")).strip().lower()
+    expected_model_sha = str(pixel_cfg.get("expected_model_state_sha256", "")).strip().lower()
+    expected_step_raw = pixel_cfg.get("expected_step")
+    expected_key = str(pixel_cfg.get("state_dict_key", "model")).strip()
+    actual_file_sha = str(info.get("checkpoint_file_sha256", "")).strip().lower()
+    actual_model_sha = str(info.get("checkpoint_model_state_sha256", "")).strip().lower()
+    actual_step = int(info.get("step", -1))
+    actual_key = str(info.get("state_dict_key", "")).strip()
+    errors: list[str] = []
+    if expected_file_sha and actual_file_sha != expected_file_sha:
+        errors.append(f"Frozen V2 checkpoint file SHA256 mismatch: expected {expected_file_sha} actual {actual_file_sha}")
+    if expected_model_sha and actual_model_sha != expected_model_sha:
+        errors.append(f"Frozen V2 checkpoint model-state SHA256 mismatch: expected {expected_model_sha} actual {actual_model_sha}")
+    if expected_step_raw is not None and actual_step != int(expected_step_raw):
+        errors.append(f"Frozen V2 checkpoint step mismatch: expected {int(expected_step_raw)} actual {actual_step}")
+    if expected_key and actual_key != expected_key:
+        errors.append(f"Frozen V2 checkpoint state-dict key mismatch: expected {expected_key} actual {actual_key}")
+    return {
+        "status": "pass" if not errors else "blocked",
+        "errors": errors,
+        "resolved_checkpoint_path": str(info.get("checkpoint_path")),
+        "checkpoint_file_sha256": actual_file_sha,
+        "checkpoint_model_state_sha256": actual_model_sha,
+        "step": actual_step,
+        "state_dict_key": actual_key,
+        "semantic_frozen": True,
+        "v2_pixel_head_frozen": True,
     }
 
 
@@ -81,13 +125,17 @@ def load_frozen_v2_pixel_model_from_cfg(cfg: dict[str, Any], device: torch.devic
     checkpoint_path = bridge._resolve_repo_path(pixel_cfg.get("checkpoint_path"), DEFAULT_V2_PIXEL_HEAD_CHECKPOINT)
     if not checkpoint_path.exists():
         raise SystemExit(f"Frozen V2 pixel-head checkpoint not found: {checkpoint_path}")
+    info = inspect_bridge_checkpoint(checkpoint_path)
+    provenance = validate_expected_bridge_checkpoint_provenance(cfg, info)
+    if str(provenance.get("status")) != "pass":
+        raise SystemExit(json.dumps(provenance, ensure_ascii=False, indent=2))
     model = bridge.build_model_from_cfg(cfg).to(device)
     semantic_info = bridge.load_semantic_checkpoint(
         model,
         bridge._resolve_repo_path((cfg.get("train") or {}).get("init_checkpoint"), bridge.DEFAULT_SEMANTIC_CHECKPOINT),
     )
     ckpt = torch.load(str(checkpoint_path), map_location="cpu")
-    state = ckpt.get("model") if isinstance(ckpt, dict) else None
+    state = ckpt.get(info["state_dict_key"]) if isinstance(ckpt, dict) else None
     if not isinstance(state, dict):
         raise SystemExit(f"Unsupported frozen V2 checkpoint format: {checkpoint_path}")
     incompat = model.load_state_dict(state, strict=True)
@@ -98,9 +146,11 @@ def load_frozen_v2_pixel_model_from_cfg(cfg: dict[str, Any], device: torch.devic
     for param in model.parameters():
         param.requires_grad = False
     model.eval()
-    info = inspect_bridge_checkpoint(checkpoint_path)
     info["semantic_checkpoint_path"] = str(semantic_info["checkpoint_path"])
     info["semantic_checkpoint_sha256"] = str(semantic_info["checkpoint_sha256"])
+    info["provenance_validation"] = provenance
+    info["semantic_frozen"] = True
+    info["v2_pixel_head_frozen"] = True
     return model, info
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import hashlib
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
@@ -23,8 +25,66 @@ class TestTrainBridgePresenceGateV4(unittest.TestCase):
         cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_micro_overfit.yaml")
         self.assertIn("bridge_suppression_micro_overfit_v2_manifest.json", str(cfg["micro_overfit"]["manifest_path"]))
         self.assertEqual(float((cfg.get("frozen_v2_pixel_head") or {}).get("pixel_remove_threshold", 0.0)), 0.50)
+        self.assertTrue(str((cfg.get("frozen_v2_pixel_head") or {}).get("checkpoint_path", "")).endswith("best_reconstruction.pth"))
+        self.assertEqual(str((cfg.get("frozen_v2_pixel_head") or {}).get("expected_file_sha256", "")), "e1e7a31a078f6baf1da05b79541e5818430583deb1f4329b3e99d47cdb055573")
+        self.assertEqual(str((cfg.get("frozen_v2_pixel_head") or {}).get("expected_model_state_sha256", "")), "f21b80e1295271deaa48fb1cf0a7d26669e2821763ee115e146a02d3588cea6f")
+        self.assertEqual(int((cfg.get("frozen_v2_pixel_head") or {}).get("expected_step", -1)), 300)
+        self.assertEqual(str((cfg.get("frozen_v2_pixel_head") or {}).get("state_dict_key", "")), "model")
         self.assertTrue(bool((cfg.get("experiment_notes") or {}).get("no_test_usage", False)))
         self.assertTrue(bool((cfg.get("experiment_notes") or {}).get("no_authoritative_holdout", False)))
+
+    def test_validate_expected_checkpoint_provenance_pass_and_fail_modes(self):
+        good = {
+            "checkpoint_path": "x",
+            "checkpoint_file_sha256": "abc",
+            "checkpoint_model_state_sha256": "def",
+            "step": 300,
+            "state_dict_key": "model",
+        }
+        cfg = {
+            "frozen_v2_pixel_head": {
+                "expected_file_sha256": "abc",
+                "expected_model_state_sha256": "def",
+                "expected_step": 300,
+                "state_dict_key": "model",
+            }
+        }
+        passed = gate_v4.validate_expected_bridge_checkpoint_provenance(cfg, good)
+        self.assertEqual(passed["status"], "pass")
+        self.assertTrue(passed["semantic_frozen"])
+        self.assertTrue(passed["v2_pixel_head_frozen"])
+        blocked_sha = gate_v4.validate_expected_bridge_checkpoint_provenance(
+            {"frozen_v2_pixel_head": {**cfg["frozen_v2_pixel_head"], "expected_file_sha256": "zzz"}},
+            good,
+        )
+        self.assertEqual(blocked_sha["status"], "blocked")
+        self.assertTrue(any("file SHA256 mismatch" in err for err in blocked_sha["errors"]))
+        blocked_model = gate_v4.validate_expected_bridge_checkpoint_provenance(
+            {"frozen_v2_pixel_head": {**cfg["frozen_v2_pixel_head"], "expected_model_state_sha256": "zzz"}},
+            good,
+        )
+        self.assertEqual(blocked_model["status"], "blocked")
+        self.assertTrue(any("model-state SHA256 mismatch" in err for err in blocked_model["errors"]))
+        blocked_step = gate_v4.validate_expected_bridge_checkpoint_provenance(
+            {"frozen_v2_pixel_head": {**cfg["frozen_v2_pixel_head"], "expected_step": 299}},
+            good,
+        )
+        self.assertEqual(blocked_step["status"], "blocked")
+        self.assertTrue(any("step mismatch" in err for err in blocked_step["errors"]))
+
+    def test_inspect_bridge_checkpoint_reports_locked_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "best_reconstruction.pth"
+            state = {"layer.weight": torch.ones((2, 2), dtype=torch.float32)}
+            torch.save({"model": state, "step": 300}, str(path))
+            info = gate_v4.inspect_bridge_checkpoint(path)
+            buf = BytesIO()
+            torch.save(state, buf)
+            self.assertEqual(info["checkpoint_path"], str(path.resolve()))
+            self.assertEqual(info["checkpoint_file_sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertEqual(info["checkpoint_model_state_sha256"], hashlib.sha256(buf.getvalue()).hexdigest())
+            self.assertEqual(info["step"], 300)
+            self.assertEqual(info["state_dict_key"], "model")
 
     def test_gate_only_gradients(self):
         gate = gate_v4.SampleLevelBridgePresenceGate(input_dim=4, hidden_dim=4, dropout_p=0.0)
@@ -76,6 +136,20 @@ class TestTrainBridgePresenceGateV4(unittest.TestCase):
             cfg["frozen_v2_pixel_head"]["checkpoint_path"] = str(Path(td) / "missing.pth")
             with self.assertRaises(SystemExit):
                 gate_v4.load_frozen_v2_pixel_model_from_cfg(cfg, torch.device("cpu"))
+
+    def test_wrong_checkpoint_provenance_fails_closed_before_model_load(self):
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_micro_overfit.yaml")
+        with tempfile.TemporaryDirectory() as td:
+            ckpt_path = Path(td) / "best_reconstruction.pth"
+            torch.save({"model": {"w": torch.ones((1,), dtype=torch.float32)}, "step": 123}, str(ckpt_path))
+            cfg = dict(cfg)
+            cfg["frozen_v2_pixel_head"] = dict(cfg["frozen_v2_pixel_head"])
+            cfg["frozen_v2_pixel_head"]["checkpoint_path"] = str(ckpt_path)
+            with mock.patch.object(bridge, "build_model_from_cfg") as build_mock, \
+                 mock.patch.object(bridge, "load_semantic_checkpoint", return_value={"checkpoint_path": "x", "checkpoint_sha256": "y"}):
+                with self.assertRaises(SystemExit):
+                    gate_v4.load_frozen_v2_pixel_model_from_cfg(cfg, torch.device("cpu"))
+            build_mock.assert_not_called()
 
 
 if __name__ == "__main__":

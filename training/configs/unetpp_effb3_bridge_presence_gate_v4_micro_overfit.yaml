@@ -34,7 +34,11 @@ semantic_inference:
   cudnn_deterministic: true
 
 frozen_v2_pixel_head:
-  checkpoint_path: training/runs/unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2/best_unconstrained_reconstruction.pth
+  checkpoint_path: training/runs/unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2/best_reconstruction.pth
+  expected_file_sha256: e1e7a31a078f6baf1da05b79541e5818430583deb1f4329b3e99d47cdb055573
+  expected_model_state_sha256: f21b80e1295271deaa48fb1cf0a7d26669e2821763ee115e146a02d3588cea6f
+  expected_step: 300
+  state_dict_key: model
   pixel_remove_threshold: 0.50
 
 gate:
