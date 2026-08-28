@@ -1,0 +1,389 @@
+from __future__ import annotations
+
+import hashlib
+import math
+import sys
+from pathlib import Path
+from typing import Any
+
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
+
+import numpy as np
+
+try:
+    import torch
+    import torch.nn as nn
+except ModuleNotFoundError as e:
+    raise SystemExit(
+        "PyTorch is not installed. Install training deps with:\n"
+        "  py -m pip install -r requirements-train.txt"
+    ) from e
+
+import bridge_suppression_head as bridge
+
+
+DEFAULT_V2_PIXEL_HEAD_CHECKPOINT = (
+    bridge.REPO_ROOT
+    / "training"
+    / "runs"
+    / "unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2"
+    / "best_unconstrained_reconstruction.pth"
+)
+
+SCALAR_FEATURE_NAMES = [
+    "bridge_score_mean",
+    "bridge_score_max",
+    "bridge_score_top1pct_mean",
+    "bridge_score_top5pct_mean",
+    "bridge_score_frac_ge_0p50",
+    "bridge_score_frac_ge_0p75",
+    "bridge_score_frac_ge_0p90",
+    "candidate_fraction",
+    "candidate_component_count",
+]
+
+
+class SampleLevelBridgePresenceGate(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int = 16, dropout_p: float = 0.0) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(int(input_dim), int(hidden_dim))
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(float(dropout_p)) if float(dropout_p) > 0.0 else nn.Identity()
+        self.fc2 = nn.Linear(int(hidden_dim), 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        return self.fc2(x)
+
+
+def inspect_bridge_checkpoint(path: Path) -> dict[str, Any]:
+    path = path.resolve()
+    ckpt = torch.load(str(path), map_location="cpu")
+    extra = ckpt.get("extra", {}) if isinstance(ckpt, dict) else {}
+    best_payload = extra.get("best_payload") if isinstance(extra, dict) else None
+    if not isinstance(best_payload, dict):
+        best_payload = None
+    return {
+        "checkpoint_path": str(path),
+        "checkpoint_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "step": int(ckpt.get("step", -1)) if isinstance(ckpt, dict) else -1,
+        "selection_policy": None if best_payload is None else best_payload.get("selection_policy"),
+        "selection_reason": None if best_payload is None else best_payload.get("selection_reason"),
+    }
+
+
+def load_frozen_v2_pixel_model_from_cfg(cfg: dict[str, Any], device: torch.device) -> tuple[bridge.FrozenSemanticBridgeSuppressionModel, dict[str, Any]]:
+    pixel_cfg = cfg.get("frozen_v2_pixel_head") or {}
+    checkpoint_path = bridge._resolve_repo_path(pixel_cfg.get("checkpoint_path"), DEFAULT_V2_PIXEL_HEAD_CHECKPOINT)
+    if not checkpoint_path.exists():
+        raise SystemExit(f"Frozen V2 pixel-head checkpoint not found: {checkpoint_path}")
+    model = bridge.build_model_from_cfg(cfg).to(device)
+    semantic_info = bridge.load_semantic_checkpoint(
+        model,
+        bridge._resolve_repo_path((cfg.get("train") or {}).get("init_checkpoint"), bridge.DEFAULT_SEMANTIC_CHECKPOINT),
+    )
+    ckpt = torch.load(str(checkpoint_path), map_location="cpu")
+    state = ckpt.get("model") if isinstance(ckpt, dict) else None
+    if not isinstance(state, dict):
+        raise SystemExit(f"Unsupported frozen V2 checkpoint format: {checkpoint_path}")
+    incompat = model.load_state_dict(state, strict=True)
+    missing = list(getattr(incompat, "missing_keys", [])) if incompat is not None else []
+    unexpected = list(getattr(incompat, "unexpected_keys", [])) if incompat is not None else []
+    if missing or unexpected:
+        raise RuntimeError(f"Unexpected frozen V2 checkpoint incompatibility: missing={missing[:5]} unexpected={unexpected[:5]}")
+    for param in model.parameters():
+        param.requires_grad = False
+    model.eval()
+    info = inspect_bridge_checkpoint(checkpoint_path)
+    info["semantic_checkpoint_path"] = str(semantic_info["checkpoint_path"])
+    info["semantic_checkpoint_sha256"] = str(semantic_info["checkpoint_sha256"])
+    return model, info
+
+
+def gate_target_map_from_manifest(manifest_payload: dict[str, Any]) -> dict[str, int]:
+    rows = manifest_payload.get("rows") or []
+    out: dict[str, int] = {}
+    for row in rows:
+        sample_id = str(row["sample_id"])
+        out[sample_id] = int(int(row.get("bridge_pixels", 0)) > 0)
+    return out
+
+
+def annotate_cached_records_with_gate_targets(cached_records: list[dict[str, Any]], manifest_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    target_map = gate_target_map_from_manifest(manifest_payload)
+    out: list[dict[str, Any]] = []
+    for row in cached_records:
+        sample_id = str(row["sample_id"])
+        if sample_id not in target_map:
+            raise SystemExit(f"Locked manifest missing gate target for sample: {sample_id}")
+        current = dict(row)
+        current["gate_target"] = int(target_map[sample_id])
+        out.append(current)
+    return out
+
+
+def compute_frozen_v2_bridge_logits(model: bridge.FrozenSemanticBridgeSuppressionModel, cached_records: list[dict[str, Any]], device: torch.device) -> torch.Tensor:
+    batch = bridge.stack_cached_batch(cached_records, device)
+    model.eval()
+    with torch.inference_mode():
+        outputs = model.bridge_forward_from_cached(
+            x_0_4=batch["x_0_4"],
+            x_2_2=batch["x_2_2"],
+            p_leaf=batch["p_leaf"],
+        )
+        return outputs["bridge_logits"].detach().cpu().float()
+
+
+def _sigmoid_np(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x.astype(np.float64)))
+
+
+def _pooled_feature_vector(record: dict[str, Any]) -> np.ndarray:
+    x04 = record["x_0_4"].detach().cpu().numpy().astype(np.float32)
+    x22 = record["x_2_2"].detach().cpu().numpy().astype(np.float32)
+    pooled = [
+        x04.mean(axis=(1, 2)),
+        x04.max(axis=(1, 2)),
+        x22.mean(axis=(1, 2)),
+        x22.max(axis=(1, 2)),
+    ]
+    return np.concatenate(pooled, axis=0).astype(np.float32)
+
+
+def _masked_topk_mean(values: np.ndarray, frac: float) -> float:
+    if values.size == 0:
+        return 0.0
+    k = max(1, int(math.ceil(float(values.size) * float(frac))))
+    top = np.partition(values, -k)[-k:]
+    return float(np.mean(top))
+
+
+def extract_gate_feature_rows(cached_records: list[dict[str, Any]], bridge_logits: torch.Tensor) -> tuple[list[dict[str, Any]], torch.Tensor, torch.Tensor, list[np.ndarray]]:
+    rows: list[dict[str, Any]] = []
+    feature_vectors: list[np.ndarray] = []
+    targets: list[float] = []
+    pixel_remove_masks: list[np.ndarray] = []
+    logits_np = bridge_logits.detach().cpu().numpy().astype(np.float32)
+    for idx, record in enumerate(cached_records):
+        candidate_mask = record["candidate_mask_np"].astype(np.uint8)
+        candidate_bool = candidate_mask > 0
+        logits_2d = logits_np[idx, 0]
+        scores = _sigmoid_np(logits_2d)
+        candidate_scores = scores[candidate_bool]
+        pooled = _pooled_feature_vector(record)
+        scalar = {
+            "bridge_score_mean": float(np.mean(candidate_scores)) if candidate_scores.size else 0.0,
+            "bridge_score_max": float(np.max(candidate_scores)) if candidate_scores.size else 0.0,
+            "bridge_score_top1pct_mean": _masked_topk_mean(candidate_scores, 0.01),
+            "bridge_score_top5pct_mean": _masked_topk_mean(candidate_scores, 0.05),
+            "bridge_score_frac_ge_0p50": float(np.mean(candidate_scores >= 0.50)) if candidate_scores.size else 0.0,
+            "bridge_score_frac_ge_0p75": float(np.mean(candidate_scores >= 0.75)) if candidate_scores.size else 0.0,
+            "bridge_score_frac_ge_0p90": float(np.mean(candidate_scores >= 0.90)) if candidate_scores.size else 0.0,
+            "candidate_fraction": float(np.mean(candidate_bool.astype(np.float32))),
+            "candidate_component_count": float(record.get("component_count_start", bridge._connected_components(candidate_mask)[1])),
+        }
+        scalar_vec = np.asarray([scalar[name] for name in SCALAR_FEATURE_NAMES], dtype=np.float32)
+        feature_vec = np.concatenate([pooled, scalar_vec], axis=0).astype(np.float32)
+        feature_vectors.append(feature_vec)
+        targets.append(float(record["gate_target"]))
+        pixel_remove_masks.append((scores >= 0.50).astype(np.uint8))
+        rows.append(
+            {
+                "sample_id": str(record["sample_id"]),
+                "bridge_positive_target": int(record["gate_target"]),
+                **{key: float(value) for key, value in scalar.items()},
+                "pooled_feature_dimensionality": int(pooled.size),
+                "feature_dimensionality": int(feature_vec.size),
+            }
+        )
+    features_t = torch.from_numpy(np.stack(feature_vectors, axis=0)).float()
+    targets_t = torch.tensor(targets, dtype=torch.float32).reshape(-1, 1)
+    return rows, features_t, targets_t, pixel_remove_masks
+
+
+def simple_scalar_threshold_audit(feature_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    labels = np.asarray([int(row["bridge_positive_target"]) for row in feature_rows], dtype=np.int64)
+    positives = max(int(np.sum(labels == 1)), 1)
+    negatives = max(int(np.sum(labels == 0)), 1)
+    best: dict[str, Any] | None = None
+    perfect: dict[str, Any] | None = None
+    for name in SCALAR_FEATURE_NAMES:
+        values = np.asarray([float(row[name]) for row in feature_rows], dtype=np.float64)
+        unique = np.unique(values)
+        thresholds = [float(unique[0] - 1.0e-9)] + [float((a + b) / 2.0) for a, b in zip(unique[:-1], unique[1:])] + [float(unique[-1] + 1.0e-9)]
+        for direction in ("ge", "le"):
+            for threshold in thresholds:
+                pred = (values >= threshold).astype(np.int64) if direction == "ge" else (values <= threshold).astype(np.int64)
+                tp = int(np.sum((pred == 1) & (labels == 1)))
+                tn = int(np.sum((pred == 0) & (labels == 0)))
+                fp = int(np.sum((pred == 1) & (labels == 0)))
+                fn = int(np.sum((pred == 0) & (labels == 1)))
+                sensitivity = float(tp / positives)
+                specificity = float(tn / negatives)
+                balanced_accuracy = 0.5 * (sensitivity + specificity)
+                current = {
+                    "scalar": name,
+                    "direction": direction,
+                    "threshold": float(threshold),
+                    "tp": tp,
+                    "tn": tn,
+                    "fp": fp,
+                    "fn": fn,
+                    "sensitivity": sensitivity,
+                    "specificity": specificity,
+                    "balanced_accuracy": balanced_accuracy,
+                }
+                if best is None or float(current["balanced_accuracy"]) > float(best["balanced_accuracy"]):
+                    best = current
+                if tp == positives and tn == negatives:
+                    perfect = current
+                    break
+            if perfect is not None:
+                break
+        if perfect is not None:
+            break
+    return {
+        "simple_gate_threshold_exists": bool(perfect is not None),
+        "best_scalar": perfect if perfect is not None else best,
+    }
+
+
+def build_gate_model_from_cfg(cfg: dict[str, Any], input_dim: int) -> SampleLevelBridgePresenceGate:
+    gate_cfg = cfg.get("gate") or {}
+    return SampleLevelBridgePresenceGate(
+        input_dim=int(input_dim),
+        hidden_dim=int(gate_cfg.get("hidden_dim", 16)),
+        dropout_p=float(gate_cfg.get("dropout_p", 0.0)),
+    )
+
+
+def count_trainable_parameters(module: nn.Module) -> int:
+    return int(sum(int(param.numel()) for param in module.parameters() if param.requires_grad))
+
+
+def apply_hard_sample_gate(pixel_remove_mask: np.ndarray, gate_open: bool) -> np.ndarray:
+    if bool(gate_open):
+        return pixel_remove_mask.astype(np.uint8).copy()
+    return np.zeros_like(pixel_remove_mask, dtype=np.uint8)
+
+
+def evaluate_gate_threshold_on_cached(
+    cached_records: list[dict[str, Any]],
+    pixel_remove_masks: list[np.ndarray],
+    gate_probs: np.ndarray,
+    *,
+    gate_threshold: float,
+) -> dict[str, Any]:
+    per_sample: list[dict[str, Any]] = []
+    tp = tn = fp = fn = 0
+    for idx, row in enumerate(cached_records):
+        gate_target = int(row["gate_target"])
+        gate_prob = float(gate_probs[idx])
+        gate_open = bool(gate_prob >= float(gate_threshold))
+        if gate_open and gate_target == 1:
+            tp += 1
+        elif (not gate_open) and gate_target == 0:
+            tn += 1
+        elif gate_open and gate_target == 0:
+            fp += 1
+        else:
+            fn += 1
+        final_remove = apply_hard_sample_gate(pixel_remove_masks[idx], gate_open)
+        candidate_mask = row["candidate_mask_np"].astype(np.uint8)
+        refined = ((candidate_mask > 0) & (final_remove == 0)).astype(np.uint8)
+        pred = bridge.run_locked_reconstruction(refined, row["gt_instances"])
+        start = row["start_reconstruction"]
+        comp_after = int(bridge._connected_components(refined.astype(np.uint8))[1])
+        per_sample.append(
+            {
+                "sample_id": str(row["sample_id"]),
+                "gate_target": int(gate_target),
+                "gate_prob": gate_prob,
+                "gate_open": int(gate_open),
+                "bridge_positive": int(row["bridge_positive"]),
+                "candidate_pixels": int(row["candidate_pixels"]),
+                "predicted_removed_pixels": int(np.sum(final_remove > 0)),
+                "predicted_removed_fraction": float(np.sum(final_remove > 0) / max(int(row["candidate_pixels"]), 1)),
+                "start_mean_iou": float(start["metrics"]["instance_mean_matched_iou"]),
+                "predicted_mean_iou": float(pred["metrics"]["instance_mean_matched_iou"]),
+                "start_success50": int(bool(start["metrics"]["all_iou_ge_0.50"])),
+                "predicted_success50": int(bool(pred["metrics"]["all_iou_ge_0.50"])),
+                "component_count_start": int(row["component_count_start"]),
+                "component_count_predicted": int(comp_after),
+                "component_topology_changed": int(int(row["component_count_start"]) != comp_after),
+                "original_v2_remove_pixels": int(np.sum(pixel_remove_masks[idx] > 0)),
+            }
+        )
+    positives = [row for row in per_sample if int(row["gate_target"]) == 1]
+    negatives = [row for row in per_sample if int(row["gate_target"]) == 0]
+    pos_success = int(sum(int(v["predicted_success50"]) for v in positives))
+    neg_reg = int(sum(1 for v in negatives if float(v["predicted_mean_iou"]) + 1.0e-9 < float(v["start_mean_iou"])))
+    neg_topo = int(sum(int(v["component_topology_changed"]) for v in negatives))
+    cls_pos = max(len(positives), 1)
+    cls_neg = max(len(negatives), 1)
+    sensitivity = float(tp / cls_pos)
+    specificity = float(tn / cls_neg)
+    out = {
+        "classification": {
+            "tp": int(tp),
+            "tn": int(tn),
+            "fp": int(fp),
+            "fn": int(fn),
+            "sensitivity": sensitivity,
+            "specificity": specificity,
+            "balanced_accuracy": 0.5 * (sensitivity + specificity),
+        },
+        "gated_reconstruction": {
+            "positive_success50": int(pos_success),
+            "positive_mean_matched_iou": float(np.mean([float(v["predicted_mean_iou"]) for v in positives])) if positives else 0.0,
+            "negative_regressions": int(neg_reg),
+            "negative_topology_changes": int(neg_topo),
+            "negative_removed_fraction": float(
+                sum(int(v["predicted_removed_pixels"]) for v in negatives) / max(sum(int(v["candidate_pixels"]) for v in negatives), 1)
+            ) if negatives else 0.0,
+            "overall_success50": int(sum(int(v["predicted_success50"]) for v in per_sample)),
+            "overall_mean_matched_iou": float(np.mean([float(v["predicted_mean_iou"]) for v in per_sample])) if per_sample else 0.0,
+        },
+        "gate_open_samples": [str(v["sample_id"]) for v in per_sample if int(v["gate_open"]) == 1],
+        "gate_closed_samples": [str(v["sample_id"]) for v in per_sample if int(v["gate_open"]) == 0],
+        "per_sample": per_sample,
+    }
+    out["safe_useful"] = bool(
+        int(out["gated_reconstruction"]["negative_regressions"]) == 0
+        and int(out["gated_reconstruction"]["negative_topology_changes"]) == 0
+        and int(out["gated_reconstruction"]["positive_success50"]) >= 3
+    )
+    return out
+
+
+def gate_threshold_sweep(
+    cached_records: list[dict[str, Any]],
+    pixel_remove_masks: list[np.ndarray],
+    gate_probs: np.ndarray,
+    thresholds: list[float],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for threshold in thresholds:
+        current = evaluate_gate_threshold_on_cached(
+            cached_records,
+            pixel_remove_masks,
+            gate_probs,
+            gate_threshold=float(threshold),
+        )
+        out.append({"gate_threshold": float(threshold), **current})
+    return out
+
+
+def safe_useful_key(eval_payload: dict[str, Any]) -> tuple[Any, ...]:
+    gated = eval_payload["gated_reconstruction"]
+    cls = eval_payload["classification"]
+    return (
+        int(gated["positive_success50"]),
+        float(gated["positive_mean_matched_iou"]),
+        float(cls["balanced_accuracy"]),
+        float(gated["overall_mean_matched_iou"]),
+    )

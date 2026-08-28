@@ -1,0 +1,65 @@
+seed: 1337
+
+dataset:
+  train_txt: datasets/converted_full_multiclass_curated/train.txt
+
+model:
+  architecture: UnetPlusPlus
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+
+bridge_head:
+  context_projection_channels: 8
+  hidden_channels: 16
+  candidate_threshold: 0.50
+  remove_threshold: 0.50
+  x_0_4_path: base.decoder.blocks.x_0_4
+  x_2_2_path: base.decoder.blocks.x_2_2
+
+train:
+  save_dir: training/runs/unetpp_effb3_bridge_presence_gate_v4_micro_overfit
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth
+  lr: 0.001
+  weight_decay: 0.00001
+  amp: false
+
+semantic_inference:
+  amp: false
+  matmul_allow_tf32: false
+  cudnn_allow_tf32: false
+  cudnn_benchmark: false
+  cudnn_deterministic: true
+
+frozen_v2_pixel_head:
+  checkpoint_path: training/runs/unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2/best_unconstrained_reconstruction.pth
+  pixel_remove_threshold: 0.50
+
+gate:
+  hidden_dim: 16
+  dropout_p: 0.0
+  gate_threshold: 0.50
+
+micro_overfit:
+  manifest_path: training/manifests/bridge_suppression_micro_overfit_v2_manifest.json
+  max_steps: 300
+  progress_epochs: 100
+  log_every: 10
+
+analysis:
+  feature_audit_dir: training/analysis/bridge_presence_gate_v4_preflight
+
+reserved_full_run:
+  config_path: training/configs/unetpp_effb3_bridge_presence_gate_v4_100ep.yaml
+  save_dir: training/runs/unetpp_effb3_bridge_presence_gate_v4_100ep
+
+experiment_notes:
+  purpose: V4 sample-level bridge presence gate over frozen V2 pixel removal.
+  semantic_base_frozen: true
+  frozen_v2_pixel_head_frozen: true
+  exact_locked_v2_manifest: true
+  no_authoritative_holdout: true
+  no_test_usage: true
+  full_training_launched: false
