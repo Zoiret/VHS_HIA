@@ -92,12 +92,22 @@ class TestBridgePresenceGateV4(unittest.TestCase):
         def fake_reconstruction(pred_leaf01, gt_inst_u8):
             fg = int(np.sum(pred_leaf01))
             mean = 0.7 if fg == 0 else (0.3 if fg == 4 else 0.8)
-            return {"metrics": {"instance_mean_matched_iou": float(mean), "all_iou_ge_0.50": bool(mean >= 0.50)}}
+            return {
+                "result": {"metrics": {"instance_mean_matched_iou": float(mean), "all_iou_ge_0.50": bool(mean >= 0.50)}},
+                "timing": {
+                    "total_seconds": 0.25,
+                    "normalization_seconds": 0.10,
+                    "metrics_seconds": 0.10,
+                    "topology_seconds": 0.05,
+                },
+            }
 
-        with mock.patch("bridge_presence_gate_v4.bridge.run_locked_reconstruction", side_effect=fake_reconstruction), \
+        with mock.patch("bridge_presence_gate_v4.bridge.run_locked_reconstruction_with_timing", side_effect=fake_reconstruction), \
              mock.patch("bridge_presence_gate_v4.bridge._connected_components", return_value=(np.ones((2, 2), dtype=np.int32), 1)):
             closed_eval = gate_v4.evaluate_gate_threshold_on_cached(records, pixel_remove_masks, np.array([0.1, 0.1]), gate_threshold=0.5)
             self.assertFalse(closed_eval["safe_useful"])
+            self.assertIn("timing", closed_eval)
+            self.assertGreaterEqual(float(closed_eval["timing"]["cpu_reconstruction_seconds"]), 0.5)
             sweep = gate_v4.gate_threshold_sweep(records, pixel_remove_masks, np.array([0.1, 0.9]), [0.05, 0.95])
         self.assertEqual(len(sweep), 2)
         self.assertEqual([row["gate_threshold"] for row in sweep], [0.05, 0.95])

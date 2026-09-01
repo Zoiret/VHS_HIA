@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,22 @@ class SampleLevelBridgePresenceGate(nn.Module):
         x = self.relu(x)
         x = self.dropout(x)
         return self.fc2(x)
+
+
+def _device_text(obj: Any) -> str | None:
+    if torch.is_tensor(obj):
+        return str(obj.device)
+    if isinstance(obj, nn.Module):
+        for param in obj.parameters():
+            return str(param.device)
+        for buf in obj.buffers():
+            return str(buf.device)
+    return None
+
+
+def _cuda_sync(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
 def inspect_bridge_checkpoint(path: Path) -> dict[str, Any]:
@@ -172,16 +189,53 @@ def annotate_cached_records_with_gate_targets(cached_records: list[dict[str, Any
     return out
 
 
-def compute_frozen_v2_bridge_logits(model: bridge.FrozenSemanticBridgeSuppressionModel, cached_records: list[dict[str, Any]], device: torch.device) -> torch.Tensor:
+def compute_frozen_v2_bridge_logits(
+    model: bridge.FrozenSemanticBridgeSuppressionModel,
+    cached_records: list[dict[str, Any]],
+    device: torch.device,
+    *,
+    return_diagnostics: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, Any]]:
+    t_transfer_start = time.perf_counter()
     batch = bridge.stack_cached_batch(cached_records, device)
+    _cuda_sync(device)
+    t_transfer_end = time.perf_counter()
     model.eval()
+    t_forward_start = time.perf_counter()
     with torch.inference_mode():
         outputs = model.bridge_forward_from_cached(
             x_0_4=batch["x_0_4"],
             x_2_2=batch["x_2_2"],
             p_leaf=batch["p_leaf"],
         )
-        return outputs["bridge_logits"].detach().cpu().float()
+        _cuda_sync(device)
+    t_forward_end = time.perf_counter()
+    t_transfer_back_start = time.perf_counter()
+    logits = outputs["bridge_logits"].detach().cpu().float()
+    _cuda_sync(device)
+    t_transfer_back_end = time.perf_counter()
+    diagnostics = {
+        "selected_device": str(device),
+        "model_parameter_device": _device_text(model),
+        "semantic_model_parameter_device": _device_text(model.base),
+        "frozen_v2_pixel_head_parameter_device": _device_text(model.bridge_head),
+        "input_devices": {
+            "x_0_4": _device_text(batch["x_0_4"]),
+            "x_2_2": _device_text(batch["x_2_2"]),
+            "p_leaf": _device_text(batch["p_leaf"]),
+        },
+        "output_device": _device_text(logits),
+        "amp_enabled": False,
+        "timing": {
+            "transfer_to_device_seconds": float(t_transfer_end - t_transfer_start),
+            "gpu_forward_seconds": float(t_forward_end - t_forward_start),
+            "transfer_to_cpu_seconds": float(t_transfer_back_end - t_transfer_back_start),
+            "total_seconds": float(t_transfer_back_end - t_transfer_start),
+        },
+    }
+    if return_diagnostics:
+        return logits, diagnostics
+    return logits
 
 
 def _sigmoid_np(x: np.ndarray) -> np.ndarray:
@@ -324,8 +378,11 @@ def evaluate_gate_threshold_on_cached(
     *,
     gate_threshold: float,
 ) -> dict[str, Any]:
+    t_eval_start = time.perf_counter()
     per_sample: list[dict[str, Any]] = []
     tp = tn = fp = fn = 0
+    cpu_connected_components_seconds = 0.0
+    cpu_reconstruction_seconds = 0.0
     for idx, row in enumerate(cached_records):
         gate_target = int(row["gate_target"])
         gate_prob = float(gate_probs[idx])
@@ -341,9 +398,13 @@ def evaluate_gate_threshold_on_cached(
         final_remove = apply_hard_sample_gate(pixel_remove_masks[idx], gate_open)
         candidate_mask = row["candidate_mask_np"].astype(np.uint8)
         refined = ((candidate_mask > 0) & (final_remove == 0)).astype(np.uint8)
-        pred = bridge.run_locked_reconstruction(refined, row["gt_instances"])
-        start = row["start_reconstruction"]
+        t_cc_start = time.perf_counter()
         comp_after = int(bridge._connected_components(refined.astype(np.uint8))[1])
+        cpu_connected_components_seconds += float(time.perf_counter() - t_cc_start)
+        pred_timed = bridge.run_locked_reconstruction_with_timing(refined, row["gt_instances"])
+        pred = pred_timed["result"]
+        cpu_reconstruction_seconds += float(pred_timed["timing"]["total_seconds"])
+        start = row["start_reconstruction"]
         per_sample.append(
             {
                 "sample_id": str(row["sample_id"]),
@@ -362,6 +423,10 @@ def evaluate_gate_threshold_on_cached(
                 "component_count_predicted": int(comp_after),
                 "component_topology_changed": int(int(row["component_count_start"]) != comp_after),
                 "original_v2_remove_pixels": int(np.sum(pixel_remove_masks[idx] > 0)),
+                "predicted_reconstruction_runtime_seconds": float(pred_timed["timing"]["total_seconds"]),
+                "predicted_normalization_runtime_seconds": float(pred_timed["timing"]["normalization_seconds"]),
+                "predicted_metric_runtime_seconds": float(pred_timed["timing"]["metrics_seconds"]),
+                "predicted_topology_runtime_seconds": float(pred_timed["timing"]["topology_seconds"]),
             }
         )
     positives = [row for row in per_sample if int(row["gate_target"]) == 1]
@@ -397,6 +462,11 @@ def evaluate_gate_threshold_on_cached(
         "gate_open_samples": [str(v["sample_id"]) for v in per_sample if int(v["gate_open"]) == 1],
         "gate_closed_samples": [str(v["sample_id"]) for v in per_sample if int(v["gate_open"]) == 0],
         "per_sample": per_sample,
+        "timing": {
+            "cpu_connected_components_seconds": float(cpu_connected_components_seconds),
+            "cpu_reconstruction_seconds": float(cpu_reconstruction_seconds),
+            "total_seconds": float(time.perf_counter() - t_eval_start),
+        },
     }
     out["safe_useful"] = bool(
         int(out["gated_reconstruction"]["negative_regressions"]) == 0

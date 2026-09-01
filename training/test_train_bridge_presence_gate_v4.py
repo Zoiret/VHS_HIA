@@ -156,6 +156,45 @@ class TestTrainBridgePresenceGateV4(unittest.TestCase):
         )
         self.assertGreaterEqual(eta, 200.0 + 20 * 120.0)
 
+    def test_expected_cuda_runtime_blocks_when_frozen_inference_devices_are_cpu(self):
+        report = {
+            "selected_torch_device": "cuda:0",
+            "semantic_model_parameter_device": "cpu",
+            "frozen_v2_pixel_head_parameter_device": "cpu",
+            "frozen_v2_inference_input_devices": {"x_0_4": "cpu", "x_2_2": "cpu", "p_leaf": "cpu"},
+        }
+        with self.assertRaises(SystemExit):
+            runner._assert_expected_cuda_runtime(report)
+
+    def test_build_runtime_device_report_exposes_requested_fields(self):
+        frozen_model = mock.Mock()
+        frozen_model.base = torch.nn.Linear(2, 2)
+        frozen_model.bridge_head = torch.nn.Conv2d(1, 1, kernel_size=1)
+        gate_model = gate_v4.SampleLevelBridgePresenceGate(input_dim=4, hidden_dim=4)
+        prepared = {
+            "device": torch.device("cpu"),
+            "frozen_model": frozen_model,
+            "cached_micro": [{"x_0_4": torch.ones((1, 2, 2)), "x_2_2": torch.ones((1, 1, 1)), "p_leaf": torch.ones((1, 2, 2))}],
+            "frozen_logits": torch.ones((1, 1, 2, 2)),
+            "frozen_logit_diagnostics": {"input_devices": {"x_0_4": "cpu", "x_2_2": "cpu", "p_leaf": "cpu"}},
+            "features_t": torch.ones((1, 4)),
+        }
+        report = runner._build_runtime_device_report(
+            cfg={"semantic_inference": {"amp": False}},
+            prepared=prepared,
+            gate_model=gate_model,
+            gate_features_t=prepared["features_t"],
+        )
+        self.assertIn("torch_cuda_is_available", report)
+        self.assertEqual(report["selected_torch_device"], "cpu")
+        self.assertEqual(report["semantic_model_parameter_device"], "cpu")
+        self.assertEqual(report["frozen_v2_pixel_head_parameter_device"], "cpu")
+        self.assertEqual(report["v4_gate_parameter_device"], "cpu")
+        self.assertEqual(report["cached_semantic_feature_tensor_device"], "cpu")
+        self.assertEqual(report["cached_v2_logit_tensor_device"], "cpu")
+        self.assertEqual(report["gate_feature_tensor_device"], "cpu")
+        self.assertIn("amp", report)
+
     def test_preflight_only_does_not_launch_training(self):
         cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_micro_overfit.yaml")
         with tempfile.TemporaryDirectory() as td:
@@ -173,12 +212,23 @@ class TestTrainBridgePresenceGateV4(unittest.TestCase):
                 "simple_threshold": {"simple_gate_threshold_exists": False, "best_scalar": None},
                 "gate_model": gate_v4.SampleLevelBridgePresenceGate(input_dim=4, hidden_dim=4),
                 "feature_rows": [{"sample_id": "a", "bridge_positive_target": 1}],
+                "device": torch.device("cpu"),
+                "frozen_model": mock.Mock(base=torch.nn.Linear(2, 2), bridge_head=torch.nn.Conv2d(1, 1, kernel_size=1)),
+                "cached_micro": [{"x_0_4": torch.ones((1, 2, 2)), "x_2_2": torch.ones((1, 1, 1)), "p_leaf": torch.ones((1, 2, 2))}],
+                "frozen_logits": torch.ones((1, 1, 2, 2)),
+                "features_t": torch.ones((1, 4)),
+                "targets_t": torch.ones((1, 1)),
+                "frozen_logit_diagnostics": {"input_devices": {"x_0_4": "cpu", "x_2_2": "cpu", "p_leaf": "cpu"}},
+                "prepare_timing": {"total_seconds": 1.0},
             }
             with mock.patch.object(runner, "_prepare_v4_inputs", return_value=fake_prepared), \
+                 mock.patch.object(runner, "_runtime_environment_snapshot", return_value={"cpu_load_percent": 1.0}), \
                  mock.patch.object(runner, "_run_gate_micro_overfit") as train_mock:
                 out = runner.run_pipeline(cfg, preflight_only=True)
             train_mock.assert_not_called()
             self.assertEqual(out["frozen_v2_pixel_head"]["step"], 300)
+            self.assertIn("runtime_device_report", out)
+            self.assertIn("runtime_environment_snapshot", out)
 
     def test_missing_frozen_v2_checkpoint_blocks(self):
         cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_micro_overfit.yaml")
