@@ -409,6 +409,9 @@ def _prepare_v4_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
     t_feature_start = time.perf_counter()
     feature_rows, features_t, targets_t, pixel_remove_masks = gate_v4.extract_gate_feature_rows(cached_micro, frozen_logits)
     t_feature_end = time.perf_counter()
+    t_state_cache_start = time.perf_counter()
+    hard_gate_state_cache, hard_gate_cache_timing = gate_v4.build_hard_gate_state_cache(cached_micro, pixel_remove_masks)
+    t_state_cache_end = time.perf_counter()
     gate_model = gate_v4.build_gate_model_from_cfg(cfg, input_dim=int(features_t.shape[1]))
     simple_threshold = gate_v4.simple_scalar_threshold_audit(feature_rows)
     return {
@@ -424,7 +427,7 @@ def _prepare_v4_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
         "cached_micro": cached_micro,
         "frozen_logits": frozen_logits,
         "frozen_logit_diagnostics": frozen_logit_diagnostics,
-        "pixel_remove_masks": pixel_remove_masks,
+        "hard_gate_state_cache": hard_gate_state_cache,
         "feature_rows": feature_rows,
         "features_t": features_t,
         "targets_t": targets_t,
@@ -435,6 +438,8 @@ def _prepare_v4_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
             "cache_feature_records_seconds": float(t_cache_end - t_cache_start),
             "frozen_v2_logit_inference": dict(frozen_logit_diagnostics.get("timing") or {}),
             "gate_feature_extraction_seconds": float(t_feature_end - t_feature_start),
+            "hard_gate_state_cache_seconds": float(t_state_cache_end - t_state_cache_start),
+            "hard_gate_state_cache_timing": hard_gate_cache_timing,
             "total_seconds": float(time.perf_counter() - t_prepare_start),
         },
     }
@@ -446,7 +451,7 @@ def _run_gate_micro_overfit(
     features_t: torch.Tensor,
     targets_t: torch.Tensor,
     cached_micro: list[dict[str, Any]],
-    pixel_remove_masks: list[np.ndarray],
+    hard_gate_state_cache: list[dict[str, Any]],
     frozen_model: bridge.FrozenSemanticBridgeSuppressionModel,
     frozen_logits_before: torch.Tensor,
     device: torch.device,
@@ -506,8 +511,7 @@ def _run_gate_micro_overfit(
                 torch.cuda.synchronize(device)
             t_transfer_end = time.perf_counter()
             eval_payload = gate_v4.evaluate_gate_threshold_on_cached(
-                cached_micro,
-                pixel_remove_masks,
+                hard_gate_state_cache,
                 gate_probs,
                 gate_threshold=gate_threshold,
             )
@@ -516,7 +520,7 @@ def _run_gate_micro_overfit(
             row = {
                 "step": int(step),
                 "gate_loss": float(loss.detach().cpu().item()),
-                "gate_accuracy": float((int(cls["tp"]) + int(cls["tn"])) / max(len(cached_micro), 1)),
+                "gate_accuracy": float((int(cls["tp"]) + int(cls["tn"])) / max(len(hard_gate_state_cache), 1)),
                 "gate_tp": int(cls["tp"]),
                 "gate_tn": int(cls["tn"]),
                 "gate_fp": int(cls["fp"]),
@@ -602,7 +606,7 @@ def _run_gate_micro_overfit(
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     t_sweep_transfer_end = time.perf_counter()
-    sweep = gate_v4.gate_threshold_sweep(cached_micro, pixel_remove_masks, gate_probs, thresholds)
+    sweep = gate_v4.gate_threshold_sweep(hard_gate_state_cache, gate_probs, thresholds)
     bridge._write_json(save_dir / "gate_threshold_sweep.json", sweep)
     frozen_logits_after, frozen_logits_after_diag = gate_v4.compute_frozen_v2_bridge_logits(
         frozen_model,
@@ -692,7 +696,7 @@ def run_pipeline(cfg: dict[str, Any], *, preflight_only: bool = False) -> dict[s
         features_t=training_features_t,
         targets_t=training_targets_t,
         cached_micro=prepared["cached_micro"],
-        pixel_remove_masks=prepared["pixel_remove_masks"],
+        hard_gate_state_cache=prepared["hard_gate_state_cache"],
         frozen_model=prepared["frozen_model"],
         frozen_logits_before=prepared["frozen_logits"],
         device=prepared["device"],

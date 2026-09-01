@@ -16,6 +16,33 @@ import bridge_presence_gate_v4 as gate_v4
 
 
 class TestBridgePresenceGateV4(unittest.TestCase):
+    def _toy_eval_fixture(self):
+        records = [
+            {
+                "sample_id": "p",
+                "gate_target": 1,
+                "bridge_positive": 1,
+                "candidate_pixels": 4,
+                "component_count_start": 1,
+                "candidate_mask_np": np.ones((2, 2), dtype=np.uint8),
+                "gt_instances": np.ones((2, 2), dtype=np.uint8),
+                "start_reconstruction": {"metrics": {"instance_mean_matched_iou": 0.3, "all_iou_ge_0.50": False}},
+            },
+            {
+                "sample_id": "n",
+                "gate_target": 0,
+                "bridge_positive": 0,
+                "candidate_pixels": 4,
+                "component_count_start": 1,
+                "candidate_mask_np": np.ones((2, 2), dtype=np.uint8),
+                "gt_instances": np.ones((2, 2), dtype=np.uint8),
+                "start_reconstruction": {"metrics": {"instance_mean_matched_iou": 0.8, "all_iou_ge_0.50": True}},
+            },
+        ]
+        pixel_remove_masks = [np.ones((2, 2), dtype=np.uint8), np.ones((2, 2), dtype=np.uint8)]
+        gate_probs = np.array([0.9, 0.9], dtype=np.float64)
+        return records, pixel_remove_masks, gate_probs
+
     def test_gate_target_map_from_manifest_uses_locked_bridge_pixels(self):
         payload = {
             "rows": [
@@ -65,29 +92,7 @@ class TestBridgePresenceGateV4(unittest.TestCase):
         self.assertTrue(np.array_equal(opened, pixel_remove))
 
     def test_threshold_sweep_and_trivial_closed_gate_not_safe_useful(self):
-        records = [
-            {
-                "sample_id": "p",
-                "gate_target": 1,
-                "bridge_positive": 1,
-                "candidate_pixels": 4,
-                "component_count_start": 1,
-                "candidate_mask_np": np.ones((2, 2), dtype=np.uint8),
-                "gt_instances": np.ones((2, 2), dtype=np.uint8),
-                "start_reconstruction": {"metrics": {"instance_mean_matched_iou": 0.3, "all_iou_ge_0.50": False}},
-            },
-            {
-                "sample_id": "n",
-                "gate_target": 0,
-                "bridge_positive": 0,
-                "candidate_pixels": 4,
-                "component_count_start": 1,
-                "candidate_mask_np": np.ones((2, 2), dtype=np.uint8),
-                "gt_instances": np.ones((2, 2), dtype=np.uint8),
-                "start_reconstruction": {"metrics": {"instance_mean_matched_iou": 0.8, "all_iou_ge_0.50": True}},
-            },
-        ]
-        pixel_remove_masks = [np.ones((2, 2), dtype=np.uint8), np.ones((2, 2), dtype=np.uint8)]
+        records, pixel_remove_masks, _gate_probs = self._toy_eval_fixture()
 
         def fake_reconstruction(pred_leaf01, gt_inst_u8):
             fg = int(np.sum(pred_leaf01))
@@ -104,13 +109,68 @@ class TestBridgePresenceGateV4(unittest.TestCase):
 
         with mock.patch("bridge_presence_gate_v4.bridge.run_locked_reconstruction_with_timing", side_effect=fake_reconstruction), \
              mock.patch("bridge_presence_gate_v4.bridge._connected_components", return_value=(np.ones((2, 2), dtype=np.int32), 1)):
-            closed_eval = gate_v4.evaluate_gate_threshold_on_cached(records, pixel_remove_masks, np.array([0.1, 0.1]), gate_threshold=0.5)
+            state_cache, cache_timing = gate_v4.build_hard_gate_state_cache(records, pixel_remove_masks)
+            self.assertGreaterEqual(float(cache_timing["cpu_reconstruction_seconds"]), 0.5)
+            closed_eval = gate_v4.evaluate_gate_threshold_on_cached(state_cache, np.array([0.1, 0.1]), gate_threshold=0.5)
             self.assertFalse(closed_eval["safe_useful"])
             self.assertIn("timing", closed_eval)
-            self.assertGreaterEqual(float(closed_eval["timing"]["cpu_reconstruction_seconds"]), 0.5)
-            sweep = gate_v4.gate_threshold_sweep(records, pixel_remove_masks, np.array([0.1, 0.9]), [0.05, 0.95])
+            self.assertEqual(float(closed_eval["timing"]["cpu_reconstruction_seconds"]), 0.0)
+            sweep = gate_v4.gate_threshold_sweep(state_cache, np.array([0.1, 0.9]), [0.05, 0.95])
         self.assertEqual(len(sweep), 2)
         self.assertEqual([row["gate_threshold"] for row in sweep], [0.05, 0.95])
+
+    def test_hard_gate_state_cache_matches_reference_evaluator_exactly(self):
+        records, pixel_remove_masks, gate_probs = self._toy_eval_fixture()
+
+        def fake_reconstruction(pred_leaf01, gt_inst_u8):
+            fg = int(np.sum(pred_leaf01))
+            mean = 0.7 if fg == 0 else (0.3 if fg == 4 else 0.8)
+            return {
+                "result": {"metrics": {"instance_mean_matched_iou": float(mean), "all_iou_ge_0.50": bool(mean >= 0.50)}},
+                "timing": {
+                    "total_seconds": 0.25,
+                    "normalization_seconds": 0.10,
+                    "metrics_seconds": 0.10,
+                    "topology_seconds": 0.05,
+                },
+            }
+
+        with mock.patch("bridge_presence_gate_v4.bridge.run_locked_reconstruction_with_timing", side_effect=fake_reconstruction), \
+             mock.patch("bridge_presence_gate_v4.bridge._connected_components", return_value=(np.ones((2, 2), dtype=np.int32), 1)):
+            reference = gate_v4._evaluate_gate_threshold_reference(records, pixel_remove_masks, gate_probs, gate_threshold=0.5)
+            state_cache, _cache_timing = gate_v4.build_hard_gate_state_cache(records, pixel_remove_masks)
+            cached = gate_v4.evaluate_gate_threshold_on_cached(state_cache, gate_probs, gate_threshold=0.5)
+
+        self.assertEqual(reference["classification"], cached["classification"])
+        self.assertEqual(reference["gated_reconstruction"], cached["gated_reconstruction"])
+        self.assertEqual(reference["gate_open_samples"], cached["gate_open_samples"])
+        self.assertEqual(reference["gate_closed_samples"], cached["gate_closed_samples"])
+        self.assertEqual(reference["safe_useful"], cached["safe_useful"])
+        self.assertEqual(reference["per_sample"], cached["per_sample"])
+
+    def test_cached_evaluator_and_sweep_do_not_rerun_reconstruction(self):
+        records, pixel_remove_masks, gate_probs = self._toy_eval_fixture()
+
+        def fake_reconstruction(pred_leaf01, gt_inst_u8):
+            return {
+                "result": {"metrics": {"instance_mean_matched_iou": 0.5, "all_iou_ge_0.50": True}},
+                "timing": {
+                    "total_seconds": 0.25,
+                    "normalization_seconds": 0.10,
+                    "metrics_seconds": 0.10,
+                    "topology_seconds": 0.05,
+                },
+            }
+
+        with mock.patch("bridge_presence_gate_v4.bridge.run_locked_reconstruction_with_timing", side_effect=fake_reconstruction) as recon_mock, \
+             mock.patch("bridge_presence_gate_v4.bridge._connected_components", return_value=(np.ones((2, 2), dtype=np.int32), 1)) as cc_mock:
+            state_cache, _cache_timing = gate_v4.build_hard_gate_state_cache(records, pixel_remove_masks)
+            self.assertEqual(recon_mock.call_count, 2)
+            self.assertEqual(cc_mock.call_count, 2)
+            gate_v4.evaluate_gate_threshold_on_cached(state_cache, gate_probs, gate_threshold=0.5)
+            gate_v4.gate_threshold_sweep(state_cache, gate_probs, [0.05, 0.50, 0.95])
+            self.assertEqual(recon_mock.call_count, 2)
+            self.assertEqual(cc_mock.call_count, 2)
 
     def test_safe_useful_key_prefers_positive_success_then_iou(self):
         a = {"gated_reconstruction": {"positive_success50": 3, "positive_mean_matched_iou": 0.6, "overall_mean_matched_iou": 0.5}, "classification": {"balanced_accuracy": 0.8}}

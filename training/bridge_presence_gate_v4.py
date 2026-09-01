@@ -371,7 +371,88 @@ def apply_hard_sample_gate(pixel_remove_mask: np.ndarray, gate_open: bool) -> np
     return np.zeros_like(pixel_remove_mask, dtype=np.uint8)
 
 
-def evaluate_gate_threshold_on_cached(
+def _build_gate_state_payload(
+    *,
+    row: dict[str, Any],
+    predicted_removed_pixels: int,
+    component_count_predicted: int,
+    reconstruction: dict[str, Any],
+    reconstruction_timing: dict[str, Any],
+) -> dict[str, Any]:
+    start = row["start_reconstruction"]
+    return {
+        "candidate_pixels": int(row["candidate_pixels"]),
+        "predicted_removed_pixels": int(predicted_removed_pixels),
+        "predicted_removed_fraction": float(int(predicted_removed_pixels) / max(int(row["candidate_pixels"]), 1)),
+        "start_mean_iou": float(start["metrics"]["instance_mean_matched_iou"]),
+        "predicted_mean_iou": float(reconstruction["metrics"]["instance_mean_matched_iou"]),
+        "start_success50": int(bool(start["metrics"]["all_iou_ge_0.50"])),
+        "predicted_success50": int(bool(reconstruction["metrics"]["all_iou_ge_0.50"])),
+        "component_count_start": int(row["component_count_start"]),
+        "component_count_predicted": int(component_count_predicted),
+        "component_topology_changed": int(int(row["component_count_start"]) != int(component_count_predicted)),
+        "predicted_reconstruction_runtime_seconds": float(reconstruction_timing["total_seconds"]),
+        "predicted_normalization_runtime_seconds": float(reconstruction_timing["normalization_seconds"]),
+        "predicted_metric_runtime_seconds": float(reconstruction_timing["metrics_seconds"]),
+        "predicted_topology_runtime_seconds": float(reconstruction_timing["topology_seconds"]),
+    }
+
+
+def build_hard_gate_state_cache(
+    cached_records: list[dict[str, Any]],
+    pixel_remove_masks: list[np.ndarray],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    t_cache_start = time.perf_counter()
+    state_cache: list[dict[str, Any]] = []
+    cpu_connected_components_seconds = 0.0
+    cpu_reconstruction_seconds = 0.0
+    for idx, row in enumerate(cached_records):
+        original_v2_remove_pixels = int(np.sum(pixel_remove_masks[idx] > 0))
+        candidate_mask = row["candidate_mask_np"].astype(np.uint8)
+        closed_state = _build_gate_state_payload(
+            row=row,
+            predicted_removed_pixels=0,
+            component_count_predicted=int(row["component_count_start"]),
+            reconstruction=row["start_reconstruction"],
+            reconstruction_timing={
+                "total_seconds": 0.0,
+                "normalization_seconds": 0.0,
+                "metrics_seconds": 0.0,
+                "topology_seconds": 0.0,
+            },
+        )
+        refined_open = ((candidate_mask > 0) & (pixel_remove_masks[idx] == 0)).astype(np.uint8)
+        t_cc_start = time.perf_counter()
+        open_component_count = int(bridge._connected_components(refined_open.astype(np.uint8))[1])
+        cpu_connected_components_seconds += float(time.perf_counter() - t_cc_start)
+        open_reconstruction_timed = bridge.run_locked_reconstruction_with_timing(refined_open, row["gt_instances"])
+        cpu_reconstruction_seconds += float(open_reconstruction_timed["timing"]["total_seconds"])
+        open_state = _build_gate_state_payload(
+            row=row,
+            predicted_removed_pixels=original_v2_remove_pixels,
+            component_count_predicted=int(open_component_count),
+            reconstruction=open_reconstruction_timed["result"],
+            reconstruction_timing=open_reconstruction_timed["timing"],
+        )
+        state_cache.append(
+            {
+                "sample_id": str(row["sample_id"]),
+                "gate_target": int(row["gate_target"]),
+                "bridge_positive": int(row["bridge_positive"]),
+                "candidate_pixels": int(row["candidate_pixels"]),
+                "original_v2_remove_pixels": int(original_v2_remove_pixels),
+                "closed": closed_state,
+                "open": open_state,
+            }
+        )
+    return state_cache, {
+        "cpu_connected_components_seconds": float(cpu_connected_components_seconds),
+        "cpu_reconstruction_seconds": float(cpu_reconstruction_seconds),
+        "total_seconds": float(time.perf_counter() - t_cache_start),
+    }
+
+
+def _evaluate_gate_threshold_reference(
     cached_records: list[dict[str, Any]],
     pixel_remove_masks: list[np.ndarray],
     gate_probs: np.ndarray,
@@ -412,21 +493,14 @@ def evaluate_gate_threshold_on_cached(
                 "gate_prob": gate_prob,
                 "gate_open": int(gate_open),
                 "bridge_positive": int(row["bridge_positive"]),
-                "candidate_pixels": int(row["candidate_pixels"]),
-                "predicted_removed_pixels": int(np.sum(final_remove > 0)),
-                "predicted_removed_fraction": float(np.sum(final_remove > 0) / max(int(row["candidate_pixels"]), 1)),
-                "start_mean_iou": float(start["metrics"]["instance_mean_matched_iou"]),
-                "predicted_mean_iou": float(pred["metrics"]["instance_mean_matched_iou"]),
-                "start_success50": int(bool(start["metrics"]["all_iou_ge_0.50"])),
-                "predicted_success50": int(bool(pred["metrics"]["all_iou_ge_0.50"])),
-                "component_count_start": int(row["component_count_start"]),
-                "component_count_predicted": int(comp_after),
-                "component_topology_changed": int(int(row["component_count_start"]) != comp_after),
                 "original_v2_remove_pixels": int(np.sum(pixel_remove_masks[idx] > 0)),
-                "predicted_reconstruction_runtime_seconds": float(pred_timed["timing"]["total_seconds"]),
-                "predicted_normalization_runtime_seconds": float(pred_timed["timing"]["normalization_seconds"]),
-                "predicted_metric_runtime_seconds": float(pred_timed["timing"]["metrics_seconds"]),
-                "predicted_topology_runtime_seconds": float(pred_timed["timing"]["topology_seconds"]),
+                **_build_gate_state_payload(
+                    row=row,
+                    predicted_removed_pixels=int(np.sum(final_remove > 0)),
+                    component_count_predicted=int(comp_after),
+                    reconstruction=pred,
+                    reconstruction_timing=pred_timed["timing"],
+                ),
             }
         )
     positives = [row for row in per_sample if int(row["gate_target"]) == 1]
@@ -476,17 +550,95 @@ def evaluate_gate_threshold_on_cached(
     return out
 
 
+def evaluate_gate_threshold_on_cached(
+    hard_gate_state_cache: list[dict[str, Any]],
+    gate_probs: np.ndarray,
+    *,
+    gate_threshold: float,
+) -> dict[str, Any]:
+    t_eval_start = time.perf_counter()
+    per_sample: list[dict[str, Any]] = []
+    tp = tn = fp = fn = 0
+    for idx, row in enumerate(hard_gate_state_cache):
+        gate_target = int(row["gate_target"])
+        gate_prob = float(gate_probs[idx])
+        gate_open = bool(gate_prob >= float(gate_threshold))
+        if gate_open and gate_target == 1:
+            tp += 1
+        elif (not gate_open) and gate_target == 0:
+            tn += 1
+        elif gate_open and gate_target == 0:
+            fp += 1
+        else:
+            fn += 1
+        selected_state = row["open"] if gate_open else row["closed"]
+        per_sample.append(
+            {
+                "sample_id": str(row["sample_id"]),
+                "gate_target": int(gate_target),
+                "gate_prob": gate_prob,
+                "gate_open": int(gate_open),
+                "bridge_positive": int(row["bridge_positive"]),
+                "original_v2_remove_pixels": int(row["original_v2_remove_pixels"]),
+                **{key: value for key, value in selected_state.items()},
+            }
+        )
+    positives = [row for row in per_sample if int(row["gate_target"]) == 1]
+    negatives = [row for row in per_sample if int(row["gate_target"]) == 0]
+    pos_success = int(sum(int(v["predicted_success50"]) for v in positives))
+    neg_reg = int(sum(1 for v in negatives if float(v["predicted_mean_iou"]) + 1.0e-9 < float(v["start_mean_iou"])))
+    neg_topo = int(sum(int(v["component_topology_changed"]) for v in negatives))
+    cls_pos = max(len(positives), 1)
+    cls_neg = max(len(negatives), 1)
+    sensitivity = float(tp / cls_pos)
+    specificity = float(tn / cls_neg)
+    out = {
+        "classification": {
+            "tp": int(tp),
+            "tn": int(tn),
+            "fp": int(fp),
+            "fn": int(fn),
+            "sensitivity": sensitivity,
+            "specificity": specificity,
+            "balanced_accuracy": 0.5 * (sensitivity + specificity),
+        },
+        "gated_reconstruction": {
+            "positive_success50": int(pos_success),
+            "positive_mean_matched_iou": float(np.mean([float(v["predicted_mean_iou"]) for v in positives])) if positives else 0.0,
+            "negative_regressions": int(neg_reg),
+            "negative_topology_changes": int(neg_topo),
+            "negative_removed_fraction": float(
+                sum(int(v["predicted_removed_pixels"]) for v in negatives) / max(sum(int(v["candidate_pixels"]) for v in negatives), 1)
+            ) if negatives else 0.0,
+            "overall_success50": int(sum(int(v["predicted_success50"]) for v in per_sample)),
+            "overall_mean_matched_iou": float(np.mean([float(v["predicted_mean_iou"]) for v in per_sample])) if per_sample else 0.0,
+        },
+        "gate_open_samples": [str(v["sample_id"]) for v in per_sample if int(v["gate_open"]) == 1],
+        "gate_closed_samples": [str(v["sample_id"]) for v in per_sample if int(v["gate_open"]) == 0],
+        "per_sample": per_sample,
+        "timing": {
+            "cpu_connected_components_seconds": 0.0,
+            "cpu_reconstruction_seconds": 0.0,
+            "total_seconds": float(time.perf_counter() - t_eval_start),
+        },
+    }
+    out["safe_useful"] = bool(
+        int(out["gated_reconstruction"]["negative_regressions"]) == 0
+        and int(out["gated_reconstruction"]["negative_topology_changes"]) == 0
+        and int(out["gated_reconstruction"]["positive_success50"]) >= 3
+    )
+    return out
+
+
 def gate_threshold_sweep(
-    cached_records: list[dict[str, Any]],
-    pixel_remove_masks: list[np.ndarray],
+    hard_gate_state_cache: list[dict[str, Any]],
     gate_probs: np.ndarray,
     thresholds: list[float],
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for threshold in thresholds:
         current = evaluate_gate_threshold_on_cached(
-            cached_records,
-            pixel_remove_masks,
+            hard_gate_state_cache,
             gate_probs,
             gate_threshold=float(threshold),
         )
