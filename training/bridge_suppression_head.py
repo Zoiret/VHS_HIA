@@ -30,7 +30,9 @@ import audit_semantic_soft_logit_recoverability as soft_audit
 import evaluate_semantic_topology_aux_postrun as postrun
 import leaflet_oracle_count_geometric_split_audit as base_audit
 import leaflet_oracle_count_geometric_split_forensic as forensic
+import leaflet_oracle_k_constrained_normalization_audit as k_audit
 import semantic_topology_aux as topo_aux
+import validate_centerhead as center_metrics
 from dataset import read_split_file
 
 
@@ -430,6 +432,147 @@ def refine_candidate_with_bridge_probs(candidate_mask01: np.ndarray, bridge_prob
 
 def run_locked_reconstruction(pred_leaf01: np.ndarray, gt_inst_u8: np.ndarray) -> dict[str, Any]:
     return run_locked_reconstruction_with_timing(pred_leaf01, gt_inst_u8)["result"]
+
+
+def _compute_detailed_instance_metrics_profiled(gt_inst_u8: np.ndarray, pred_inst_u8: np.ndarray, *, gt_k: int, pred_k: int) -> dict[str, Any]:
+    t_iou_start = time.perf_counter()
+    iou_mat = center_metrics._iou_matrix(gt_inst_u8, pred_inst_u8, int(gt_k), int(pred_k))
+    t_iou_end = time.perf_counter()
+    t_base_assign_start = time.perf_counter()
+    sum_iou = center_metrics._best_perm_sum(iou_mat)
+    t_base_assign_end = time.perf_counter()
+    mean_iou = float(sum_iou / max(int(gt_k), 1))
+    case = center_metrics._case_type(int(gt_k), int(pred_k))
+    base = {
+        "gt_instance_count": int(gt_k),
+        "pred_instance_count": int(pred_k),
+        "case": str(case),
+        "instance_exact_count": bool(int(pred_k) == int(gt_k)),
+        "instance_exact_count_acc": float(int(int(pred_k) == int(gt_k))),
+        "instance_mean_matched_iou": float(mean_iou),
+        "instance_merged": bool(case == "merged"),
+        "instance_fragmented": bool(case == "fragmented"),
+        "instance_mixed": bool(case == "mixed"),
+        "instance_merged_rate": float(int(case == "merged")),
+        "instance_fragmented_rate": float(int(case == "fragmented")),
+        "instance_mixed_rate": float(int(case == "mixed")),
+        "instance_perfect": bool((int(pred_k) == int(gt_k)) and (mean_iou >= 0.90)),
+        "instance_perfect_rate": float(int((int(pred_k) == int(gt_k)) and (mean_iou >= 0.90))),
+        "iou_matrix": iou_mat,
+    }
+    t_match_start = time.perf_counter()
+    assign = base_audit._best_assignment(np.asarray(iou_mat, dtype=np.float64))
+    t_match_end = time.perf_counter()
+    t_agg_start = time.perf_counter()
+    matched_ious = [0.0 for _ in range(int(gt_k))]
+    matched_pred_ids: set[int] = set()
+    for gi, pi in assign["pairs"]:
+        val = float(iou_mat[int(gi), int(pi)])
+        matched_ious[int(gi)] = val
+        if val > 0.0:
+            matched_pred_ids.add(int(pi) + 1)
+    unmatched_gt = int(sum(1 for v in matched_ious if float(v) <= 0.0))
+    unmatched_pred = int(len([pi for pi in range(1, int(pred_k) + 1) if pi not in matched_pred_ids]))
+    thresholds = {
+        "all_iou_ge_0.50": float(all(float(v) >= 0.50 for v in matched_ious)) if gt_k > 0 else 0.0,
+        "all_iou_ge_0.70": float(all(float(v) >= 0.70 for v in matched_ious)) if gt_k > 0 else 0.0,
+        "all_iou_ge_0.80": float(all(float(v) >= 0.80 for v in matched_ious)) if gt_k > 0 else 0.0,
+    }
+    base.update(
+        {
+            "matched_iou_per_gt": [float(v) for v in matched_ious],
+            "median_matched_iou": float(np.median(np.asarray(matched_ious, dtype=np.float64))) if matched_ious else 0.0,
+            "unmatched_gt_instances": unmatched_gt,
+            "unmatched_pred_instances": unmatched_pred,
+            **thresholds,
+        }
+    )
+    t_agg_end = time.perf_counter()
+    return {
+        "metrics": base,
+        "timing": {
+            "iou_matrix_seconds": float(t_iou_end - t_iou_start),
+            "base_assignment_seconds": float(t_base_assign_end - t_base_assign_start),
+            "gt_matching_seconds": float(t_match_end - t_match_start),
+            "success_aggregate_seconds": float(t_agg_end - t_agg_start),
+            "total_seconds": float(t_agg_end - t_iou_start),
+        },
+    }
+
+
+def run_locked_reconstruction_profiled(
+    pred_leaf01: np.ndarray,
+    gt_inst_u8: np.ndarray,
+    *,
+    normalizer_implementation: str = "optimized",
+) -> dict[str, Any]:
+    t_copy_start = time.perf_counter()
+    pred_leaf01 = pred_leaf01.astype(np.uint8)
+    gt_inst_u8 = gt_inst_u8.astype(np.uint8)
+    t_copy_end = time.perf_counter()
+    t_gt_k_start = time.perf_counter()
+    gt_k = int(len(topo_aux._positive_instance_ids(gt_inst_u8)))
+    t_gt_k_end = time.perf_counter()
+    normalization_profile: dict[str, Any] = {"implementation": str(normalizer_implementation)}
+    t_norm_start = time.perf_counter()
+    normalized = k_audit.normalize_mask_exact_k(
+        pred_leaf01,
+        gt_k,
+        postrun.NORMALIZER_METHOD,
+        implementation=str(normalizer_implementation),
+        profile=normalization_profile,
+    )
+    t_norm_end = time.perf_counter()
+    t_output_cast_start = time.perf_counter()
+    pred_inst = normalized["labels"].astype(np.uint8)
+    t_output_cast_end = time.perf_counter()
+    metric_profiled = _compute_detailed_instance_metrics_profiled(gt_inst_u8, pred_inst, gt_k=gt_k, pred_k=int(normalized["final_group_count"]))
+    t_topology_start = time.perf_counter()
+    topology = forensic.classify_semantic_topology(gt_inst_u8, pred_leaf01)
+    t_topology_end = time.perf_counter()
+    result = {
+        "gt_k": gt_k,
+        "pred_k": int(normalized["final_group_count"]),
+        "labels": pred_inst,
+        "metrics": metric_profiled["metrics"],
+        "topology": topology,
+    }
+    return {
+        "result": result,
+        "timing": {
+            "normalization_seconds": float(t_norm_end - t_norm_start),
+            "metrics_seconds": float(metric_profiled["timing"]["total_seconds"]),
+            "topology_seconds": float(t_topology_end - t_topology_start),
+            "total_seconds": float(t_topology_end - t_copy_start),
+        },
+        "profile": {
+            "normalizer_method": str(postrun.NORMALIZER_METHOD),
+            "normalizer_implementation": str(normalizer_implementation),
+            "input_mask_preparation_seconds": float(t_copy_end - t_copy_start),
+            "expected_k_seconds": float(t_gt_k_end - t_gt_k_start),
+            "foreground_pixels_entering_normalizer": int(np.sum(pred_leaf01 > 0)),
+            "expected_k": int(gt_k),
+            "input_component_count": int(_connected_components(pred_leaf01)[1]),
+            "output_component_count": int(normalized["final_group_count"]),
+            "array_copy_dtype_conversion_seconds": float((t_copy_end - t_copy_start) + (t_output_cast_end - t_output_cast_start)),
+            "connected_component_labeling_seconds": float(normalization_profile.get("connected_component_labeling_seconds", 0.0)),
+            "component_filtering_statistics_seconds": float(normalization_profile.get("component_filtering_statistics_seconds", 0.0)),
+            "seed_centroid_preparation_seconds": float(normalization_profile.get("seed_centroid_preparation_seconds", 0.0)),
+            "distance_map_computation_seconds": float(normalization_profile.get("distance_map_computation_seconds", 0.0)),
+            "centroid_distance_computation_seconds": float(normalization_profile.get("centroid_distance_computation_seconds", 0.0)),
+            "pixel_to_instance_assignment_seconds": float(normalization_profile.get("pixel_to_instance_assignment_seconds", 0.0)),
+            "per_component_python_loops_seconds": float(normalization_profile.get("per_component_python_loops_seconds", 0.0)),
+            "morphology_seconds": float(normalization_profile.get("morphology_seconds", 0.0)),
+            "output_instance_mask_creation_seconds": float(normalization_profile.get("output_instance_mask_creation_seconds", 0.0)),
+            "gt_matching_seconds": float(metric_profiled["timing"]["gt_matching_seconds"]),
+            "iou_matrix_construction_seconds": float(metric_profiled["timing"]["iou_matrix_seconds"]),
+            "success50_aggregate_seconds": float(metric_profiled["timing"]["success_aggregate_seconds"]),
+            "base_assignment_seconds": float(metric_profiled["timing"]["base_assignment_seconds"]),
+            "topology_seconds": float(t_topology_end - t_topology_start),
+            "total_reconstruction_seconds": float(t_topology_end - t_copy_start),
+            "call_counts": dict(normalization_profile.get("call_counts") or {}),
+        },
+    }
 
 
 def run_locked_reconstruction_with_timing(pred_leaf01: np.ndarray, gt_inst_u8: np.ndarray) -> dict[str, Any]:

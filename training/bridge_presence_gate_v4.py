@@ -452,6 +452,105 @@ def build_hard_gate_state_cache(
     }
 
 
+def profile_hard_gate_reconstruction_states(
+    cached_records: list[dict[str, Any]],
+    pixel_remove_masks: list[np.ndarray],
+    *,
+    output_dir: Path,
+    reference_implementation: str = "reference",
+    optimized_implementation: str = "optimized",
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for idx, row in enumerate(cached_records):
+        candidate_mask = row["candidate_mask_np"].astype(np.uint8)
+        states = [
+            ("CLOSED", np.zeros_like(pixel_remove_masks[idx], dtype=np.uint8)),
+            ("OPEN", pixel_remove_masks[idx].astype(np.uint8)),
+        ]
+        for state_name, remove_mask in states:
+            refined = ((candidate_mask > 0) & (remove_mask == 0)).astype(np.uint8)
+            reference = bridge.run_locked_reconstruction_profiled(
+                refined,
+                row["gt_instances"],
+                normalizer_implementation=reference_implementation,
+            )
+            optimized = bridge.run_locked_reconstruction_profiled(
+                refined,
+                row["gt_instances"],
+                normalizer_implementation=optimized_implementation,
+            )
+            if not np.array_equal(reference["result"]["labels"], optimized["result"]["labels"]):
+                raise SystemExit(f"Reconstruction parity failed for sample={row['sample_id']} state={state_name}")
+            if reference["result"]["metrics"] != optimized["result"]["metrics"]:
+                raise SystemExit(f"Metric parity failed for sample={row['sample_id']} state={state_name}")
+            if reference["result"]["topology"] != optimized["result"]["topology"]:
+                raise SystemExit(f"Topology parity failed for sample={row['sample_id']} state={state_name}")
+            ref_profile = dict(reference["profile"])
+            opt_profile = dict(optimized["profile"])
+            combined = {
+                "sample_id": str(row["sample_id"]),
+                "state": str(state_name),
+                "candidate_pixels": int(row["candidate_pixels"]),
+                "removal_pixels": int(np.sum(remove_mask > 0)),
+                "foreground_pixels_entering_normalizer": int(ref_profile["foreground_pixels_entering_normalizer"]),
+                "input_component_count": int(ref_profile["input_component_count"]),
+                "expected_k": int(ref_profile["expected_k"]),
+                "output_component_count": int(ref_profile["output_component_count"]),
+                "reference_total_reconstruction_seconds": float(ref_profile["total_reconstruction_seconds"]),
+                "optimized_total_reconstruction_seconds": float(opt_profile["total_reconstruction_seconds"]),
+                "reference_input_mask_preparation_seconds": float(ref_profile["input_mask_preparation_seconds"]),
+                "reference_connected_component_labeling_seconds": float(ref_profile["connected_component_labeling_seconds"]),
+                "reference_component_filtering_statistics_seconds": float(ref_profile["component_filtering_statistics_seconds"]),
+                "reference_seed_centroid_preparation_seconds": float(ref_profile["seed_centroid_preparation_seconds"]),
+                "reference_distance_map_computation_seconds": float(ref_profile["distance_map_computation_seconds"]),
+                "reference_centroid_distance_computation_seconds": float(ref_profile["centroid_distance_computation_seconds"]),
+                "reference_pixel_to_instance_assignment_seconds": float(ref_profile["pixel_to_instance_assignment_seconds"]),
+                "reference_per_component_python_loops_seconds": float(ref_profile["per_component_python_loops_seconds"]),
+                "reference_morphology_seconds": float(ref_profile["morphology_seconds"]),
+                "reference_output_instance_mask_creation_seconds": float(ref_profile["output_instance_mask_creation_seconds"]),
+                "reference_gt_matching_seconds": float(ref_profile["gt_matching_seconds"]),
+                "reference_iou_matrix_construction_seconds": float(ref_profile["iou_matrix_construction_seconds"]),
+                "reference_success50_aggregate_seconds": float(ref_profile["success50_aggregate_seconds"]),
+                "reference_array_copy_dtype_conversion_seconds": float(ref_profile["array_copy_dtype_conversion_seconds"]),
+                "optimized_input_mask_preparation_seconds": float(opt_profile["input_mask_preparation_seconds"]),
+                "optimized_connected_component_labeling_seconds": float(opt_profile["connected_component_labeling_seconds"]),
+                "optimized_component_filtering_statistics_seconds": float(opt_profile["component_filtering_statistics_seconds"]),
+                "optimized_seed_centroid_preparation_seconds": float(opt_profile["seed_centroid_preparation_seconds"]),
+                "optimized_distance_map_computation_seconds": float(opt_profile["distance_map_computation_seconds"]),
+                "optimized_centroid_distance_computation_seconds": float(opt_profile["centroid_distance_computation_seconds"]),
+                "optimized_pixel_to_instance_assignment_seconds": float(opt_profile["pixel_to_instance_assignment_seconds"]),
+                "optimized_per_component_python_loops_seconds": float(opt_profile["per_component_python_loops_seconds"]),
+                "optimized_morphology_seconds": float(opt_profile["morphology_seconds"]),
+                "optimized_output_instance_mask_creation_seconds": float(opt_profile["output_instance_mask_creation_seconds"]),
+                "optimized_gt_matching_seconds": float(opt_profile["gt_matching_seconds"]),
+                "optimized_iou_matrix_construction_seconds": float(opt_profile["iou_matrix_construction_seconds"]),
+                "optimized_success50_aggregate_seconds": float(opt_profile["success50_aggregate_seconds"]),
+                "optimized_array_copy_dtype_conversion_seconds": float(opt_profile["array_copy_dtype_conversion_seconds"]),
+                "reference_call_counts": dict(ref_profile.get("call_counts") or {}),
+                "optimized_call_counts": dict(opt_profile.get("call_counts") or {}),
+                "matched_iou_per_gt": list(reference["result"]["metrics"]["matched_iou_per_gt"]),
+                "success50": float(reference["result"]["metrics"]["all_iou_ge_0.50"]),
+                "topology_class": str(reference["result"]["topology"]["topology_class"]),
+            }
+            rows.append(combined)
+    rows = sorted(rows, key=lambda row: float(row["reference_total_reconstruction_seconds"]), reverse=True)
+    bridge._write_json(output_dir / "reconstruction_profile.json", rows)
+    bridge._write_csv(output_dir / "reconstruction_profile.csv", rows, fieldnames=list(rows[0].keys()) if rows else [])
+    total_ref = float(sum(float(row["reference_total_reconstruction_seconds"]) for row in rows))
+    total_opt = float(sum(float(row["optimized_total_reconstruction_seconds"]) for row in rows))
+    return {
+        "rows": rows,
+        "reference_total_reconstruction_seconds": total_ref,
+        "optimized_total_reconstruction_seconds": total_opt,
+        "reference_mean_per_state_seconds": float(total_ref / max(len(rows), 1)),
+        "optimized_mean_per_state_seconds": float(total_opt / max(len(rows), 1)),
+        "speedup_factor": float(total_ref / max(total_opt, 1.0e-12)),
+        "slowest_reference_state": rows[0] if rows else None,
+        "slowest_optimized_state": max(rows, key=lambda row: float(row["optimized_total_reconstruction_seconds"])) if rows else None,
+    }
+
+
 def _evaluate_gate_threshold_reference(
     cached_records: list[dict[str, Any]],
     pixel_remove_masks: list[np.ndarray],

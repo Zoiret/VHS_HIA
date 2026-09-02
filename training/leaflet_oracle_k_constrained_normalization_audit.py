@@ -5,6 +5,7 @@ import csv
 import inspect
 import json
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -196,15 +197,31 @@ def _dominant_gt_leaflet(mask01: np.ndarray, gt_inst_u8: np.ndarray) -> int:
     return int(best_gt)
 
 
-def _merge_groups_exact_k(
+def _profile_add_timing(profile: dict[str, Any] | None, key: str, seconds: float) -> None:
+    if profile is None:
+        return
+    profile[key] = float(profile.get(key, 0.0)) + float(seconds)
+
+
+def _profile_add_count(profile: dict[str, Any] | None, key: str, value: int = 1) -> None:
+    if profile is None:
+        return
+    counts = profile.setdefault("call_counts", {})
+    counts[key] = int(counts.get(key, 0)) + int(value)
+
+
+def _merge_groups_exact_k_reference(
     mask01: np.ndarray,
     k: int,
     *,
     mode: str,
     gt_inst_u8: np.ndarray | None = None,
     small_fragment_ratio: float | None = None,
+    profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    t_component_meta_start = time.perf_counter() if profile is not None else 0.0
     comp_masks = _component_masks(mask01)
+    _profile_add_count(profile, "component_masks")
     if not comp_masks:
         return {
             "labels": np.zeros(mask01.shape, dtype=np.uint8),
@@ -216,8 +233,15 @@ def _merge_groups_exact_k(
             "initial_component_count": 0,
             "final_group_count": 0,
         }
+    _profile_add_timing(profile, "component_filtering_statistics_seconds", float(time.perf_counter() - t_component_meta_start) if profile is not None else 0.0)
+    t_boundary_start = time.perf_counter() if profile is not None else 0.0
     boundary_dists = _pairwise_boundary_distances(comp_masks)
+    _profile_add_timing(profile, "distance_map_computation_seconds", float(time.perf_counter() - t_boundary_start) if profile is not None else 0.0)
+    _profile_add_count(profile, "boundary_distance_pairs", int(len(boundary_dists)))
+    t_centroid_start = time.perf_counter() if profile is not None else 0.0
     centroid_dists = _pairwise_centroid_distances(comp_masks)
+    _profile_add_timing(profile, "seed_centroid_preparation_seconds", float(time.perf_counter() - t_centroid_start) if profile is not None else 0.0)
+    _profile_add_count(profile, "centroid_distance_pairs", int(len(centroid_dists)))
     groups: dict[int, set[int]] = {int(cid): {int(cid)} for cid in comp_masks}
     merge_ops: list[dict[str, Any]] = []
     total_area = float(sum(int(np.sum(mask)) for mask in comp_masks.values()))
@@ -225,10 +249,12 @@ def _merge_groups_exact_k(
     def _choose_pair(strategy_mode: str) -> tuple[int, int, float]:
         ranked: list[tuple[float, float, float, int, int]] = []
         group_ids = sorted(groups)
+        choose_start = time.perf_counter() if profile is not None else 0.0
         for idx, left_gid in enumerate(group_ids):
             for right_gid in group_ids[idx + 1 :]:
                 left_ids = groups[int(left_gid)]
                 right_ids = groups[int(right_gid)]
+                _profile_add_count(profile, "group_pair_evaluations")
                 boundary_dist = _group_distance(
                     left_ids,
                     right_ids,
@@ -245,6 +271,8 @@ def _merge_groups_exact_k(
                     centroid_dists=centroid_dists,
                     mode="centroid",
                 )
+                _profile_add_count(profile, "group_mask_rebuilds", 2)
+                _profile_add_count(profile, "centroid_recomputations", 2)
                 left_area = float(_group_area(left_ids, comp_masks))
                 right_area = float(_group_area(right_ids, comp_masks))
                 if strategy_mode == "centroid":
@@ -255,6 +283,8 @@ def _merge_groups_exact_k(
                     score = boundary_dist
                 ranked.append((float(score), float(boundary_dist), float(min(left_area, right_area)), int(left_gid), int(right_gid)))
         ranked.sort()
+        _profile_add_timing(profile, "per_component_python_loops_seconds", float(time.perf_counter() - choose_start) if profile is not None else 0.0)
+        _profile_add_timing(profile, "centroid_distance_computation_seconds", float(time.perf_counter() - choose_start) if profile is not None and strategy_mode == "centroid" else 0.0)
         score, boundary_dist, _min_area, left_gid, right_gid = ranked[0]
         return int(left_gid), int(right_gid), float(boundary_dist)
 
@@ -343,11 +373,187 @@ def _merge_groups_exact_k(
             }
         )
 
+    t_output_start = time.perf_counter() if profile is not None else 0.0
     final_groups = sorted(groups.values(), key=lambda comp_ids: (_centroid(_group_mask(comp_ids, comp_masks))[1], _centroid(_group_mask(comp_ids, comp_masks))[0], sorted(comp_ids)))
     out = np.zeros(mask01.shape, dtype=np.uint8)
     for label_id, comp_ids in enumerate(final_groups, start=1):
         for comp_id in comp_ids:
             out[comp_masks[int(comp_id)] > 0] = np.uint8(label_id)
+    _profile_add_timing(profile, "output_instance_mask_creation_seconds", float(time.perf_counter() - t_output_start) if profile is not None else 0.0)
+    return {
+        "labels": out,
+        "exact_k_achieved": bool(int(len(final_groups)) == int(k)),
+        "reason": "exact_k" if int(len(final_groups)) == int(k) else "merge_failed",
+        "merge_operations": merge_ops,
+        "merge_count": int(len(merge_ops)),
+        "fragments_assigned": int(max(len(comp_masks) - len(final_groups), 0)),
+        "initial_component_count": int(len(comp_masks)),
+        "final_group_count": int(len(final_groups)),
+        "total_area": total_area,
+    }
+
+
+def _merge_groups_exact_k_centroid_optimized(
+    mask01: np.ndarray,
+    k: int,
+    *,
+    gt_inst_u8: np.ndarray | None = None,
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    t_component_meta_start = time.perf_counter() if profile is not None else 0.0
+    comp_masks = _component_masks(mask01)
+    _profile_add_count(profile, "component_masks")
+    if not comp_masks:
+        return {
+            "labels": np.zeros(mask01.shape, dtype=np.uint8),
+            "exact_k_achieved": False,
+            "reason": "empty_foreground",
+            "merge_operations": [],
+            "merge_count": 0,
+            "fragments_assigned": 0,
+            "initial_component_count": 0,
+            "final_group_count": 0,
+        }
+    component_ids = sorted(int(cid) for cid in comp_masks.keys())
+    comp_areas = {int(cid): int(np.sum(comp_masks[int(cid)])) for cid in component_ids}
+    comp_centroids = {int(cid): _centroid(comp_masks[int(cid)]) for cid in component_ids}
+    gt_ids = _positive_ids(gt_inst_u8) if gt_inst_u8 is not None else []
+    comp_gt_overlap = None
+    if gt_inst_u8 is not None:
+        comp_gt_overlap = {
+            int(cid): {int(gt_id): int(np.sum((comp_masks[int(cid)] > 0) & (gt_inst_u8 == int(gt_id)))) for gt_id in gt_ids}
+            for cid in component_ids
+        }
+    _profile_add_timing(profile, "component_filtering_statistics_seconds", float(time.perf_counter() - t_component_meta_start) if profile is not None else 0.0)
+    t_boundary_start = time.perf_counter() if profile is not None else 0.0
+    boundary_dists = _pairwise_boundary_distances(comp_masks)
+    _profile_add_timing(profile, "distance_map_computation_seconds", float(time.perf_counter() - t_boundary_start) if profile is not None else 0.0)
+    _profile_add_count(profile, "boundary_distance_pairs", int(len(boundary_dists)))
+    _profile_add_timing(profile, "seed_centroid_preparation_seconds", 0.0)
+    _profile_add_count(profile, "centroid_distance_pairs", int(len(boundary_dists)))
+
+    groups: dict[int, set[int]] = {int(cid): {int(cid)} for cid in component_ids}
+    group_area = {int(cid): int(comp_areas[int(cid)]) for cid in component_ids}
+    group_centroid_sum_y = {int(cid): float(comp_centroids[int(cid)][0] * comp_areas[int(cid)]) for cid in component_ids}
+    group_centroid_sum_x = {int(cid): float(comp_centroids[int(cid)][1] * comp_areas[int(cid)]) for cid in component_ids}
+    group_boundary_min: dict[tuple[int, int], float] = {}
+    for (a, b), dist in boundary_dists.items():
+        group_boundary_min[(int(a), int(b))] = float(dist)
+    group_gt_overlap: dict[int, dict[int, int]] | None = None
+    if comp_gt_overlap is not None:
+        group_gt_overlap = {int(cid): dict(comp_gt_overlap[int(cid)]) for cid in component_ids}
+    merge_ops: list[dict[str, Any]] = []
+    total_area = float(sum(int(area) for area in comp_areas.values()))
+
+    def _boundary_min_between(left_gid: int, right_gid: int) -> float:
+        key = (int(left_gid), int(right_gid)) if int(left_gid) < int(right_gid) else (int(right_gid), int(left_gid))
+        return float(group_boundary_min[key])
+
+    def _group_centroid(gid: int) -> tuple[float, float]:
+        area = max(int(group_area[int(gid)]), 1)
+        return (
+            float(group_centroid_sum_y[int(gid)] / float(area)),
+            float(group_centroid_sum_x[int(gid)] / float(area)),
+        )
+
+    def _dominant_group_gt(gid: int) -> int | None:
+        if group_gt_overlap is None:
+            return None
+        best_gt = 0
+        best_overlap = -1
+        for gt_id in gt_ids:
+            overlap = int(group_gt_overlap[int(gid)].get(int(gt_id), 0))
+            if overlap > best_overlap:
+                best_gt = int(gt_id)
+                best_overlap = overlap
+        return int(best_gt)
+
+    def _choose_pair() -> tuple[int, int, float]:
+        ranked: list[tuple[float, float, float, int, int]] = []
+        group_ids = sorted(groups)
+        choose_start = time.perf_counter() if profile is not None else 0.0
+        for idx, left_gid in enumerate(group_ids):
+            left_cy, left_cx = _group_centroid(int(left_gid))
+            left_area = float(group_area[int(left_gid)])
+            for right_gid in group_ids[idx + 1 :]:
+                right_cy, right_cx = _group_centroid(int(right_gid))
+                right_area = float(group_area[int(right_gid)])
+                centroid_dist = float(math.hypot(left_cy - right_cy, left_cx - right_cx))
+                boundary_dist = _boundary_min_between(int(left_gid), int(right_gid))
+                ranked.append((centroid_dist, boundary_dist, float(min(left_area, right_area)), int(left_gid), int(right_gid)))
+                _profile_add_count(profile, "group_pair_evaluations")
+        ranked.sort()
+        elapsed = float(time.perf_counter() - choose_start) if profile is not None else 0.0
+        _profile_add_timing(profile, "per_component_python_loops_seconds", elapsed)
+        _profile_add_timing(profile, "centroid_distance_computation_seconds", elapsed)
+        score, boundary_dist, _min_area, left_gid, right_gid = ranked[0]
+        return int(left_gid), int(right_gid), float(boundary_dist)
+
+    while len(groups) > int(k):
+        left_gid, right_gid, boundary_dist = _choose_pair()
+        left_ids = sorted(groups[int(left_gid)])
+        right_ids = sorted(groups[int(right_gid)])
+        same_gt = None
+        if group_gt_overlap is not None:
+            same_gt = int(_dominant_group_gt(int(left_gid)) == _dominant_group_gt(int(right_gid)))
+        groups[int(left_gid)] = set(groups[int(left_gid)]) | set(groups[int(right_gid)])
+        del groups[int(right_gid)]
+        group_area[int(left_gid)] = int(group_area[int(left_gid)] + group_area[int(right_gid)])
+        group_centroid_sum_y[int(left_gid)] = float(group_centroid_sum_y[int(left_gid)] + group_centroid_sum_y[int(right_gid)])
+        group_centroid_sum_x[int(left_gid)] = float(group_centroid_sum_x[int(left_gid)] + group_centroid_sum_x[int(right_gid)])
+        if group_gt_overlap is not None:
+            merged_overlap = {
+                int(gt_id): int(group_gt_overlap[int(left_gid)].get(int(gt_id), 0) + group_gt_overlap[int(right_gid)].get(int(gt_id), 0))
+                for gt_id in gt_ids
+            }
+            group_gt_overlap[int(left_gid)] = merged_overlap
+            del group_gt_overlap[int(right_gid)]
+        del group_area[int(right_gid)]
+        del group_centroid_sum_y[int(right_gid)]
+        del group_centroid_sum_x[int(right_gid)]
+        keys_to_update = [key for key in group_boundary_min.keys() if int(right_gid) in key]
+        for key in keys_to_update:
+            a, b = key
+            other_gid = int(b if int(a) == int(right_gid) else a)
+            if int(other_gid) == int(left_gid) or int(other_gid) not in groups:
+                del group_boundary_min[key]
+                continue
+            left_key = (int(left_gid), int(other_gid)) if int(left_gid) < int(other_gid) else (int(other_gid), int(left_gid))
+            right_key = (int(right_gid), int(other_gid)) if int(right_gid) < int(other_gid) else (int(other_gid), int(right_gid))
+            prev_left = group_boundary_min.get(left_key, float("inf"))
+            prev_right = group_boundary_min.get(right_key, float("inf"))
+            group_boundary_min[left_key] = float(min(prev_left, prev_right))
+            if key in group_boundary_min:
+                del group_boundary_min[key]
+        merge_ops.append(
+            {
+                "left_group": int(left_gid),
+                "right_group": int(right_gid),
+                "left_component_ids": json.dumps(left_ids),
+                "right_component_ids": json.dumps(right_ids),
+                "left_area": int(sum(int(comp_areas[int(cid)]) for cid in left_ids)),
+                "right_area": int(sum(int(comp_areas[int(cid)]) for cid in right_ids)),
+                "minimum_boundary_distance": float(boundary_dist),
+                "chosen_target_group": int(left_gid),
+                "same_gt_leaflet": same_gt,
+                "merge_stage": "agglomeration",
+            }
+        )
+
+    t_output_start = time.perf_counter() if profile is not None else 0.0
+    final_groups = sorted(
+        groups.values(),
+        key=lambda comp_ids: (
+            float(sum(comp_centroids[int(cid)][1] * comp_areas[int(cid)] for cid in comp_ids) / max(sum(comp_areas[int(cid)] for cid in comp_ids), 1)),
+            float(sum(comp_centroids[int(cid)][0] * comp_areas[int(cid)] for cid in comp_ids) / max(sum(comp_areas[int(cid)] for cid in comp_ids), 1)),
+            sorted(comp_ids),
+        ),
+    )
+    out = np.zeros(mask01.shape, dtype=np.uint8)
+    for label_id, comp_ids in enumerate(final_groups, start=1):
+        for comp_id in comp_ids:
+            out[comp_masks[int(comp_id)] > 0] = np.uint8(label_id)
+    _profile_add_timing(profile, "output_instance_mask_creation_seconds", float(time.perf_counter() - t_output_start) if profile is not None else 0.0)
     return {
         "labels": out,
         "exact_k_achieved": bool(int(len(final_groups)) == int(k)),
@@ -624,8 +830,17 @@ def _split_existing_groups_exact_k(group_labels_u8: np.ndarray, k: int) -> dict[
     }
 
 
-def normalize_mask_exact_k(mask01: np.ndarray, k: int, method_key: str) -> dict[str, Any]:
+def normalize_mask_exact_k(
+    mask01: np.ndarray,
+    k: int,
+    method_key: str,
+    *,
+    implementation: str = "optimized",
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    t_prep_start = time.perf_counter() if profile is not None else 0.0
     mask01 = (mask01.astype(np.uint8) > 0).astype(np.uint8)
+    _profile_add_timing(profile, "array_copy_dtype_conversion_seconds", float(time.perf_counter() - t_prep_start) if profile is not None else 0.0)
     if int(np.sum(mask01)) <= 0:
         return {
             "labels": np.zeros(mask01.shape, dtype=np.uint8),
@@ -638,7 +853,10 @@ def normalize_mask_exact_k(mask01: np.ndarray, k: int, method_key: str) -> dict[
             "reason": "empty_foreground",
             "merge_operations": [],
         }
+    t_cc_start = time.perf_counter() if profile is not None else 0.0
     labels_cc, cc_k = _cc_labels(mask01)
+    _profile_add_timing(profile, "connected_component_labeling_seconds", float(time.perf_counter() - t_cc_start) if profile is not None else 0.0)
+    _profile_add_count(profile, "connected_component_calls")
     if int(cc_k) == int(k):
         natural = labels_cc.astype(np.uint8)
         return {
@@ -668,13 +886,16 @@ def normalize_mask_exact_k(mask01: np.ndarray, k: int, method_key: str) -> dict[
             "watershed_label_count": int(split["watershed_label_count"]),
         }
     if method_key == "nearest_component_k_normalizer":
-        merged = _merge_groups_exact_k(mask01, int(k), mode="boundary")
+        merged = _merge_groups_exact_k_reference(mask01, int(k), mode="boundary", profile=profile)
     elif method_key == "area_aware_k_normalizer":
-        merged = _merge_groups_exact_k(mask01, int(k), mode="area_aware")
+        merged = _merge_groups_exact_k_reference(mask01, int(k), mode="area_aware", profile=profile)
     elif method_key == "centroid_distance_k_normalizer":
-        merged = _merge_groups_exact_k(mask01, int(k), mode="centroid")
+        if str(implementation) == "reference":
+            merged = _merge_groups_exact_k_reference(mask01, int(k), mode="centroid", profile=profile)
+        else:
+            merged = _merge_groups_exact_k_centroid_optimized(mask01, int(k), profile=profile)
     elif method_key == "hybrid_k_normalization":
-        merged = _merge_groups_exact_k(mask01, int(k), mode="boundary", small_fragment_ratio=0.35)
+        merged = _merge_groups_exact_k_reference(mask01, int(k), mode="boundary", small_fragment_ratio=0.35, profile=profile)
         if int(merged["final_group_count"]) < int(k):
             split = _split_existing_groups_exact_k(merged["labels"], int(k))
             return {

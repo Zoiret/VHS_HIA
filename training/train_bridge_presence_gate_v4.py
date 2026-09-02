@@ -427,6 +427,7 @@ def _prepare_v4_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
         "cached_micro": cached_micro,
         "frozen_logits": frozen_logits,
         "frozen_logit_diagnostics": frozen_logit_diagnostics,
+        "pixel_remove_masks": pixel_remove_masks,
         "hard_gate_state_cache": hard_gate_state_cache,
         "feature_rows": feature_rows,
         "features_t": features_t,
