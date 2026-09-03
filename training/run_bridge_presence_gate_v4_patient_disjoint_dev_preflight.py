@@ -54,7 +54,7 @@ def _prepare_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
         source_sha256=source_sha,
         split_payload=split_payload,
     )
-    manifest_info = dev.load_or_create_manifest(
+    manifest_info = dev.load_frozen_manifest(
         manifest_dir=manifest_dir,
         contract_payload=contract_payload,
         train_text=split_texts["train_text"],
@@ -151,10 +151,21 @@ def run_pipeline(cfg: dict[str, Any], *, manifest_only: bool = False) -> dict[st
         frozen_model=frozen_model,
     )
     runtime_snapshot = micro_runner._runtime_environment_snapshot(device)
-    success_criteria = dev.build_predeclared_success_criteria(
+    train_oracle = dev.compute_safe_two_state_oracle(train_prepared["hard_gate_state_cache"])
+    val_oracle = dev.compute_safe_two_state_oracle(val_prepared["hard_gate_state_cache"])
+    success_criteria_v1 = dev.build_predeclared_success_criteria_v1(
         val_summary=val_prepared["state_summary"]["record_stats"],
         always_closed=val_prepared["state_summary"]["always_closed"],
         always_open=val_prepared["state_summary"]["always_open"],
+        cfg=cfg,
+    )
+    success_criteria_v1 = dev.assess_success_criterion_v1_feasibility(
+        criterion_v1=success_criteria_v1,
+        two_state_positive_success50_union_upper_bound=int(val_prepared["state_summary"]["two_state_positive_success50_union_upper_bound"]),
+    )
+    success_criteria_v2 = dev.build_predeclared_success_criteria_v2(
+        always_closed=val_prepared["state_summary"]["always_closed"],
+        safe_two_state_oracle=val_oracle,
         cfg=cfg,
     )
     output.update(
@@ -168,6 +179,8 @@ def run_pipeline(cfg: dict[str, Any], *, manifest_only: bool = False) -> dict[st
                 **train_prepared["state_summary"]["record_stats"],
                 "closed_reconstruction": train_prepared["state_summary"]["always_closed"],
                 "open_reconstruction": train_prepared["state_summary"]["always_open"],
+                "safe_two_state_oracle": train_oracle,
+                "two_state_positive_success50_union_upper_bound": int(train_prepared["state_summary"]["two_state_positive_success50_union_upper_bound"]),
                 "train_simple_scalar_rule": train_prepared["simple_scalar_rule"],
                 "cache_construction_time_seconds": float(train_prepared["cache_timing"]["total_seconds"]),
             },
@@ -175,9 +188,15 @@ def run_pipeline(cfg: dict[str, Any], *, manifest_only: bool = False) -> dict[st
                 **val_prepared["state_summary"]["record_stats"],
                 "closed_reconstruction": val_prepared["state_summary"]["always_closed"],
                 "open_reconstruction": val_prepared["state_summary"]["always_open"],
+                "safe_two_state_oracle": val_oracle,
+                "two_state_positive_success50_union_upper_bound": int(val_prepared["state_summary"]["two_state_positive_success50_union_upper_bound"]),
                 "cache_construction_time_seconds": float(val_prepared["cache_timing"]["total_seconds"]),
             },
-            "success_criteria": success_criteria,
+            "success_criteria": {
+                "active_version": dev.SUCCESS_CRITERIA_V2_VERSION,
+                dev.SUCCESS_CRITERIA_V1_VERSION: success_criteria_v1,
+                dev.SUCCESS_CRITERIA_V2_VERSION: success_criteria_v2,
+            },
         }
     )
     bridge._write_json(analysis_dir / "preflight_summary.json", output)

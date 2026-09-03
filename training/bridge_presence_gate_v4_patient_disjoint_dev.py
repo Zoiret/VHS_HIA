@@ -28,10 +28,27 @@ DEFAULT_MANIFEST_DIR = bridge.REPO_ROOT / "training" / "manifests" / "bridge_pre
 DEFAULT_ANALYSIS_DIR = bridge.REPO_ROOT / "training" / "analysis" / "bridge_presence_gate_v4_patient_disjoint_preflight"
 SPLIT_ALGORITHM_VERSION = "patient_disjoint_bridge_presence_gate_v4_dev_v1"
 TRAIN_SCALAR_SELECTION_VERSION = "train_only_balanced_accuracy_v1"
-SUCCESS_CRITERIA_VERSION = "patient_disjoint_v4_val_success_v1"
+SUCCESS_CRITERIA_V1_VERSION = "patient_disjoint_v4_val_success_v1"
+SUCCESS_CRITERIA_V2_VERSION = "patient_disjoint_v4_val_success_v2_feasibility_corrected"
 FEATURE_DIMENSION = 105
 TRAINABLE_GATE_PARAMS = 1713
 ALLOWED_SPLIT_FIELDS = ("sample_id", "patient_id", "gt_count", "bridge_positive")
+FROZEN_V1_EXPECTED_SPLIT = {
+    "train": {
+        "samples": 121,
+        "patients": 17,
+        "bridge_positive": 41,
+        "bridge_negative": 80,
+    },
+    "val": {
+        "samples": 36,
+        "patients": 5,
+        "bridge_positive": 12,
+        "bridge_negative": 24,
+    },
+    "patient_overlap": 0,
+    "sample_overlap": 0,
+}
 
 
 def _read_source_split_entries(path: Path) -> list[dict[str, str]]:
@@ -241,7 +258,7 @@ def build_manifest_contract(
     }
 
 
-def load_or_create_manifest(
+def load_frozen_manifest(
     *,
     manifest_dir: Path,
     contract_payload: dict[str, Any],
@@ -252,31 +269,46 @@ def load_or_create_manifest(
     train_path = manifest_dir / "train.txt"
     val_path = manifest_dir / "val.txt"
     existing = [path.exists() for path in (contract_path, train_path, val_path)]
-    if any(existing) and not all(existing):
-        raise SystemExit(f"Patient-disjoint manifest directory is partially populated and cannot be regenerated: {manifest_dir}")
-    if all(existing):
-        current_contract = json.loads(contract_path.read_text(encoding="utf-8"))
-        current_train = train_path.read_text(encoding="utf-8")
-        current_val = val_path.read_text(encoding="utf-8")
-        if current_contract != contract_payload or current_train != train_text or current_val != val_text:
-            raise SystemExit(f"Patient-disjoint manifest v1 already exists and differs from regenerated content: {manifest_dir}")
-        return {
-            "contract_path": str(contract_path.resolve()),
-            "train_path": str(train_path.resolve()),
-            "val_path": str(val_path.resolve()),
-            "created": False,
-            "contract": current_contract,
-        }
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-    contract_path.write_text(json.dumps(contract_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    train_path.write_text(train_text, encoding="utf-8")
-    val_path.write_text(val_text, encoding="utf-8")
+    if not all(existing):
+        raise SystemExit(f"Frozen patient-disjoint manifest v1 must already exist and be complete: {manifest_dir}")
+    current_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    current_train = train_path.read_text(encoding="utf-8")
+    current_val = val_path.read_text(encoding="utf-8")
+    if current_contract != contract_payload or current_train != train_text or current_val != val_text:
+        raise SystemExit(f"Frozen patient-disjoint manifest v1 differs from regenerated deterministic expectation: {manifest_dir}")
+    train_summary = current_contract.get("train_summary") or {}
+    val_summary = current_contract.get("val_summary") or {}
+    expected = FROZEN_V1_EXPECTED_SPLIT
+    checks = [
+        (int(train_summary.get("sample_count", -1)), int(expected["train"]["samples"]), "train.sample_count"),
+        (int(train_summary.get("patient_count", -1)), int(expected["train"]["patients"]), "train.patient_count"),
+        (int(train_summary.get("bridge_positive_count", -1)), int(expected["train"]["bridge_positive"]), "train.bridge_positive_count"),
+        (int(train_summary.get("bridge_negative_count", -1)), int(expected["train"]["bridge_negative"]), "train.bridge_negative_count"),
+        (int(val_summary.get("sample_count", -1)), int(expected["val"]["samples"]), "val.sample_count"),
+        (int(val_summary.get("patient_count", -1)), int(expected["val"]["patients"]), "val.patient_count"),
+        (int(val_summary.get("bridge_positive_count", -1)), int(expected["val"]["bridge_positive"]), "val.bridge_positive_count"),
+        (int(val_summary.get("bridge_negative_count", -1)), int(expected["val"]["bridge_negative"]), "val.bridge_negative_count"),
+        (int(current_contract.get("patient_overlap", -1)), int(expected["patient_overlap"]), "patient_overlap"),
+        (int(current_contract.get("sample_overlap", -1)), int(expected["sample_overlap"]), "sample_overlap"),
+    ]
+    mismatches = [
+        {"field": field, "actual": int(actual), "expected": int(expected_value)}
+        for actual, expected_value, field in checks
+        if int(actual) != int(expected_value)
+    ]
+    if mismatches:
+        raise SystemExit(json.dumps({
+            "status": "blocked",
+            "reason": "frozen_manifest_v1_mismatch",
+            "manifest_dir": str(manifest_dir.resolve()),
+            "mismatches": mismatches,
+        }, ensure_ascii=False, indent=2))
     return {
         "contract_path": str(contract_path.resolve()),
         "train_path": str(train_path.resolve()),
         "val_path": str(val_path.resolve()),
-        "created": True,
-        "contract": contract_payload,
+        "created": False,
+        "contract": current_contract,
     }
 
 
@@ -340,12 +372,75 @@ def summarize_hard_gate_states(
             "negative_topology_changes": int(sum(int(row["component_topology_changed"]) for row in neg_rows)) if open_state else 0,
         }
 
+    positive_union_upper_bound = int(
+        sum(
+            1
+            for row in hard_gate_state_cache
+            if int(row["gate_target"]) == 1
+            and (int(row["closed"]["predicted_success50"]) == 1 or int(row["open"]["predicted_success50"]) == 1)
+        )
+    )
     return {
         "always_closed": _summary(by_state["closed"], open_state=False),
         "always_open": _summary(by_state["open"], open_state=True),
         "cache_construction_time_seconds": float(sum(float(row[state]["predicted_reconstruction_runtime_seconds"]) for row in hard_gate_state_cache for state in ("closed", "open"))),
         "optimized_normalizer_used": True,
         "record_stats": summarize_split_record_stats(split_records),
+        "two_state_positive_success50_union_upper_bound": int(positive_union_upper_bound),
+    }
+
+
+def _oracle_positive_choice(state_row: dict[str, Any]) -> str:
+    closed = state_row["closed"]
+    open_state = state_row["open"]
+    closed_key = (
+        int(closed["predicted_success50"]),
+        float(closed["predicted_mean_iou"]),
+        1,
+    )
+    open_key = (
+        int(open_state["predicted_success50"]),
+        float(open_state["predicted_mean_iou"]),
+        0,
+    )
+    return "open" if open_key > closed_key else "closed"
+
+
+def compute_safe_two_state_oracle(hard_gate_state_cache: list[dict[str, Any]]) -> dict[str, Any]:
+    per_sample: list[dict[str, Any]] = []
+    positive_open = 0
+    positive_closed = 0
+    for row in hard_gate_state_cache:
+        if int(row["gate_target"]) == 0:
+            chosen_name = "closed"
+        else:
+            chosen_name = _oracle_positive_choice(row)
+        chosen = row[str(chosen_name)]
+        if int(row["gate_target"]) == 1 and str(chosen_name) == "open":
+            positive_open += 1
+        if int(row["gate_target"]) == 1 and str(chosen_name) == "closed":
+            positive_closed += 1
+        per_sample.append(
+            {
+                "sample_id": str(row["sample_id"]),
+                "gate_target": int(row["gate_target"]),
+                "chosen_state": str(chosen_name).upper(),
+                "bridge_positive": int(row["bridge_positive"]),
+                **dict(chosen),
+            }
+        )
+    positives = [row for row in per_sample if int(row["gate_target"]) == 1]
+    negatives = [row for row in per_sample if int(row["gate_target"]) == 0]
+    return {
+        "positive_success50": int(sum(int(row["predicted_success50"]) for row in positives)),
+        "positive_mean_matched_iou": float(np.mean([float(row["predicted_mean_iou"]) for row in positives])) if positives else 0.0,
+        "overall_success50": int(sum(int(row["predicted_success50"]) for row in per_sample)),
+        "overall_mean_matched_iou": float(np.mean([float(row["predicted_mean_iou"]) for row in per_sample])) if per_sample else 0.0,
+        "negative_regressions": int(sum(1 for row in negatives if float(row["predicted_mean_iou"]) + 1.0e-9 < float(row["start_mean_iou"]))),
+        "negative_topology_changes": int(sum(int(row["component_topology_changed"]) for row in negatives)),
+        "positive_open_count": int(positive_open),
+        "positive_closed_count": int(positive_closed),
+        "per_sample": per_sample,
     }
 
 
@@ -375,7 +470,7 @@ def build_predeclared_baselines() -> dict[str, Any]:
     }
 
 
-def build_predeclared_success_criteria(
+def build_predeclared_success_criteria_v1(
     *,
     val_summary: dict[str, Any],
     always_closed: dict[str, Any],
@@ -388,7 +483,7 @@ def build_predeclared_success_criteria(
     train_cfg = cfg.get("train") or {}
     gate_cfg = cfg.get("gate") or {}
     return {
-        "version": SUCCESS_CRITERIA_VERSION,
+        "version": SUCCESS_CRITERIA_V1_VERSION,
         "declared_before_training": True,
         "safety": {
             "negative_regressions": 0,
@@ -407,6 +502,73 @@ def build_predeclared_success_criteria(
         "optimizer": str((cfg.get("future_training") or {}).get("optimizer", "AdamW")),
         "learning_rate": float((cfg.get("future_training") or {}).get("learning_rate", train_cfg.get("lr", 1.0e-3))),
         "seed": int((cfg.get("future_training") or {}).get("seed", cfg.get("seed", 1337))),
+    }
+
+
+def assess_success_criterion_v1_feasibility(
+    *,
+    criterion_v1: dict[str, Any],
+    two_state_positive_success50_union_upper_bound: int,
+) -> dict[str, Any]:
+    positive_success50_min = int(((criterion_v1.get("utility") or {}).get("positive_success50_min", -1)))
+    feasible = bool(positive_success50_min <= int(two_state_positive_success50_union_upper_bound))
+    return {
+        **criterion_v1,
+        "status": "feasible" if feasible else "infeasible",
+        "detected_before_training": True,
+        "reason": None if feasible else "positive_success50_min exceeds the theoretical two-state upper bound",
+        "original_positive_success50_min": int(positive_success50_min),
+        "theoretical_two_state_upper_bound": int(two_state_positive_success50_union_upper_bound),
+    }
+
+
+def build_predeclared_success_criteria_v2(
+    *,
+    always_closed: dict[str, Any],
+    safe_two_state_oracle: dict[str, Any],
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    closed_success = int(always_closed["positive_success50"])
+    oracle_success = int(safe_two_state_oracle["positive_success50"])
+    positive_success50_min = int(closed_success + math.ceil(0.5 * float(oracle_success - closed_success)))
+    closed_positive_iou = float(always_closed["positive_mean_matched_iou"])
+    oracle_positive_iou = float(safe_two_state_oracle["positive_mean_matched_iou"])
+    positive_mean_iou_min = float(closed_positive_iou + 0.5 * float(oracle_positive_iou - closed_positive_iou))
+    future_training = cfg.get("future_training") or {}
+    return {
+        "version": SUCCESS_CRITERIA_V2_VERSION,
+        "declared_before_training": True,
+        "formula": {
+            "positive_success50_min": "closed_success + ceil(0.5 * (oracle_success - closed_success))",
+            "positive_mean_matched_iou_min": "closed_positive_iou + 0.5 * (oracle_positive_iou - closed_positive_iou)",
+        },
+        "derived_values": {
+            "closed_success": int(closed_success),
+            "oracle_success": int(oracle_success),
+            "positive_success50_min": int(positive_success50_min),
+            "closed_positive_iou": float(closed_positive_iou),
+            "oracle_positive_iou": float(oracle_positive_iou),
+            "positive_mean_matched_iou_min": float(positive_mean_iou_min),
+        },
+        "safety": {
+            "negative_regressions": 0,
+            "negative_topology_changes": 0,
+        },
+        "utility": {
+            "positive_success50_min": int(positive_success50_min),
+            "positive_mean_matched_iou_min": float(positive_mean_iou_min),
+            "must_exceed_always_closed_positive_success50": True,
+            "must_exceed_always_closed_positive_mean_matched_iou": True,
+        },
+        "model_selection_metric": str(future_training.get("checkpoint_selection_metric", "gate_train_loss")),
+        "checkpoint_tie_break_rule": str(future_training.get("checkpoint_tie_break", "earlier_step")),
+        "gate_threshold_selection_policy": str(future_training.get("gate_threshold_selection_policy", "fixed_0p50")),
+        "maximum_training_steps": int(future_training.get("max_steps", 300)),
+        "optimizer": str(future_training.get("optimizer", "AdamW")),
+        "learning_rate": float(future_training.get("learning_rate", 1.0e-3)),
+        "seed": int(future_training.get("seed", cfg.get("seed", 1337))),
+        "validation_used_for_checkpoint_selection": False,
+        "validation_used_for_threshold_selection": False,
     }
 
 
