@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -335,6 +336,127 @@ class TestBridgePresenceGateV4(unittest.TestCase):
         unsafe = gate_v4.evaluate_gate_threshold_on_cached(state_cache, np.array([0.9, 0.9, 0.9, 0.9]), gate_threshold=0.5)
         self.assertTrue(safe["safe_useful"])
         self.assertFalse(unsafe["safe_useful"])
+
+    def test_compare_nested_payloads_accepts_equal_nested_numpy_payload(self):
+        ref = {
+            "metrics": {
+                "iou_matrix": np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64),
+                "matched_ious": [np.float64(1.0), np.float64(0.5)],
+                "flags": (True, False),
+            }
+        }
+        opt = {
+            "metrics": {
+                "iou_matrix": np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64),
+                "matched_ious": [np.float64(1.0), np.float64(0.5)],
+                "flags": (True, False),
+            }
+        }
+        self.assertIsNone(gate_v4.compare_nested_payloads(ref, opt, path="metrics"))
+
+    def test_compare_nested_payloads_reports_array_value_mismatch_path(self):
+        mismatch = gate_v4.compare_nested_payloads(
+            {"iou_matrix": np.array([[1, 2]], dtype=np.int32)},
+            {"iou_matrix": np.array([[1, 3]], dtype=np.int32)},
+            path="metrics",
+        )
+        self.assertIsNotNone(mismatch)
+        self.assertEqual(mismatch["path"], "metrics.iou_matrix")
+        self.assertEqual(mismatch["reason"], "value_mismatch")
+
+    def test_compare_nested_payloads_reports_array_shape_mismatch(self):
+        mismatch = gate_v4.compare_nested_payloads(
+            np.zeros((2, 2), dtype=np.uint8),
+            np.zeros((2, 3), dtype=np.uint8),
+            path="result.instance_mask",
+        )
+        self.assertIsNotNone(mismatch)
+        self.assertEqual(mismatch["path"], "result.instance_mask")
+        self.assertEqual(mismatch["reason"], "shape_mismatch")
+
+    def test_compare_nested_payloads_handles_numpy_scalars(self):
+        self.assertIsNone(
+            gate_v4.compare_nested_payloads(np.int64(3), np.int64(3), path="metrics.pred_k")
+        )
+        mismatch = gate_v4.compare_nested_payloads(np.float64(1.0), np.float32(1.0), path="metrics.score")
+        self.assertIsNotNone(mismatch)
+        self.assertEqual(mismatch["reason"], "dtype_mismatch")
+
+    def test_compare_nested_payloads_reports_nested_list_path(self):
+        mismatch = gate_v4.compare_nested_payloads(
+            {"matched_ious": [0.1, 0.2, 0.3]},
+            {"matched_ious": [0.1, 0.25, 0.3]},
+            path="metrics",
+        )
+        self.assertIsNotNone(mismatch)
+        self.assertEqual(mismatch["path"], "metrics.matched_ious[1]")
+
+    def test_format_payload_mismatch_includes_diagnostic_path(self):
+        message = gate_v4.format_payload_mismatch(
+            sample_id="s1",
+            state_name="OPEN",
+            mismatch={"path": "metrics.iou_matrix", "reason": "value_mismatch"},
+            category="metric_parity",
+        )
+        self.assertIn("\"path\": \"metrics.iou_matrix\"", message)
+        self.assertIn("\"sample_id\": \"s1\"", message)
+
+    def test_profile_hard_gate_reconstruction_states_reports_exact_instance_mask_path(self):
+        cached_records = [
+            {
+                "sample_id": "s1",
+                "candidate_mask_np": np.ones((2, 2), dtype=np.uint8),
+                "gt_instances": np.ones((2, 2), dtype=np.uint8),
+                "candidate_pixels": 4,
+            }
+        ]
+        pixel_remove_masks = [np.ones((2, 2), dtype=np.uint8)]
+        reference_payload = {
+            "result": {
+                "labels": np.array([[1, 0], [0, 1]], dtype=np.uint8),
+                "metrics": {"iou_matrix": np.array([[1.0]], dtype=np.float64)},
+                "topology": {"topology_class": "ok"},
+            },
+            "profile": {
+                "foreground_pixels_entering_normalizer": 2,
+                "input_component_count": 1,
+                "expected_k": 1,
+                "output_component_count": 1,
+                "total_reconstruction_seconds": 1.0,
+                "input_mask_preparation_seconds": 0.0,
+                "connected_component_labeling_seconds": 0.0,
+                "component_filtering_statistics_seconds": 0.0,
+                "seed_centroid_preparation_seconds": 0.0,
+                "distance_map_computation_seconds": 0.0,
+                "centroid_distance_computation_seconds": 0.0,
+                "pixel_to_instance_assignment_seconds": 0.0,
+                "per_component_python_loops_seconds": 0.0,
+                "morphology_seconds": 0.0,
+                "output_instance_mask_creation_seconds": 0.0,
+                "gt_matching_seconds": 0.0,
+                "iou_matrix_construction_seconds": 0.0,
+                "success50_aggregate_seconds": 0.0,
+                "array_copy_dtype_conversion_seconds": 0.0,
+                "call_counts": {},
+            },
+        }
+        optimized_payload = {
+            "result": {
+                "labels": np.array([[1, 1], [0, 1]], dtype=np.uint8),
+                "metrics": {"iou_matrix": np.array([[1.0]], dtype=np.float64)},
+                "topology": {"topology_class": "ok"},
+            },
+            "profile": dict(reference_payload["profile"]),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("bridge_presence_gate_v4.bridge.run_locked_reconstruction_profiled", side_effect=[reference_payload, optimized_payload]):
+                with self.assertRaises(SystemExit) as ctx:
+                    gate_v4.profile_hard_gate_reconstruction_states(
+                        cached_records,
+                        pixel_remove_masks,
+                        output_dir=Path(td),
+                    )
+        self.assertIn("result.instance_mask", str(ctx.exception))
 
     def test_safe_useful_key_prefers_positive_success_then_iou(self):
         a = {"gated_reconstruction": {"positive_success50": 3, "positive_mean_matched_iou": 0.6, "overall_mean_matched_iou": 0.5}, "classification": {"balanced_accuracy": 0.8}}

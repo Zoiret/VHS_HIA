@@ -77,6 +77,217 @@ def _cuda_sync(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def _payload_path_join(base: str, child: str) -> str:
+    if not base:
+        return str(child)
+    if child.startswith("["):
+        return f"{base}{child}"
+    return f"{base}.{child}"
+
+
+def _payload_summary(value: Any) -> dict[str, Any]:
+    if isinstance(value, np.ndarray):
+        summary: dict[str, Any] = {
+            "type": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+        }
+        if int(value.size) <= 16:
+            summary["value"] = value.tolist()
+        return summary
+    if isinstance(value, np.generic):
+        return {
+            "type": "numpy_scalar",
+            "dtype": str(value.dtype),
+            "value": value.item(),
+        }
+    if isinstance(value, dict):
+        return {
+            "type": "dict",
+            "keys": sorted(str(k) for k in value.keys()),
+        }
+    if isinstance(value, (list, tuple)):
+        return {
+            "type": type(value).__name__,
+            "length": int(len(value)),
+            "value": list(value) if len(value) <= 8 else None,
+        }
+    return {
+        "type": type(value).__name__,
+        "value": value,
+    }
+
+
+def compare_nested_payloads(
+    reference: Any,
+    optimized: Any,
+    *,
+    path: str = "payload",
+    float_atol: float = 0.0,
+) -> dict[str, Any] | None:
+    if isinstance(reference, np.ndarray) or isinstance(optimized, np.ndarray):
+        if not (isinstance(reference, np.ndarray) and isinstance(optimized, np.ndarray)):
+            return {
+                "path": path,
+                "reason": "type_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        if reference.shape != optimized.shape:
+            return {
+                "path": path,
+                "reason": "shape_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        if reference.dtype != optimized.dtype:
+            return {
+                "path": path,
+                "reason": "dtype_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        if np.issubdtype(reference.dtype, np.floating) and float(float_atol) > 0.0:
+            equal = bool(np.allclose(reference, optimized, rtol=0.0, atol=float(float_atol), equal_nan=True))
+        else:
+            equal = bool(np.array_equal(reference, optimized))
+        if not equal:
+            return {
+                "path": path,
+                "reason": "value_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        return None
+    if isinstance(reference, np.generic) or isinstance(optimized, np.generic):
+        if not (isinstance(reference, np.generic) and isinstance(optimized, np.generic)):
+            return {
+                "path": path,
+                "reason": "type_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        if reference.dtype != optimized.dtype:
+            return {
+                "path": path,
+                "reason": "dtype_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        ref_value = reference.item()
+        opt_value = optimized.item()
+        if isinstance(ref_value, float) and isinstance(opt_value, float) and float(float_atol) > 0.0:
+            equal = bool(abs(ref_value - opt_value) <= float(float_atol))
+        else:
+            equal = bool(ref_value == opt_value)
+        if not equal:
+            return {
+                "path": path,
+                "reason": "value_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        return None
+    if isinstance(reference, dict) or isinstance(optimized, dict):
+        if not (isinstance(reference, dict) and isinstance(optimized, dict)):
+            return {
+                "path": path,
+                "reason": "type_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        if set(reference.keys()) != set(optimized.keys()):
+            return {
+                "path": path,
+                "reason": "keys_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        for key in sorted(reference.keys(), key=lambda v: str(v)):
+            mismatch = compare_nested_payloads(
+                reference[key],
+                optimized[key],
+                path=_payload_path_join(path, str(key)),
+                float_atol=float(float_atol),
+            )
+            if mismatch is not None:
+                return mismatch
+        return None
+    if isinstance(reference, (list, tuple)) or isinstance(optimized, (list, tuple)):
+        if type(reference) is not type(optimized):
+            return {
+                "path": path,
+                "reason": "type_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        if len(reference) != len(optimized):
+            return {
+                "path": path,
+                "reason": "length_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        for idx, (ref_item, opt_item) in enumerate(zip(reference, optimized)):
+            mismatch = compare_nested_payloads(
+                ref_item,
+                opt_item,
+                path=_payload_path_join(path, f"[{int(idx)}]"),
+                float_atol=float(float_atol),
+            )
+            if mismatch is not None:
+                return mismatch
+        return None
+    if isinstance(reference, float) or isinstance(optimized, float):
+        if not (isinstance(reference, float) and isinstance(optimized, float)):
+            return {
+                "path": path,
+                "reason": "type_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        if float(float_atol) > 0.0:
+            equal = bool(abs(float(reference) - float(optimized)) <= float(float_atol))
+        else:
+            equal = bool(reference == optimized)
+        if not equal:
+            return {
+                "path": path,
+                "reason": "value_mismatch",
+                "reference": _payload_summary(reference),
+                "optimized": _payload_summary(optimized),
+            }
+        return None
+    if reference != optimized:
+        return {
+            "path": path,
+            "reason": "value_mismatch",
+            "reference": _payload_summary(reference),
+            "optimized": _payload_summary(optimized),
+        }
+    return None
+
+
+def format_payload_mismatch(
+    *,
+    sample_id: str,
+    state_name: str,
+    mismatch: dict[str, Any],
+    category: str,
+) -> str:
+    return json.dumps(
+        {
+            "status": "blocked",
+            "category": str(category),
+            "sample_id": str(sample_id),
+            "state": str(state_name),
+            "mismatch": mismatch,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 def inspect_bridge_checkpoint(path: Path) -> dict[str, Any]:
     path = path.resolve()
     ckpt = torch.load(str(path), map_location="cpu")
@@ -480,12 +691,48 @@ def profile_hard_gate_reconstruction_states(
                 row["gt_instances"],
                 normalizer_implementation=optimized_implementation,
             )
-            if not np.array_equal(reference["result"]["labels"], optimized["result"]["labels"]):
-                raise SystemExit(f"Reconstruction parity failed for sample={row['sample_id']} state={state_name}")
-            if reference["result"]["metrics"] != optimized["result"]["metrics"]:
-                raise SystemExit(f"Metric parity failed for sample={row['sample_id']} state={state_name}")
-            if reference["result"]["topology"] != optimized["result"]["topology"]:
-                raise SystemExit(f"Topology parity failed for sample={row['sample_id']} state={state_name}")
+            label_mismatch = compare_nested_payloads(
+                reference["result"]["labels"],
+                optimized["result"]["labels"],
+                path="result.instance_mask",
+            )
+            if label_mismatch is not None:
+                raise SystemExit(
+                    format_payload_mismatch(
+                        sample_id=str(row["sample_id"]),
+                        state_name=state_name,
+                        mismatch=label_mismatch,
+                        category="instance_mask_parity",
+                    )
+                )
+            metric_mismatch = compare_nested_payloads(
+                reference["result"]["metrics"],
+                optimized["result"]["metrics"],
+                path="metrics",
+            )
+            if metric_mismatch is not None:
+                raise SystemExit(
+                    format_payload_mismatch(
+                        sample_id=str(row["sample_id"]),
+                        state_name=state_name,
+                        mismatch=metric_mismatch,
+                        category="metric_parity",
+                    )
+                )
+            topology_mismatch = compare_nested_payloads(
+                reference["result"]["topology"],
+                optimized["result"]["topology"],
+                path="topology",
+            )
+            if topology_mismatch is not None:
+                raise SystemExit(
+                    format_payload_mismatch(
+                        sample_id=str(row["sample_id"]),
+                        state_name=state_name,
+                        mismatch=topology_mismatch,
+                        category="topology_parity",
+                    )
+                )
             ref_profile = dict(reference["profile"])
             opt_profile = dict(optimized["profile"])
             combined = {
