@@ -1,0 +1,77 @@
+seed: 1337
+
+dataset:
+  train_txt: datasets/converted_full_multiclass_curated/train.txt
+
+model:
+  architecture: UnetPlusPlus
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+
+bridge_head:
+  context_projection_channels: 8
+  hidden_channels: 16
+  candidate_threshold: 0.50
+  remove_threshold: 0.50
+  x_0_4_path: base.decoder.blocks.x_0_4
+  x_2_2_path: base.decoder.blocks.x_2_2
+
+train:
+  save_dir: training/runs/unetpp_effb3_bridge_presence_gate_v4_patient_disjoint_dev_v1
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth
+  lr: 0.001
+  weight_decay: 0.00001
+  amp: false
+
+semantic_inference:
+  amp: false
+  matmul_allow_tf32: false
+  cudnn_allow_tf32: false
+  cudnn_benchmark: false
+  cudnn_deterministic: true
+
+frozen_v2_pixel_head:
+  checkpoint_path: training/runs/unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2/best_reconstruction.pth
+  expected_file_sha256: e1e7a31a078f6baf1da05b79541e5818430583deb1f4329b3e99d47cdb055573
+  expected_model_state_sha256: f21b80e1295271deaa48fb1cf0a7d26669e2821763ee115e146a02d3588cea6f
+  expected_step: 300
+  state_dict_key: model
+  pixel_remove_threshold: 0.50
+
+gate:
+  hidden_dim: 16
+  dropout_p: 0.0
+  gate_threshold: 0.50
+
+development_split:
+  manifest_dir: training/manifests/bridge_presence_gate_v4_patient_disjoint_dev_v1
+  source_split: datasets/converted_full_multiclass_curated/train.txt
+  source_split_canonical_sha256: f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82
+  split_algorithm_version: patient_disjoint_bridge_presence_gate_v4_dev_v1
+  seed: 1337
+  preferred_val_patient_count: 5
+  fallback_val_patient_counts: [4, 6]
+
+analysis:
+  feature_audit_dir: training/analysis/bridge_presence_gate_v4_patient_disjoint_preflight
+
+future_training:
+  optimizer: AdamW
+  learning_rate: 0.001
+  max_steps: 300
+  checkpoint_selection_metric: gate_train_loss
+  checkpoint_tie_break: earlier_step
+  gate_threshold_selection_policy: fixed_0p50
+  seed: 1337
+
+experiment_notes:
+  purpose: Patient-disjoint V4 bridge-presence gate development preflight.
+  semantic_base_frozen: true
+  frozen_v2_pixel_head_frozen: true
+  source_train_only: true
+  no_test_usage: true
+  no_authoritative_holdout: true
+  no_development_training_launched: true
