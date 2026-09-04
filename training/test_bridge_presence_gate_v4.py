@@ -142,7 +142,8 @@ class TestBridgePresenceGateV4(unittest.TestCase):
             state_cache, _cache_timing = gate_v4.build_hard_gate_state_cache(records, pixel_remove_masks)
             cached = gate_v4.evaluate_gate_threshold_on_cached(state_cache, gate_probs, gate_threshold=0.5)
 
-        self.assertEqual(reference["classification"], cached["classification"])
+        for key in ("tp", "tn", "fp", "fn", "sensitivity", "specificity", "balanced_accuracy"):
+            self.assertEqual(reference["classification"][key], cached["classification"][key])
         self.assertEqual(reference["gated_reconstruction"], cached["gated_reconstruction"])
         self.assertEqual(reference["gate_open_samples"], cached["gate_open_samples"])
         self.assertEqual(reference["gate_closed_samples"], cached["gate_closed_samples"])

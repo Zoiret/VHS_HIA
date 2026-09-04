@@ -938,6 +938,8 @@ def evaluate_gate_threshold_on_cached(
     cls_neg = max(len(negatives), 1)
     sensitivity = float(tp / cls_pos)
     specificity = float(tn / cls_neg)
+    precision = float(tp / max(tp + fp, 1))
+    f1 = float((2.0 * precision * sensitivity) / max(precision + sensitivity, 1.0e-12))
     out = {
         "classification": {
             "tp": int(tp),
@@ -947,6 +949,10 @@ def evaluate_gate_threshold_on_cached(
             "sensitivity": sensitivity,
             "specificity": specificity,
             "balanced_accuracy": 0.5 * (sensitivity + specificity),
+            "precision": precision,
+            "f1": f1,
+            "gate_open_count": int(sum(int(v["gate_open"]) for v in per_sample)),
+            "gate_closed_count": int(sum(1 - int(v["gate_open"]) for v in per_sample)),
         },
         "gated_reconstruction": {
             "positive_success50": int(pos_success),

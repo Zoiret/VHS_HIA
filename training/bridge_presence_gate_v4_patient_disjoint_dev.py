@@ -49,6 +49,38 @@ FROZEN_V1_EXPECTED_SPLIT = {
     "patient_overlap": 0,
     "sample_overlap": 0,
 }
+LOCKED_VAL_REFERENCES = {
+    "always_closed": {
+        "positive_success50": 1,
+        "positive_mean_matched_iou": 0.4234538944043546,
+    },
+    "always_open": {
+        "positive_success50": 2,
+        "positive_mean_matched_iou": 0.5061690111512952,
+        "negative_regressions": 20,
+        "negative_topology_changes": 24,
+    },
+    "safe_two_state_oracle": {
+        "positive_success50": 3,
+        "positive_mean_matched_iou": 0.5233930737601301,
+        "negative_regressions": 0,
+        "negative_topology_changes": 0,
+        "positive_open_count": 7,
+        "positive_closed_count": 5,
+    },
+    "two_state_positive_success50_union_upper_bound": 3,
+}
+LOCKED_ACTIVE_SUCCESS_CRITERION_V2 = {
+    "positive_success50_min": 2,
+    "positive_mean_matched_iou_min": 0.47342348408224233,
+    "negative_regressions": 0,
+    "negative_topology_changes": 0,
+}
+FROZEN_SIMPLE_SCALAR_RULE = {
+    "scalar": "candidate_fraction",
+    "direction": "ge",
+    "threshold": 0.1541646271944046,
+}
 
 
 def _read_source_split_entries(path: Path) -> list[dict[str, str]]:
@@ -446,11 +478,240 @@ def compute_safe_two_state_oracle(hard_gate_state_cache: list[dict[str, Any]]) -
 
 def select_train_only_scalar_rule(train_feature_rows: list[dict[str, Any]]) -> dict[str, Any]:
     audit = gate_v4.simple_scalar_threshold_audit(train_feature_rows)
+    locked_rule = dict(FROZEN_SIMPLE_SCALAR_RULE)
+    best_scalar = audit["best_scalar"]
+    if best_scalar is None:
+        raise SystemExit("Frozen TRAIN-only scalar rule must exist but simple threshold audit returned no candidate.")
+    check_fields = ("scalar", "direction")
+    for field in check_fields:
+        if str(best_scalar.get(field)) != str(locked_rule.get(field)):
+            raise SystemExit(f"Frozen TRAIN-only scalar rule mismatch for {field}: expected {locked_rule.get(field)} actual {best_scalar.get(field)}")
+    if abs(float(best_scalar.get("threshold")) - float(locked_rule["threshold"])) > 1.0e-12:
+        raise SystemExit(
+            f"Frozen TRAIN-only scalar rule mismatch for threshold: expected {locked_rule['threshold']} actual {best_scalar.get('threshold')}"
+        )
     return {
         "selection_version": TRAIN_SCALAR_SELECTION_VERSION,
         "train_simple_gate_threshold_exists": bool(audit["simple_gate_threshold_exists"]),
-        "selected_rule": audit["best_scalar"],
+        "selected_rule": locked_rule,
         "selection_uses_validation_labels": False,
+    }
+
+
+def _classification_from_gate_targets(gate_targets: list[int], gate_open: list[int]) -> dict[str, Any]:
+    tp = tn = fp = fn = 0
+    for target, open_flag in zip(gate_targets, gate_open):
+        target_i = int(target)
+        open_i = int(open_flag)
+        if open_i == 1 and target_i == 1:
+            tp += 1
+        elif open_i == 0 and target_i == 0:
+            tn += 1
+        elif open_i == 1 and target_i == 0:
+            fp += 1
+        else:
+            fn += 1
+    positives = max(int(sum(1 for v in gate_targets if int(v) == 1)), 1)
+    negatives = max(int(sum(1 for v in gate_targets if int(v) == 0)), 1)
+    sensitivity = float(tp / positives)
+    specificity = float(tn / negatives)
+    precision = float(tp / max(tp + fp, 1))
+    f1 = float((2.0 * precision * sensitivity) / max(precision + sensitivity, 1.0e-12))
+    return {
+        "tp": int(tp),
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "sensitivity": sensitivity,
+        "specificity": specificity,
+        "balanced_accuracy": 0.5 * (sensitivity + specificity),
+        "precision": precision,
+        "f1": f1,
+        "gate_open_count": int(sum(int(v) for v in gate_open)),
+        "gate_closed_count": int(sum(1 - int(v) for v in gate_open)),
+    }
+
+
+def evaluate_fixed_scalar_rule(
+    hard_gate_state_cache: list[dict[str, Any]],
+    feature_rows: list[dict[str, Any]],
+    *,
+    scalar_rule: dict[str, Any],
+    gate_threshold: float = 0.50,
+) -> dict[str, Any]:
+    scalar = str(scalar_rule["scalar"])
+    direction = str(scalar_rule["direction"])
+    threshold = float(scalar_rule["threshold"])
+    gate_probs: list[float] = []
+    for row in feature_rows:
+        value = float(row[scalar])
+        open_flag = bool(value >= threshold) if direction == "ge" else bool(value <= threshold)
+        gate_probs.append(float(gate_threshold if open_flag else 0.0))
+    out = gate_v4.evaluate_gate_threshold_on_cached(
+        hard_gate_state_cache,
+        np.asarray(gate_probs, dtype=np.float64),
+        gate_threshold=float(gate_threshold),
+    )
+    out["selection_rule"] = {
+        **dict(scalar_rule),
+        "selection_uses_validation_labels": False,
+    }
+    return out
+
+
+def _per_sample_with_states(
+    hard_gate_state_cache: list[dict[str, Any]],
+    eval_payload: dict[str, Any],
+    *,
+    gate_prob_lookup: dict[str, float],
+) -> list[dict[str, Any]]:
+    state_lookup = {str(row["sample_id"]): row for row in hard_gate_state_cache}
+    rows: list[dict[str, Any]] = []
+    for row in eval_payload["per_sample"]:
+        source = state_lookup[str(row["sample_id"])]
+        closed = source["closed"]
+        open_state = source["open"]
+        rows.append(
+            {
+                "sample_id": str(row["sample_id"]),
+                "patient_id": bridge._make_patient_id(str(row["sample_id"])),
+                "target": int(row["gate_target"]),
+                "gate_probability": float(gate_prob_lookup[str(row["sample_id"])]),
+                "gate_state": "OPEN" if int(row["gate_open"]) == 1 else "CLOSED",
+                "closed_success50": int(closed["predicted_success50"]),
+                "closed_mean_iou": float(closed["predicted_mean_iou"]),
+                "open_success50": int(open_state["predicted_success50"]),
+                "open_mean_iou": float(open_state["predicted_mean_iou"]),
+                "chosen_success50": int(row["predicted_success50"]),
+                "chosen_mean_iou": float(row["predicted_mean_iou"]),
+                "negative_regression_flag": int(int(row["gate_target"]) == 0 and float(row["predicted_mean_iou"]) + 1.0e-9 < float(row["start_mean_iou"])),
+                "topology_change_flag": int(row["component_topology_changed"]),
+            }
+        )
+    return rows
+
+
+def patient_level_exploratory_report(per_sample_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in per_sample_rows:
+        grouped.setdefault(str(row["patient_id"]), []).append(row)
+    per_patient: list[dict[str, Any]] = []
+    for patient_id in sorted(grouped):
+        rows = grouped[patient_id]
+        targets = [int(row["target"]) for row in rows]
+        opens = [1 if str(row["gate_state"]) == "OPEN" else 0 for row in rows]
+        cls = _classification_from_gate_targets(targets, opens)
+        positives = [row for row in rows if int(row["target"]) == 1]
+        per_patient.append(
+            {
+                "patient_id": str(patient_id),
+                "classification_balanced_accuracy": float(cls["balanced_accuracy"]),
+                "positive_success50": int(sum(int(row["chosen_success50"]) for row in positives)),
+                "mean_matched_iou": float(np.mean([float(row["chosen_mean_iou"]) for row in rows])) if rows else 0.0,
+                "gate_open_fraction": float(np.mean([float(v) for v in opens])) if rows else 0.0,
+                "negative_regressions": int(sum(int(row["negative_regression_flag"]) for row in rows)),
+                "topology_changes": int(sum(int(row["topology_change_flag"]) for row in rows)),
+            }
+        )
+    return {
+        "per_patient": per_patient,
+        "macro_mean": {
+            "classification_balanced_accuracy": float(np.mean([float(row["classification_balanced_accuracy"]) for row in per_patient])) if per_patient else 0.0,
+            "positive_success50": float(np.mean([float(row["positive_success50"]) for row in per_patient])) if per_patient else 0.0,
+            "mean_matched_iou": float(np.mean([float(row["mean_matched_iou"]) for row in per_patient])) if per_patient else 0.0,
+            "gate_open_fraction": float(np.mean([float(row["gate_open_fraction"]) for row in per_patient])) if per_patient else 0.0,
+            "negative_regressions": float(np.mean([float(row["negative_regressions"]) for row in per_patient])) if per_patient else 0.0,
+            "topology_changes": float(np.mean([float(row["topology_changes"]) for row in per_patient])) if per_patient else 0.0,
+        },
+    }
+
+
+def evaluate_gate_probabilities(
+    *,
+    hard_gate_state_cache: list[dict[str, Any]],
+    gate_probs: np.ndarray,
+    gate_threshold: float,
+) -> dict[str, Any]:
+    eval_payload = gate_v4.evaluate_gate_threshold_on_cached(
+        hard_gate_state_cache,
+        gate_probs,
+        gate_threshold=float(gate_threshold),
+    )
+    gate_prob_lookup = {
+        str(row["sample_id"]): float(gate_probs[idx])
+        for idx, row in enumerate(hard_gate_state_cache)
+    }
+    per_sample_rows = _per_sample_with_states(
+        hard_gate_state_cache,
+        eval_payload,
+        gate_prob_lookup=gate_prob_lookup,
+    )
+    return {
+        **eval_payload,
+        "per_sample_detailed": per_sample_rows,
+        "patient_level_exploratory": patient_level_exploratory_report(per_sample_rows),
+    }
+
+
+def compute_gain_fractions(
+    *,
+    trained_payload: dict[str, Any],
+    always_closed_payload: dict[str, Any],
+    safe_oracle: dict[str, Any],
+) -> dict[str, Any]:
+    trained = trained_payload["gated_reconstruction"]
+    closed = always_closed_payload["gated_reconstruction"]
+    success_den = float(int(safe_oracle["positive_success50"]) - int(closed["positive_success50"]))
+    iou_den = float(float(safe_oracle["positive_mean_matched_iou"]) - float(closed["positive_mean_matched_iou"]))
+    return {
+        "success_gain_fraction": None if abs(success_den) <= 1.0e-12 else float((int(trained["positive_success50"]) - int(closed["positive_success50"])) / success_den),
+        "iou_gain_fraction": None if abs(iou_den) <= 1.0e-12 else float((float(trained["positive_mean_matched_iou"]) - float(closed["positive_mean_matched_iou"])) / iou_den),
+    }
+
+
+def evaluate_success_against_locked_v2_criterion(
+    *,
+    trained_payload: dict[str, Any],
+    success_criteria_v2: dict[str, Any],
+    always_closed_payload: dict[str, Any],
+) -> dict[str, Any]:
+    trained = trained_payload["gated_reconstruction"]
+    utility = success_criteria_v2["utility"]
+    safety = success_criteria_v2["safety"]
+    passed = bool(
+        int(trained["negative_regressions"]) <= int(safety["negative_regressions"])
+        and int(trained["negative_topology_changes"]) <= int(safety["negative_topology_changes"])
+        and int(trained["positive_success50"]) >= int(utility["positive_success50_min"])
+        and float(trained["positive_mean_matched_iou"]) >= float(utility["positive_mean_matched_iou_min"])
+        and int(trained["positive_success50"]) > int(always_closed_payload["gated_reconstruction"]["positive_success50"])
+        and float(trained["positive_mean_matched_iou"]) > float(always_closed_payload["gated_reconstruction"]["positive_mean_matched_iou"])
+    )
+    return {
+        "pass": passed,
+        "status_text": "YES" if passed else "NO",
+    }
+
+
+def snapshot_frozen_backbone_state(model: bridge.FrozenSemanticBridgeSuppressionModel) -> dict[str, Any]:
+    named = [(name, p) for name, p in model.named_parameters()]
+    return {
+        "named": named,
+        "params": bridge._snapshot_named_parameters(named),
+        "bn": bridge._collect_batchnorm_stats(model.base),
+    }
+
+
+def frozen_backbone_invariant_deltas(model: bridge.FrozenSemanticBridgeSuppressionModel, snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "semantic_parameter_max_delta": float(bridge._max_parameter_delta_from_snapshot(snapshot["named"], snapshot["params"])),
+        "semantic_bn_state_max_delta": float(bridge._max_bn_delta(model.base, snapshot["bn"])),
+        "v2_pixel_head_parameter_max_delta": float(
+            max(
+                float(torch.max(torch.abs(param.detach().cpu() - snapshot["params"][name])).item())
+                for name, param in model.named_parameters()
+                if "bridge_head" in str(name)
+            ) if any("bridge_head" in str(name) for name, _ in model.named_parameters()) else 0.0
+        ),
     }
 
 
@@ -572,6 +833,67 @@ def build_predeclared_success_criteria_v2(
     }
 
 
+def assert_locked_val_references(
+    *,
+    always_closed: dict[str, Any],
+    always_open: dict[str, Any],
+    safe_two_state_oracle: dict[str, Any],
+    union_upper_bound: int,
+) -> None:
+    checks = [
+        ("always_closed.positive_success50", int(always_closed["positive_success50"]), int(LOCKED_VAL_REFERENCES["always_closed"]["positive_success50"])),
+        ("always_closed.positive_mean_matched_iou", float(always_closed["positive_mean_matched_iou"]), float(LOCKED_VAL_REFERENCES["always_closed"]["positive_mean_matched_iou"])),
+        ("always_open.positive_success50", int(always_open["positive_success50"]), int(LOCKED_VAL_REFERENCES["always_open"]["positive_success50"])),
+        ("always_open.positive_mean_matched_iou", float(always_open["positive_mean_matched_iou"]), float(LOCKED_VAL_REFERENCES["always_open"]["positive_mean_matched_iou"])),
+        ("always_open.negative_regressions", int(always_open["negative_regressions"]), int(LOCKED_VAL_REFERENCES["always_open"]["negative_regressions"])),
+        ("always_open.negative_topology_changes", int(always_open["negative_topology_changes"]), int(LOCKED_VAL_REFERENCES["always_open"]["negative_topology_changes"])),
+        ("safe_two_state_oracle.positive_success50", int(safe_two_state_oracle["positive_success50"]), int(LOCKED_VAL_REFERENCES["safe_two_state_oracle"]["positive_success50"])),
+        ("safe_two_state_oracle.positive_mean_matched_iou", float(safe_two_state_oracle["positive_mean_matched_iou"]), float(LOCKED_VAL_REFERENCES["safe_two_state_oracle"]["positive_mean_matched_iou"])),
+        ("safe_two_state_oracle.negative_regressions", int(safe_two_state_oracle["negative_regressions"]), int(LOCKED_VAL_REFERENCES["safe_two_state_oracle"]["negative_regressions"])),
+        ("safe_two_state_oracle.negative_topology_changes", int(safe_two_state_oracle["negative_topology_changes"]), int(LOCKED_VAL_REFERENCES["safe_two_state_oracle"]["negative_topology_changes"])),
+        ("safe_two_state_oracle.positive_open_count", int(safe_two_state_oracle["positive_open_count"]), int(LOCKED_VAL_REFERENCES["safe_two_state_oracle"]["positive_open_count"])),
+        ("safe_two_state_oracle.positive_closed_count", int(safe_two_state_oracle["positive_closed_count"]), int(LOCKED_VAL_REFERENCES["safe_two_state_oracle"]["positive_closed_count"])),
+        ("two_state_positive_success50_union_upper_bound", int(union_upper_bound), int(LOCKED_VAL_REFERENCES["two_state_positive_success50_union_upper_bound"])),
+    ]
+    mismatches: list[dict[str, Any]] = []
+    for field, actual, expected in checks:
+        if isinstance(expected, float):
+            if abs(float(actual) - float(expected)) > 1.0e-12:
+                mismatches.append({"field": field, "actual": float(actual), "expected": float(expected)})
+        elif int(actual) != int(expected):
+            mismatches.append({"field": field, "actual": int(actual), "expected": int(expected)})
+    if mismatches:
+        raise SystemExit(json.dumps({
+            "status": "blocked",
+            "reason": "locked_val_reference_mismatch",
+            "mismatches": mismatches,
+        }, ensure_ascii=False, indent=2))
+
+
+def assert_locked_active_success_criterion_v2(success_criteria_v2: dict[str, Any]) -> None:
+    utility = success_criteria_v2["utility"]
+    safety = success_criteria_v2["safety"]
+    checks = [
+        ("positive_success50_min", int(utility["positive_success50_min"]), int(LOCKED_ACTIVE_SUCCESS_CRITERION_V2["positive_success50_min"])),
+        ("positive_mean_matched_iou_min", float(utility["positive_mean_matched_iou_min"]), float(LOCKED_ACTIVE_SUCCESS_CRITERION_V2["positive_mean_matched_iou_min"])),
+        ("negative_regressions", int(safety["negative_regressions"]), int(LOCKED_ACTIVE_SUCCESS_CRITERION_V2["negative_regressions"])),
+        ("negative_topology_changes", int(safety["negative_topology_changes"]), int(LOCKED_ACTIVE_SUCCESS_CRITERION_V2["negative_topology_changes"])),
+    ]
+    mismatches: list[dict[str, Any]] = []
+    for field, actual, expected in checks:
+        if isinstance(expected, float):
+            if abs(float(actual) - float(expected)) > 1.0e-12:
+                mismatches.append({"field": field, "actual": float(actual), "expected": float(expected)})
+        elif int(actual) != int(expected):
+            mismatches.append({"field": field, "actual": int(actual), "expected": int(expected)})
+    if mismatches:
+        raise SystemExit(json.dumps({
+            "status": "blocked",
+            "reason": "locked_success_criterion_v2_mismatch",
+            "mismatches": mismatches,
+        }, ensure_ascii=False, indent=2))
+
+
 def prepare_split_preflight(
     *,
     cfg: dict[str, Any],
@@ -613,9 +935,12 @@ def prepare_split_preflight(
     return {
         "records": records,
         "cached_records": annotated,
+        "frozen_logits": logits,
+        "frozen_logit_diagnostics": logit_diag,
         "feature_rows": feature_rows,
         "features_t": features_t,
         "targets_t": targets_t,
+        "gate_model": gate_model,
         "hard_gate_state_cache": hard_gate_state_cache,
         "cache_timing": cache_timing,
         "state_summary": summarize_hard_gate_states(records, hard_gate_state_cache),
