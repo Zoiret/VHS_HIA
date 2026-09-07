@@ -269,7 +269,9 @@ def _evaluate_split(
 
 def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
     save_dir = bridge._resolve_repo_path((cfg.get("train") or {}).get("save_dir"), bridge.REPO_ROOT / "training" / "runs" / "unetpp_effb3_bridge_presence_gate_v4_patient_disjoint_dev_v1")
+    analysis_dir = bridge._resolve_repo_path(((cfg.get("analysis") or {}).get("feature_audit_dir")), dev.DEFAULT_ANALYSIS_DIR)
     save_dir.mkdir(parents=True, exist_ok=True)
+    analysis_dir.mkdir(parents=True, exist_ok=True)
     bridge._seed_everything(int(cfg.get("seed", 1337)))
     prepared = _prepare_training_inputs(cfg)
     runtime_report = micro_runner._build_runtime_device_report(
@@ -294,6 +296,24 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         union_upper_bound=int(prepared["val_prepared"]["state_summary"]["two_state_positive_success50_union_upper_bound"]),
     )
     dev.assert_locked_active_success_criterion_v2(prepared["success_criteria_v2"])
+    _save_csv(save_dir / "gate_train_selector_inputs.csv", prepared["train_prepared"]["selector_input_rows"])
+    bridge._write_json(save_dir / "gate_train_selector_inputs.json", prepared["train_prepared"]["selector_input_rows"])
+    bridge._write_json(save_dir / "gate_train_selector_audit.json", prepared["train_prepared"]["selector_audit"])
+    preflight_selector_audit_path = analysis_dir / "gate_train_selector_audit.json"
+    selector_input_comparison: dict[str, Any] | None = None
+    if preflight_selector_audit_path.exists():
+        preflight_selector_audit = json.loads(preflight_selector_audit_path.read_text(encoding="utf-8"))
+        selector_input_comparison = dev.compare_selector_input_rows(
+            list(preflight_selector_audit.get("selector_input_rows") or []),
+            list(prepared["train_prepared"]["selector_input_rows"]),
+        )
+        bridge._write_json(save_dir / "gate_train_selector_input_comparison.json", selector_input_comparison)
+        if not bool(selector_input_comparison["identical"]):
+            raise SystemExit(json.dumps({
+                "status": "blocked",
+                "reason": "train_only_selector_input_hash_mismatch",
+                "selector_input_comparison": selector_input_comparison,
+            }, ensure_ascii=False, indent=2))
     frozen_snapshot = dev.snapshot_frozen_backbone_state(prepared["frozen_model"])
     frozen_logits_before = prepared["train_prepared"]["frozen_logits"].clone()
     train_run = _train_only_run(
@@ -362,6 +382,8 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         "frozen_v2_checkpoint": prepared["frozen_v2_checkpoint"],
         "runtime_device_contract": runtime_report,
         "runtime_environment_snapshot": runtime_snapshot,
+        "train_selector_audit": prepared["train_prepared"]["selector_audit"],
+        "train_selector_input_comparison": selector_input_comparison,
         "best_train_loss_checkpoint": {
             "path": str((save_dir / "best_train_loss.pth").resolve()),
             "step": int(best_ckpt_payload["step"]),

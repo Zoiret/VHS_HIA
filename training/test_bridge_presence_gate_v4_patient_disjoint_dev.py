@@ -175,6 +175,79 @@ class TestBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
         params = list(inspect.signature(dev.select_train_only_scalar_rule).parameters.keys())
         self.assertEqual(params, ["train_feature_rows"])
 
+    def test_selector_input_rows_and_hash_are_deterministic(self):
+        feature_rows = [
+            {"sample_id": "b", "bridge_positive_target": 0, "candidate_fraction": np.float32(0.1)},
+            {"sample_id": "a", "bridge_positive_target": 1, "candidate_fraction": np.float32(0.2)},
+        ]
+        rows_a = dev.build_train_only_selector_input_rows(feature_rows)
+        rows_b = dev.build_train_only_selector_input_rows(list(reversed(feature_rows)))
+        self.assertEqual(rows_a, rows_b)
+        self.assertEqual(dev.summarize_selector_input_rows(rows_a)["selector_input_sha256"], dev.summarize_selector_input_rows(rows_b)["selector_input_sha256"])
+
+    def test_selector_permutation_invariance(self):
+        feature_rows = [
+            {"sample_id": "s3", "bridge_positive_target": 1, "candidate_fraction": 0.20},
+            {"sample_id": "s1", "bridge_positive_target": 0, "candidate_fraction": 0.04},
+            {"sample_id": "s2", "bridge_positive_target": 1, "candidate_fraction": 0.1541646271944046},
+        ]
+        a = dev.train_only_balanced_accuracy_selector_v1(feature_rows)
+        b = dev.train_only_balanced_accuracy_selector_v1(list(reversed(feature_rows)))
+        self.assertEqual(a["selected_rule"]["threshold"], b["selected_rule"]["threshold"])
+        self.assertEqual(a["selected_rule"]["direction"], b["selected_rule"]["direction"])
+
+    def test_selector_tie_break_prefers_observed_higher_ge_threshold(self):
+        low = 0.0464257225394249
+        high = 0.1541646271944046
+        feature_rows = [
+            {"sample_id": "n1", "bridge_positive_target": 0, "candidate_fraction": low},
+            {"sample_id": "p1", "bridge_positive_target": 1, "candidate_fraction": high},
+        ]
+        audit = dev.train_only_balanced_accuracy_selector_v1(
+            feature_rows,
+            extra_thresholds=[0.10029517486691475, high],
+        )
+        self.assertEqual(audit["selected_rule"]["threshold"], high)
+        self.assertEqual(len(audit["tied_best_thresholds"]), 1)
+        checks = {round(float(row["threshold"]), 15): row for row in audit["specific_threshold_checks"]}
+        self.assertAlmostEqual(checks[round(0.10029517486691475, 15)]["balanced_accuracy"], 1.0)
+        self.assertAlmostEqual(checks[round(high, 15)]["balanced_accuracy"], 1.0)
+
+    def test_selector_dtype_invariance(self):
+        rows32 = [
+            {"sample_id": "a", "bridge_positive_target": 1, "candidate_fraction": np.float32(0.25)},
+            {"sample_id": "b", "bridge_positive_target": 0, "candidate_fraction": np.float32(0.125)},
+        ]
+        rows64 = [
+            {"sample_id": "a", "bridge_positive_target": 1, "candidate_fraction": np.float64(0.25)},
+            {"sample_id": "b", "bridge_positive_target": 0, "candidate_fraction": np.float64(0.125)},
+        ]
+        self.assertEqual(
+            dev.train_only_balanced_accuracy_selector_v1(rows32)["selected_rule"]["threshold"],
+            dev.train_only_balanced_accuracy_selector_v1(rows64)["selected_rule"]["threshold"],
+        )
+
+    def test_selector_input_comparison_reports_differing_samples(self):
+        reference = [
+            {"sample_id": "a", "patient_id": "p1", "bridge_target": 1, "candidate_fraction": 0.2},
+        ]
+        current = [
+            {"sample_id": "a", "patient_id": "p1", "bridge_target": 0, "candidate_fraction": 0.3},
+        ]
+        out = dev.compare_selector_input_rows(reference, current)
+        self.assertFalse(out["identical"])
+        self.assertEqual(out["differing_samples"][0]["sample_id"], "a")
+
+    def test_exact_shared_selector_reuse_and_no_validation_label_access(self):
+        feature_rows = [
+            {"sample_id": "a", "bridge_positive_target": 1, "candidate_fraction": 0.1541646271944046},
+            {"sample_id": "b", "bridge_positive_target": 0, "candidate_fraction": 0.0464257225394249},
+        ]
+        with mock.patch.object(dev, "train_only_balanced_accuracy_selector_v1", wraps=dev.train_only_balanced_accuracy_selector_v1) as selector_mock:
+            out = dev.select_train_only_scalar_rule(feature_rows)
+        selector_mock.assert_called_once()
+        self.assertFalse(out["selection_uses_validation_labels"])
+
     def test_predeclared_success_criteria_serialized_before_training(self):
         criteria = dev.build_predeclared_success_criteria_v1(
             val_summary={"bridge_positive": 6},

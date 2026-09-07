@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 import time
@@ -18,6 +19,18 @@ import train_bridge_presence_gate_v4 as micro_runner
 
 
 DEFAULT_CONFIG = bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_patient_disjoint_dev_v1.yaml"
+
+
+def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fieldnames = list(rows[0].keys())
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def _prepare_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -182,6 +195,9 @@ def run_pipeline(cfg: dict[str, Any], *, manifest_only: bool = False) -> dict[st
                 "safe_two_state_oracle": train_oracle,
                 "two_state_positive_success50_union_upper_bound": int(train_prepared["state_summary"]["two_state_positive_success50_union_upper_bound"]),
                 "train_simple_scalar_rule": train_prepared["simple_scalar_rule"],
+                "selector_input_summary": train_prepared["selector_audit"]["selector_input_summary"],
+                "selector_max_balanced_accuracy": float(train_prepared["selector_audit"]["max_balanced_accuracy"]),
+                "selector_tied_best_threshold_count": int(len(train_prepared["selector_audit"]["tied_best_thresholds"])),
                 "cache_construction_time_seconds": float(train_prepared["cache_timing"]["total_seconds"]),
             },
             "gate_val": {
@@ -199,6 +215,9 @@ def run_pipeline(cfg: dict[str, Any], *, manifest_only: bool = False) -> dict[st
             },
         }
     )
+    _write_csv(analysis_dir / "gate_train_selector_inputs.csv", train_prepared["selector_input_rows"])
+    bridge._write_json(analysis_dir / "gate_train_selector_inputs.json", train_prepared["selector_input_rows"])
+    bridge._write_json(analysis_dir / "gate_train_selector_audit.json", train_prepared["selector_audit"])
     bridge._write_json(analysis_dir / "preflight_summary.json", output)
     return output
 

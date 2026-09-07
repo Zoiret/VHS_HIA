@@ -88,6 +88,8 @@ class TestTrainBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
                 "features_t": torch.ones((1, 105)),
                 "targets_t": torch.ones((1, 1)),
                 "feature_rows": [{"sample_id": "t1", "candidate_fraction": 0.1541646271944046}],
+                "selector_input_rows": [{"sample_id": "t1", "patient_id": "t1", "bridge_target": 1, "candidate_fraction": 0.1541646271944046}],
+                "selector_audit": {"selector_input_rows": [{"sample_id": "t1", "patient_id": "t1", "bridge_target": 1, "candidate_fraction": 0.1541646271944046}]},
                 "hard_gate_state_cache": train_cache,
             },
             "val_prepared": {
@@ -152,6 +154,36 @@ class TestTrainBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
         self.assertFalse(summary["validation_isolation"]["used_for_threshold_selection"])
         self.assertEqual(summary["training_contract"]["threshold"], 0.50)
         self.assertEqual(scalar_mock.call_args.kwargs["scalar_rule"], dev.FROZEN_SIMPLE_SCALAR_RULE)
+
+    def test_identical_selector_input_hashes_between_preflight_and_training_paths(self):
+        prepared = self._fake_prepared()
+        with tempfile.TemporaryDirectory() as td:
+            analysis_dir = Path(td) / "analysis"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            bridge._write_json(analysis_dir / "gate_train_selector_audit.json", prepared["train_prepared"]["selector_audit"])
+            with mock.patch.object(runner, "_prepare_training_inputs", return_value=prepared), \
+                 mock.patch.object(dev, "assert_locked_val_references"), \
+                 mock.patch.object(dev, "assert_locked_active_success_criterion_v2"), \
+                 mock.patch.object(dev, "snapshot_frozen_backbone_state", return_value={"named": [], "params": {}, "bn": {}}), \
+                 mock.patch.object(dev, "frozen_backbone_invariant_deltas", return_value={"semantic_parameter_max_delta": 0.0, "semantic_bn_state_max_delta": 0.0, "v2_pixel_head_parameter_max_delta": 0.0}), \
+                 mock.patch.object(runner, "_train_only_run", return_value={"best_train_loss": 0.1, "best_train_loss_step": 1, "history": [], "optimizer_name": "AdamW", "max_steps": 300}), \
+                 mock.patch.object(runner, "_load_gate_checkpoint", return_value={"step": 1}), \
+                 mock.patch.object(runner, "_gate_probabilities", side_effect=[np.array([1.0]), np.ones((27,), dtype=np.float64)]):
+                cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_patient_disjoint_dev_v1.yaml")
+                cfg = dict(cfg)
+                cfg["train"] = dict(cfg["train"])
+                cfg["train"]["save_dir"] = str(Path(td) / "run")
+                cfg["analysis"] = {"feature_audit_dir": str(analysis_dir)}
+                summary = runner.run_pipeline(cfg)
+        self.assertTrue(summary["train_selector_input_comparison"]["identical"])
+
+    def test_frozen_baseline_mismatch_still_fails_closed(self):
+        feature_rows = [
+            {"sample_id": "a", "bridge_positive_target": 1, "candidate_fraction": 0.10},
+            {"sample_id": "b", "bridge_positive_target": 0, "candidate_fraction": 0.05},
+        ]
+        with self.assertRaises(SystemExit):
+            dev.select_train_only_scalar_rule(feature_rows)
 
     def test_v2_success_criterion_exact_and_no_validation_threshold_sweep(self):
         prepared = self._fake_prepared()
