@@ -84,22 +84,24 @@ def _load_gate_checkpoint(path: Path, gate_model: torch.nn.Module, device: torch
     return payload
 
 
-def _prepare_training_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
+def _prepare_training_inputs_core(cfg: dict[str, Any], *, enforce_frozen_scalar_rule: bool) -> dict[str, Any]:
     manifest_stage = preflight_runner._prepare_manifest(cfg)
     contract = dict(manifest_stage["manifest"]["contract"])
     device = manifest_stage["device"]
     frozen_model, frozen_v2_info = gate_v4.load_frozen_v2_pixel_model_from_cfg(cfg, device)
-    train_prepared = dev.prepare_split_preflight(
+    train_prepared = dev._prepare_split_preflight_core(
         cfg=cfg,
         sample_ids=list(contract["train_sample_ids"]),
         device=device,
         frozen_model=frozen_model,
+        enforce_frozen_scalar_rule=bool(enforce_frozen_scalar_rule),
     )
-    val_prepared = dev.prepare_split_preflight(
+    val_prepared = dev._prepare_split_preflight_core(
         cfg=cfg,
         sample_ids=list(contract["val_sample_ids"]),
         device=device,
         frozen_model=frozen_model,
+        enforce_frozen_scalar_rule=bool(enforce_frozen_scalar_rule),
     )
     train_scalar_rule = train_prepared["simple_scalar_rule"]
     if not bool(train_scalar_rule["train_simple_gate_threshold_exists"]):
@@ -119,6 +121,10 @@ def _prepare_training_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
         "val_prepared": val_prepared,
         "success_criteria_v2": success_v2,
     }
+
+
+def _prepare_training_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
+    return _prepare_training_inputs_core(cfg, enforce_frozen_scalar_rule=True)
 
 
 def _train_only_run(

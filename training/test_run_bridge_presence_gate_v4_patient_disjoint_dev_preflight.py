@@ -10,6 +10,8 @@ THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
+import bridge_presence_gate_v4 as gate_v4
+import bridge_presence_gate_v4_patient_disjoint_dev as dev
 import bridge_suppression_head as bridge
 import run_bridge_presence_gate_v4_patient_disjoint_dev_preflight as runner
 
@@ -68,6 +70,24 @@ class TestRunBridgePresenceGateV4PatientDisjointDevPreflight(unittest.TestCase):
             cfg["frozen_v2_pixel_head"] = dict(cfg["frozen_v2_pixel_head"])
             cfg["frozen_v2_pixel_head"]["checkpoint_path"] = str(Path(td) / "missing.pth")
             with mock.patch.object(runner, "_prepare_manifest", return_value=self._fake_manifest_stage()):
+                with self.assertRaises(SystemExit):
+                    runner.run_pipeline(cfg, manifest_only=False)
+
+    def test_preflight_still_fails_closed_on_scalar_mismatch(self):
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_patient_disjoint_dev_v1.yaml")
+        with tempfile.TemporaryDirectory() as td:
+            ckpt = Path(td) / "present.pth"
+            ckpt.write_bytes(b"x")
+            cfg = dict(cfg)
+            cfg["analysis"] = {"feature_audit_dir": str(Path(td) / "analysis")}
+            cfg["frozen_v2_pixel_head"] = dict(cfg["frozen_v2_pixel_head"])
+            cfg["frozen_v2_pixel_head"]["checkpoint_path"] = str(ckpt)
+            with mock.patch.object(runner, "_prepare_manifest", return_value=self._fake_manifest_stage()), \
+                 mock.patch.object(gate_v4, "load_frozen_v2_pixel_model_from_cfg", return_value=(mock.Mock(), {"checkpoint_file_sha256": "a", "checkpoint_model_state_sha256": "b"})), \
+                 mock.patch.object(runner.micro_runner, "_build_runtime_device_report", return_value={"selected_torch_device": "cpu"}), \
+                 mock.patch.object(runner.micro_runner, "_assert_expected_cuda_runtime"), \
+                 mock.patch.object(runner.micro_runner, "_runtime_environment_snapshot", return_value={}), \
+                 mock.patch.object(dev, "_prepare_split_preflight_core", side_effect=SystemExit("Frozen TRAIN-only scalar rule mismatch for threshold")):
                 with self.assertRaises(SystemExit):
                     runner.run_pipeline(cfg, manifest_only=False)
 

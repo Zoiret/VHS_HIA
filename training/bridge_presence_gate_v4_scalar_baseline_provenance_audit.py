@@ -32,8 +32,8 @@ ROW_FIELD_ORDER = [
     "candidate_fraction",
     "candidate_fraction_denominator",
     "candidate_mask_shape",
-    "scalar_source_function",
-    "relevant_dtype",
+    "scalar_source",
+    "dtype",
 ]
 HISTORICAL_SOURCE_COMMIT = "5eb63e5"
 MERGED_SOURCE_COMMIT = "1d5e0b1"
@@ -101,8 +101,8 @@ def build_forensic_selector_rows(
                 "candidate_fraction": format(float(feature["candidate_fraction"]), ".17g"),
                 "candidate_fraction_denominator": int(denominator),
                 "candidate_mask_shape": _normalize_shape(mask_shape),
-                "scalar_source_function": str(scalar_source_function),
-                "relevant_dtype": str(
+                "scalar_source": str(scalar_source_function),
+                "dtype": str(
                     f"candidate_fraction=float64;candidate_mask=uint8;target=int64;"
                     f"candidate_fraction_source={candidate_fraction_source};target_source={target_source}"
                 ),
@@ -180,6 +180,19 @@ def run_historical_selector(feature_rows: list[dict[str, Any]]) -> dict[str, Any
     return dict(gate_v4.simple_scalar_threshold_audit(feature_rows)["best_scalar"])
 
 
+def _selector_result_payload(feature_rows: list[dict[str, Any]], *, selector_function: str) -> dict[str, Any]:
+    selected_rule = run_historical_selector(feature_rows)
+    frozen_threshold = float(dev.FROZEN_SIMPLE_SCALAR_RULE["threshold"])
+    actual_threshold = float(selected_rule["threshold"])
+    return {
+        **selected_rule,
+        "selector_function": str(selector_function),
+        "matches_frozen_threshold": bool(abs(actual_threshold - frozen_threshold) <= 1.0e-12),
+        "frozen_rule_reproduced": bool(abs(actual_threshold - frozen_threshold) <= 1.0e-12),
+        "expected_frozen_threshold": float(frozen_threshold),
+    }
+
+
 def find_original_artifacts(root: Path) -> list[str]:
     candidates: list[str] = []
     patterns = ("*bridge_presence_gate_v4*json", "*bridge_presence_gate_v4*csv", "*preflight*json", "*selector*json", "*selector*csv")
@@ -255,13 +268,14 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         device=device,
         frozen_model=frozen_model,
     )
-    current_preflight = dev.prepare_split_preflight(
+    current_preflight = dev._prepare_split_preflight_core(
         cfg=cfg,
         sample_ids=list(contract["train_sample_ids"]),
         device=device,
         frozen_model=frozen_model,
+        enforce_frozen_scalar_rule=False,
     )
-    current_training = train_runner._prepare_training_inputs(cfg)["train_prepared"]
+    current_training = train_runner._prepare_training_inputs_core(cfg, enforce_frozen_scalar_rule=False)["train_prepared"]
 
     historical_rows = build_forensic_selector_rows(
         records=historical_preflight["cached_records"],
@@ -314,7 +328,28 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         _write_csv(audit_dir / f"{name}.csv", rows)
         bridge._write_json(audit_dir / f"{name}.json", rows)
 
+    bridge._write_json(audit_dir / "historical_vs_current_preflight_diff.json", diff_hist_vs_preflight)
+    bridge._write_json(audit_dir / "historical_vs_current_training_diff.json", diff_hist_vs_training)
+    bridge._write_json(audit_dir / "current_preflight_vs_training_diff.json", diff_preflight_vs_training)
+
+    selector_results = {
+        "historical_preflight_rows": _selector_result_payload(
+            historical_preflight["feature_rows"],
+            selector_function="gate_v4.simple_scalar_threshold_audit@5eb63e5",
+        ),
+        "current_preflight_rows": _selector_result_payload(
+            current_preflight["feature_rows"],
+            selector_function="gate_v4.simple_scalar_threshold_audit@64a3561",
+        ),
+        "current_training_rows": _selector_result_payload(
+            current_training["feature_rows"],
+            selector_function="gate_v4.simple_scalar_threshold_audit@64a3561",
+        ),
+    }
+    bridge._write_json(audit_dir / "selector_results.json", selector_results)
+
     output = {
+        "audit_execution_success": True,
         "historical_path": {
             "source_commit": HISTORICAL_SOURCE_COMMIT,
             "merged_commit": MERGED_SOURCE_COMMIT,
@@ -334,6 +369,7 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
                 "extract_gate_feature_rows": False,
                 "simple_scalar_threshold_audit": False,
             },
+            "reconstruction_kind": "reconstructed_historical_path_using_byte-identical current implementations for the inspected functions",
         },
         "row_sets": {
             "historical_preflight_rows": historical_audit,
@@ -356,11 +392,7 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
             "current_preflight_vs_current_training": diff_preflight_vs_training["candidate_fraction_differences"],
             "definition": "candidate_fraction = candidate_pixels / (candidate_mask_shape_h * candidate_mask_shape_w)",
         },
-        "selector_results": {
-            "historical_preflight_rows": historical_audit["selector_result"],
-            "current_preflight_rows": current_preflight_audit["selector_result"],
-            "current_training_rows": current_training_audit["selector_result"],
-        },
+        "selector_results": selector_results,
         "original_artifact_search": {
             "found": bool(artifact_hits),
             "paths": artifact_hits,
@@ -368,7 +400,7 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         },
         "frozen_v2_checkpoint": frozen_v2_info,
     }
-    bridge._write_json(audit_dir / "scalar_baseline_provenance_audit.json", output)
+    bridge._write_json(audit_dir / "provenance_summary.json", output)
     return output
 
 

@@ -300,6 +300,18 @@ class TestBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
         selector_mock.assert_called_once()
         self.assertFalse(out["selection_uses_validation_labels"])
 
+    def test_validate_frozen_scalar_rule_preserves_fail_closed_behavior(self):
+        with self.assertRaises(SystemExit):
+            dev.validate_frozen_scalar_rule(
+                {
+                    "selected_rule": {
+                        "scalar": "candidate_fraction",
+                        "direction": "ge",
+                        "threshold": 0.10029517486691475,
+                    }
+                }
+            )
+
     def test_midpoint_vs_observed_prediction_equivalence_where_applicable(self):
         low = 0.1538984477519989
         high = 0.1544308066368103

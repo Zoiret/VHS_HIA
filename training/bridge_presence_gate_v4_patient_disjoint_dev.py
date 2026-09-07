@@ -481,23 +481,12 @@ def compute_safe_two_state_oracle(hard_gate_state_cache: list[dict[str, Any]]) -
 
 
 def select_train_only_scalar_rule(train_feature_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    audit = train_only_balanced_accuracy_selector_v1(train_feature_rows)
-    locked_rule = dict(FROZEN_SIMPLE_SCALAR_RULE)
-    best_scalar = audit["selected_rule"]
-    if best_scalar is None:
-        raise SystemExit("Frozen TRAIN-only scalar rule must exist but simple threshold audit returned no candidate.")
-    check_fields = ("scalar", "direction")
-    for field in check_fields:
-        if str(best_scalar.get(field)) != str(locked_rule.get(field)):
-            raise SystemExit(f"Frozen TRAIN-only scalar rule mismatch for {field}: expected {locked_rule.get(field)} actual {best_scalar.get(field)}")
-    if abs(float(best_scalar.get("threshold")) - float(locked_rule["threshold"])) > 1.0e-12:
-        raise SystemExit(
-            f"Frozen TRAIN-only scalar rule mismatch for threshold: expected {locked_rule['threshold']} actual {best_scalar.get('threshold')}"
-        )
+    audit = run_train_only_balanced_accuracy_selector_v1(train_feature_rows)
+    validate_frozen_scalar_rule(audit)
     return {
         "selection_version": TRAIN_SCALAR_SELECTION_VERSION,
         "train_simple_gate_threshold_exists": bool(audit["selected_rule"] is not None),
-        "selected_rule": locked_rule,
+        "selected_rule": dict(FROZEN_SIMPLE_SCALAR_RULE),
         "selection_uses_validation_labels": False,
         "selector_audit": audit,
     }
@@ -616,7 +605,7 @@ def evaluate_train_only_selector_candidate(
     negatives = max(int(np.sum(labels == 0)), 1)
     sensitivity = float(tp / positives)
     specificity = float(tn / negatives)
-    return {
+    out = {
         "scalar": str(scalar),
         "direction": str(direction),
         "threshold": float(threshold),
@@ -865,6 +854,35 @@ def train_only_balanced_accuracy_selector_v1(
         "tied_best_thresholds": tied_best,
         "selected_rule": dict(tied_best[0]) if tied_best else None,
         "specific_threshold_checks": specific_threshold_checks,
+    }
+
+
+def run_train_only_balanced_accuracy_selector_v1(
+    feature_rows: list[dict[str, Any]],
+    *,
+    extra_thresholds: list[float] | None = None,
+) -> dict[str, Any]:
+    return train_only_balanced_accuracy_selector_v1(feature_rows, extra_thresholds=extra_thresholds)
+
+
+def validate_frozen_scalar_rule(selector_audit: dict[str, Any]) -> dict[str, Any]:
+    locked_rule = dict(FROZEN_SIMPLE_SCALAR_RULE)
+    best_scalar = selector_audit.get("selected_rule")
+    if best_scalar is None:
+        raise SystemExit("Frozen TRAIN-only scalar rule must exist but simple threshold audit returned no candidate.")
+    check_fields = ("scalar", "direction")
+    for field in check_fields:
+        if str(best_scalar.get(field)) != str(locked_rule.get(field)):
+            raise SystemExit(f"Frozen TRAIN-only scalar rule mismatch for {field}: expected {locked_rule.get(field)} actual {best_scalar.get(field)}")
+    if abs(float(best_scalar.get("threshold")) - float(locked_rule["threshold"])) > 1.0e-12:
+        raise SystemExit(
+            f"Frozen TRAIN-only scalar rule mismatch for threshold: expected {locked_rule['threshold']} actual {best_scalar.get('threshold')}"
+        )
+    return {
+        "matches_frozen_rule": True,
+        "frozen_rule_reproduced": True,
+        "expected_rule": locked_rule,
+        "actual_rule": dict(best_scalar),
     }
 
 
@@ -1264,12 +1282,13 @@ def assert_locked_active_success_criterion_v2(success_criteria_v2: dict[str, Any
         }, ensure_ascii=False, indent=2))
 
 
-def prepare_split_preflight(
+def _prepare_split_preflight_core(
     *,
     cfg: dict[str, Any],
     sample_ids: list[str],
     device: torch.device,
     frozen_model: bridge.FrozenSemanticBridgeSuppressionModel,
+    enforce_frozen_scalar_rule: bool,
 ) -> dict[str, Any]:
     split_txt = bridge._resolve_repo_path((cfg.get("dataset") or {}).get("train_txt", DEFAULT_SOURCE_SPLIT), DEFAULT_SOURCE_SPLIT)
     records = bridge.mine_bridge_records_for_split(
@@ -1290,11 +1309,26 @@ def prepare_split_preflight(
     feature_rows, features_t, targets_t, pixel_remove_masks = gate_v4.extract_gate_feature_rows(annotated, logits)
     hard_gate_state_cache, cache_timing = gate_v4.build_hard_gate_state_cache(annotated, pixel_remove_masks)
     gate_model = gate_v4.build_gate_model_from_cfg(cfg, input_dim=int(features_t.shape[1]))
-    selector_audit = train_only_balanced_accuracy_selector_v1(
+    selector_audit = run_train_only_balanced_accuracy_selector_v1(
         feature_rows,
         extra_thresholds=[float(FROZEN_SIMPLE_SCALAR_RULE["threshold"])],
     )
     selector_semantics_comparison = compare_train_only_selector_semantics(feature_rows)
+    simple_scalar_rule = {
+        "selection_version": TRAIN_SCALAR_SELECTION_VERSION,
+        "train_simple_gate_threshold_exists": bool(selector_audit["selected_rule"] is not None),
+        "selected_rule": dict(FROZEN_SIMPLE_SCALAR_RULE),
+        "selection_uses_validation_labels": False,
+        "selector_audit": selector_audit,
+    }
+    frozen_rule_validation = {
+        "matches_frozen_rule": False,
+        "frozen_rule_reproduced": False,
+        "expected_rule": dict(FROZEN_SIMPLE_SCALAR_RULE),
+        "actual_rule": dict(selector_audit["selected_rule"]) if selector_audit["selected_rule"] is not None else None,
+    }
+    if bool(enforce_frozen_scalar_rule):
+        frozen_rule_validation = validate_frozen_scalar_rule(selector_audit)
     runtime_report = micro_runner._build_runtime_device_report(
         cfg=cfg,
         prepared={
@@ -1320,7 +1354,8 @@ def prepare_split_preflight(
         "cache_timing": cache_timing,
         "state_summary": summarize_hard_gate_states(records, hard_gate_state_cache),
         "runtime_report": runtime_report,
-        "simple_scalar_rule": select_train_only_scalar_rule(feature_rows),
+        "simple_scalar_rule": simple_scalar_rule,
+        "frozen_rule_validation": frozen_rule_validation,
         "selector_input_rows": list(selector_audit["selector_input_rows"]),
         "selector_audit": {
             **selector_audit,
@@ -1332,6 +1367,22 @@ def prepare_split_preflight(
             },
         },
     }
+
+
+def prepare_split_preflight(
+    *,
+    cfg: dict[str, Any],
+    sample_ids: list[str],
+    device: torch.device,
+    frozen_model: bridge.FrozenSemanticBridgeSuppressionModel,
+) -> dict[str, Any]:
+    return _prepare_split_preflight_core(
+        cfg=cfg,
+        sample_ids=sample_ids,
+        device=device,
+        frozen_model=frozen_model,
+        enforce_frozen_scalar_rule=True,
+    )
 
 
 def verify_source_contract(source_split: Path, expected_sha256: str) -> dict[str, Any]:
