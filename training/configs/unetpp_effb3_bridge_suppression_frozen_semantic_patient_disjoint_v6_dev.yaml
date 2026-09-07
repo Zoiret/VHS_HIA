@@ -1,0 +1,81 @@
+seed: 1337
+
+dataset:
+  root: datasets/converted_full_multiclass
+  train_txt: datasets/converted_full_multiclass_curated/train.txt
+  val_txt: datasets/converted_full_multiclass_curated/val.txt
+  test_txt: datasets/converted_full_multiclass_curated/test.txt
+  instance_root: datasets/converted_leaflet_instances
+
+model:
+  architecture: UnetPlusPlus
+  encoder_name: efficientnet-b3
+  encoder_weights: null
+  in_channels: 3
+  classes: 3
+  input_size: 768
+
+bridge_head:
+  context_projection_channels: 8
+  hidden_channels: 16
+  candidate_threshold: 0.50
+  remove_threshold: 0.50
+  x_0_4_path: base.decoder.blocks.x_0_4
+  x_2_2_path: base.decoder.blocks.x_2_2
+
+augment:
+  rotate90: true
+  hflip: true
+  vflip: true
+  brightness_contrast: true
+  gamma: true
+
+train:
+  save_dir: training/runs/unetpp_effb3_bridge_suppression_frozen_semantic_patient_disjoint_v6_dev
+  init_checkpoint: training/runs/unetpp_effb3_a100_multiclass_curated_finetune_stage2_lr1e5_100ep/best_mean_fg.pth
+  epochs: 100
+  batch_size: 16
+  lr: 0.001
+  lr_context_projection: 0.001
+  lr_bridge_head: 0.001
+  weight_decay: 0.00001
+  amp: true
+
+loss:
+  eps: 0.000001
+  lambda_negative_mean: 0.0
+  lambda_negative_hard: 0.0
+  negative_hard_topk_fraction: 0.01
+
+semantic_inference:
+  amp: false
+  matmul_allow_tf32: false
+  cudnn_allow_tf32: false
+  cudnn_benchmark: false
+  cudnn_deterministic: true
+
+development_split:
+  manifest_dir: training/manifests/bridge_presence_gate_v4_patient_disjoint_dev_v1
+  source_split: datasets/converted_full_multiclass_curated/train.txt
+  source_split_canonical_sha256: f5e920ffaf54c0a0034c457cf3c951f71e186a9f35e3fe67a5eee95737b2ee82
+  split_algorithm_version: patient_disjoint_bridge_presence_gate_v4_dev_v1
+  seed: 1337
+  preferred_val_patient_count: 5
+  fallback_val_patient_counts: [4, 6]
+
+analysis:
+  feature_audit_dir: training/analysis/bridge_suppression_head_v6_patient_disjoint_dev
+
+historical_v2_baseline:
+  checkpoint_path: training/runs/unetpp_effb3_bridge_suppression_frozen_semantic_micro_overfit_v2/best_reconstruction.pth
+  report_only: true
+
+experiment_notes:
+  purpose: Clean full-data V2 bridge-head patient-disjoint development experiment.
+  semantic_base_frozen: true
+  bridge_head_initialization: fresh_random_seed_1337
+  no_micro_overfit_v2_weight_loading: true
+  train_only_checkpoint_selection: true
+  reused_development_validation: true
+  no_test_usage: true
+  no_authoritative_holdout: true
