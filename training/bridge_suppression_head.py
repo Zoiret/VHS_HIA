@@ -947,7 +947,7 @@ def _collect_batchnorm_stats(model: nn.Module) -> list[tuple[str, torch.Tensor, 
         if running_mean is None or running_var is None:
             continue
         if torch.is_tensor(running_mean) and torch.is_tensor(running_var):
-            out.append((name, running_mean.detach().clone(), running_var.detach().clone()))
+            out.append((name, running_mean.detach().cpu().clone(), running_var.detach().cpu().clone()))
     return out
 
 
@@ -962,14 +962,18 @@ def _max_bn_delta(model: nn.Module, ref: list[tuple[str, torch.Tensor, torch.Ten
         running_var = getattr(module, "running_var", None)
         if running_mean is None or running_var is None:
             continue
-        d1 = float((running_mean.detach() - mean_ref).abs().max().item()) if running_mean.numel() else 0.0
-        d2 = float((running_var.detach() - var_ref).abs().max().item()) if running_var.numel() else 0.0
+        live_mean = running_mean.detach().cpu()
+        live_var = running_var.detach().cpu()
+        ref_mean = mean_ref.detach().cpu()
+        ref_var = var_ref.detach().cpu()
+        d1 = float((live_mean - ref_mean).abs().max().item()) if live_mean.numel() else 0.0
+        d2 = float((live_var - ref_var).abs().max().item()) if live_var.numel() else 0.0
         max_delta = max(max_delta, d1, d2)
     return float(max_delta)
 
 
 def _snapshot_named_parameters(named_params: list[tuple[str, torch.nn.Parameter]]) -> dict[str, torch.Tensor]:
-    return {str(name): param.detach().clone() for name, param in named_params}
+    return {str(name): param.detach().cpu().clone() for name, param in named_params}
 
 
 def _max_parameter_delta_from_snapshot(named_params: list[tuple[str, torch.nn.Parameter]], snap: dict[str, torch.Tensor]) -> float:
@@ -978,7 +982,9 @@ def _max_parameter_delta_from_snapshot(named_params: list[tuple[str, torch.nn.Pa
         ref = snap.get(str(name), None)
         if ref is None:
             continue
-        delta = float((param.detach() - ref).abs().max().item()) if param.numel() else 0.0
+        live = param.detach().cpu()
+        reference = ref.detach().cpu()
+        delta = float((live - reference).abs().max().item()) if live.numel() else 0.0
         max_delta = max(max_delta, delta)
     return float(max_delta)
 

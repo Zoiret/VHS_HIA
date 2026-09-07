@@ -1155,16 +1155,15 @@ def snapshot_frozen_backbone_state(model: bridge.FrozenSemanticBridgeSuppression
 
 
 def frozen_backbone_invariant_deltas(model: bridge.FrozenSemanticBridgeSuppressionModel, snapshot: dict[str, Any]) -> dict[str, Any]:
+    bridge_head_deltas = [
+        float(torch.max(torch.abs(param.detach().cpu() - snapshot["params"][name].detach().cpu())).item())
+        for name, param in model.named_parameters()
+        if "bridge_head" in str(name)
+    ]
     return {
         "semantic_parameter_max_delta": float(bridge._max_parameter_delta_from_snapshot(snapshot["named"], snapshot["params"])),
         "semantic_bn_state_max_delta": float(bridge._max_bn_delta(model.base, snapshot["bn"])),
-        "v2_pixel_head_parameter_max_delta": float(
-            max(
-                float(torch.max(torch.abs(param.detach().cpu() - snapshot["params"][name])).item())
-                for name, param in model.named_parameters()
-                if "bridge_head" in str(name)
-            ) if any("bridge_head" in str(name) for name, _ in model.named_parameters()) else 0.0
-        ),
+        "v2_pixel_head_parameter_max_delta": float(max(bridge_head_deltas) if bridge_head_deltas else 0.0),
     }
 
 

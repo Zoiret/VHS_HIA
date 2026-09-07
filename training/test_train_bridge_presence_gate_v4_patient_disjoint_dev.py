@@ -14,6 +14,7 @@ if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
 import bridge_presence_gate_v4_patient_disjoint_dev as dev
+import bridge_suppression_head as bridge_head
 import bridge_suppression_head as bridge
 import train_bridge_presence_gate_v4_patient_disjoint_dev as runner
 
@@ -247,6 +248,82 @@ class TestTrainBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
             dev.assert_locked_active_success_criterion_v2(
                 {"utility": {"positive_success50_min": 3, "positive_mean_matched_iou_min": 0.4}, "safety": {"negative_regressions": 0, "negative_topology_changes": 0}}
             )
+
+    def test_snapshot_named_parameters_are_detached_cpu_clones(self):
+        layer = torch.nn.Linear(3, 2)
+        snap = bridge_head._snapshot_named_parameters(list(layer.named_parameters()))
+        for name, param in layer.named_parameters():
+            self.assertEqual(snap[name].device.type, "cpu")
+            self.assertFalse(snap[name].requires_grad)
+            self.assertNotEqual(snap[name].data_ptr(), param.detach().cpu().data_ptr())
+
+    def test_collect_batchnorm_stats_are_detached_cpu_clones(self):
+        bn = torch.nn.BatchNorm2d(2)
+        stats = bridge_head._collect_batchnorm_stats(bn)
+        self.assertEqual(len(stats), 1)
+        _name, running_mean, running_var = stats[0]
+        self.assertEqual(running_mean.device.type, "cpu")
+        self.assertEqual(running_var.device.type, "cpu")
+        self.assertFalse(running_mean.requires_grad)
+        self.assertFalse(running_var.requires_grad)
+
+    def test_max_parameter_delta_from_cpu_snapshot_is_zero_for_unchanged_cpu_model(self):
+        layer = torch.nn.Linear(3, 2)
+        named = list(layer.named_parameters())
+        snap = bridge_head._snapshot_named_parameters(named)
+        self.assertEqual(bridge_head._max_parameter_delta_from_snapshot(named, snap), 0.0)
+
+    def test_invariant_delta_zero_for_unchanged_model(self):
+        model = mock.Mock()
+        model.base = torch.nn.Sequential(torch.nn.BatchNorm2d(2))
+        model.bridge_head = torch.nn.Conv2d(2, 1, kernel_size=1)
+        model.named_parameters = lambda: list(model.base.named_parameters()) + [(f"bridge_head.{k}", v) for k, v in model.bridge_head.named_parameters()]
+        snapshot = dev.snapshot_frozen_backbone_state(model)
+        deltas = dev.frozen_backbone_invariant_deltas(model, snapshot)
+        self.assertEqual(deltas["semantic_parameter_max_delta"], 0.0)
+        self.assertEqual(deltas["semantic_bn_state_max_delta"], 0.0)
+        self.assertEqual(deltas["v2_pixel_head_parameter_max_delta"], 0.0)
+
+    def test_invariant_delta_detects_parameter_mutation(self):
+        model = mock.Mock()
+        model.base = torch.nn.Sequential(torch.nn.BatchNorm2d(2))
+        model.bridge_head = torch.nn.Conv2d(2, 1, kernel_size=1)
+        model.named_parameters = lambda: list(model.base.named_parameters()) + [(f"bridge_head.{k}", v) for k, v in model.bridge_head.named_parameters()]
+        snapshot = dev.snapshot_frozen_backbone_state(model)
+        with torch.no_grad():
+            model.base[0].weight.add_(1.0)
+        deltas = dev.frozen_backbone_invariant_deltas(model, snapshot)
+        self.assertGreater(deltas["semantic_parameter_max_delta"], 0.0)
+
+    def test_invariant_delta_detects_bn_buffer_mutation(self):
+        model = mock.Mock()
+        model.base = torch.nn.Sequential(torch.nn.BatchNorm2d(2))
+        model.bridge_head = torch.nn.Conv2d(2, 1, kernel_size=1)
+        model.named_parameters = lambda: list(model.base.named_parameters()) + [(f"bridge_head.{k}", v) for k, v in model.bridge_head.named_parameters()]
+        snapshot = dev.snapshot_frozen_backbone_state(model)
+        with torch.no_grad():
+            model.base[0].running_mean.add_(1.0)
+        deltas = dev.frozen_backbone_invariant_deltas(model, snapshot)
+        self.assertGreater(deltas["semantic_bn_state_max_delta"], 0.0)
+
+    def test_validation_is_not_invoked_before_invariant_verification(self):
+        prepared = self._fake_prepared()
+        with mock.patch.object(runner, "_prepare_training_inputs_core", return_value=prepared), \
+             mock.patch.object(dev, "assert_locked_val_references"), \
+             mock.patch.object(dev, "assert_locked_active_success_criterion_v2"), \
+             mock.patch.object(dev, "snapshot_frozen_backbone_state", return_value={"named": [], "params": {}, "bn": {}}), \
+             mock.patch.object(dev, "frozen_backbone_invariant_deltas", side_effect=SystemExit("invariant failure")), \
+             mock.patch.object(runner, "_train_only_run", return_value={"best_train_loss": 0.1, "best_train_loss_step": 1, "history": [], "optimizer_name": "AdamW", "max_steps": 300}), \
+             mock.patch.object(runner, "_load_gate_checkpoint", return_value={"step": 300}), \
+             mock.patch.object(runner, "_evaluate_split") as eval_mock:
+            with tempfile.TemporaryDirectory() as td:
+                cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_patient_disjoint_dev_v1.yaml")
+                cfg = dict(cfg)
+                cfg["train"] = dict(cfg["train"])
+                cfg["train"]["save_dir"] = str(Path(td) / "run")
+                with self.assertRaises(SystemExit):
+                    runner.run_pipeline(cfg)
+        eval_mock.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -350,6 +350,9 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         prepared["train_prepared"]["gate_model"].to(prepared["device"]),
         prepared["device"],
     )
+    invariants = dev.frozen_backbone_invariant_deltas(prepared["frozen_model"], frozen_snapshot)
+    invariants["cached_v2_logits_unchanged"] = bool(torch.equal(frozen_logits_before.cpu(), prepared["train_prepared"]["frozen_logits"].cpu()))
+    invariants["manifest_unchanged"] = True
     train_gate_probs = _gate_probabilities(
         prepared["train_prepared"]["gate_model"],
         prepared["train_prepared"]["features_t"],
@@ -373,9 +376,6 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         gate_probs=val_gate_probs,
         success_criteria_v2=prepared["success_criteria_v2"],
     )
-    invariants = dev.frozen_backbone_invariant_deltas(prepared["frozen_model"], frozen_snapshot)
-    invariants["cached_v2_logits_unchanged"] = bool(torch.equal(frozen_logits_before.cpu(), prepared["train_prepared"]["frozen_logits"].cpu()))
-    invariants["manifest_unchanged"] = True
     _save_csv(save_dir / "gate_train_per_sample.csv", train_eval["trained_v4"]["per_sample_detailed"])
     _save_csv(save_dir / "gate_val_per_sample.csv", val_eval["trained_v4"]["per_sample_detailed"])
     bridge._write_json(save_dir / "gate_train_patient_level_exploratory.json", train_eval["trained_v4"]["patient_level_exploratory"])
