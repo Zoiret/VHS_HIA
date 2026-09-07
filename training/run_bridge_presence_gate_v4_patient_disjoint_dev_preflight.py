@@ -198,6 +198,9 @@ def run_pipeline(cfg: dict[str, Any], *, manifest_only: bool = False) -> dict[st
                 "selector_input_summary": train_prepared["selector_audit"]["selector_input_summary"],
                 "selector_max_balanced_accuracy": float(train_prepared["selector_audit"]["max_balanced_accuracy"]),
                 "selector_tied_best_threshold_count": int(len(train_prepared["selector_audit"]["tied_best_thresholds"])),
+                "selector_neighbor_audit": train_prepared["selector_audit"]["neighbor_audit"],
+                "selector_observed_value_reference": train_prepared["selector_audit"]["observed_value_selector_reference"]["selected_rule"],
+                "selector_midpoint_vs_observed": train_prepared["selector_audit"]["midpoint_vs_observed_comparison"],
                 "cache_construction_time_seconds": float(train_prepared["cache_timing"]["total_seconds"]),
             },
             "gate_val": {

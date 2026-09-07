@@ -84,6 +84,7 @@ FROZEN_SIMPLE_SCALAR_RULE = {
 TRAIN_ONLY_SELECTOR_SCALAR = "candidate_fraction"
 TRAIN_ONLY_SELECTOR_DIRECTION = "ge"
 SELECTOR_SENTINEL_EPS = 1.0e-9
+TRAIN_SELECTOR_CROP_AREA_PIXELS = 768 * 768
 
 
 def _read_source_split_entries(path: Path) -> list[dict[str, str]]:
@@ -602,6 +603,7 @@ def evaluate_train_only_selector_candidate(
     threshold: float,
     direction: str = TRAIN_ONLY_SELECTOR_DIRECTION,
     scalar: str = TRAIN_ONLY_SELECTOR_SCALAR,
+    include_prediction_vector: bool = False,
 ) -> dict[str, Any]:
     values = np.asarray([float(row[scalar]) for row in selector_rows], dtype=np.float64)
     labels = np.asarray([int(row["bridge_target"]) for row in selector_rows], dtype=np.int64)
@@ -626,15 +628,184 @@ def evaluate_train_only_selector_candidate(
         "specificity": specificity,
         "balanced_accuracy": 0.5 * (sensitivity + specificity),
     }
+    if include_prediction_vector:
+        out["prediction_vector"] = [int(v) for v in pred.tolist()]
+    return out
 
 
-def _selector_tiebreak_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+def _observed_selector_tiebreak_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
     threshold = float(candidate["threshold"])
     kind = str(candidate.get("threshold_kind", "observed"))
     kind_rank = 0 if kind == "observed" else 1
     if str(candidate["direction"]) == "ge":
         return (kind_rank, -threshold)
     return (kind_rank, threshold)
+
+
+def _build_midpoint_threshold_candidates(values: np.ndarray) -> list[tuple[str, float]]:
+    unique = np.unique(values)
+    thresholds: list[tuple[str, float]] = [("sentinel_low", float(unique[0] - SELECTOR_SENTINEL_EPS))]
+    thresholds.extend(("midpoint", float((a + b) / 2.0)) for a, b in zip(unique[:-1], unique[1:]))
+    thresholds.append(("sentinel_high", float(unique[-1] + SELECTOR_SENTINEL_EPS)))
+    return thresholds
+
+
+def _build_observed_threshold_candidates(values: np.ndarray) -> list[tuple[str, float]]:
+    unique = np.unique(values)
+    thresholds: list[tuple[str, float]] = [("sentinel_low", float(unique[0] - SELECTOR_SENTINEL_EPS))]
+    thresholds.extend(("observed", float(v)) for v in unique.tolist())
+    thresholds.append(("sentinel_high", float(unique[-1] + SELECTOR_SENTINEL_EPS)))
+    return thresholds
+
+
+def _infer_candidate_pixels(candidate_fraction: float, crop_area_pixels: int = TRAIN_SELECTOR_CROP_AREA_PIXELS) -> int:
+    return int(round(float(candidate_fraction) * int(crop_area_pixels)))
+
+
+def audit_selector_threshold_neighbors(
+    selector_rows: list[dict[str, Any]],
+    *,
+    threshold: float,
+    upper_probe_threshold: float | None = None,
+    crop_area_pixels: int = TRAIN_SELECTOR_CROP_AREA_PIXELS,
+) -> dict[str, Any]:
+    values = np.asarray([float(row[TRAIN_ONLY_SELECTOR_SCALAR]) for row in selector_rows], dtype=np.float64)
+    unique = np.unique(values)
+    lower_values = unique[unique < float(threshold)]
+    upper_values = unique[unique > float(threshold)]
+    lower_value = float(lower_values[-1]) if lower_values.size else None
+    upper_value = float(upper_values[0]) if upper_values.size else None
+
+    def _matching_rows(value: float | None) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in selector_rows:
+            if abs(float(row[TRAIN_ONLY_SELECTOR_SCALAR]) - float(value)) <= 0.0:
+                out.append(
+                    {
+                        "sample_id": str(row["sample_id"]),
+                        "patient_id": str(row["patient_id"]),
+                        "bridge_target": int(row["bridge_target"]),
+                    }
+                )
+        return out
+
+    exact_midpoint = float((float(lower_value) + float(upper_value)) / 2.0) if lower_value is not None and upper_value is not None else None
+    upper_bound = float(upper_probe_threshold) if upper_probe_threshold is not None else (float(upper_value) if upper_value is not None else float(threshold))
+    values_between = [float(v) for v in unique.tolist() if float(threshold) < float(v) < float(upper_bound)]
+    return {
+        "lower_observed_fraction": lower_value,
+        "lower_candidate_pixels": _infer_candidate_pixels(lower_value, crop_area_pixels) if lower_value is not None else None,
+        "lower_samples": _matching_rows(lower_value),
+        "upper_observed_fraction": upper_value,
+        "upper_candidate_pixels": _infer_candidate_pixels(upper_value, crop_area_pixels) if upper_value is not None else None,
+        "upper_samples": _matching_rows(upper_value),
+        "exact_midpoint": exact_midpoint,
+        "frozen_threshold": float(threshold),
+        "midpoint_difference": None if exact_midpoint is None else float(exact_midpoint - float(threshold)),
+        "train_values_strictly_between_frozen_and_upper": values_between,
+        "any_train_value_strictly_between_frozen_and_upper": bool(values_between),
+    }
+
+
+def train_only_observed_value_selector_reference(
+    feature_rows: list[dict[str, Any]],
+    *,
+    extra_thresholds: list[float] | None = None,
+) -> dict[str, Any]:
+    selector_rows = build_train_only_selector_input_rows(feature_rows)
+    summary = summarize_selector_input_rows(selector_rows)
+    values = np.asarray([float(row[TRAIN_ONLY_SELECTOR_SCALAR]) for row in selector_rows], dtype=np.float64)
+    if values.size == 0:
+        raise SystemExit("Observed-value selector reference cannot run on an empty selector input table.")
+    candidates: list[dict[str, Any]] = []
+    for evaluation_order, (kind, threshold) in enumerate(_build_observed_threshold_candidates(values), start=1):
+        current = evaluate_train_only_selector_candidate(
+            selector_rows,
+            threshold=float(threshold),
+            direction=TRAIN_ONLY_SELECTOR_DIRECTION,
+            scalar=TRAIN_ONLY_SELECTOR_SCALAR,
+            include_prediction_vector=True,
+        )
+        current["threshold_kind"] = str(kind)
+        current["evaluation_order"] = int(evaluation_order)
+        candidates.append(current)
+    max_balanced_accuracy = max(float(candidate["balanced_accuracy"]) for candidate in candidates)
+    tied_best = [
+        dict(candidate)
+        for candidate in candidates
+        if abs(float(candidate["balanced_accuracy"]) - float(max_balanced_accuracy)) <= 1.0e-12
+    ]
+    tied_best = sorted(tied_best, key=_observed_selector_tiebreak_key)
+    for rank, candidate in enumerate(tied_best, start=1):
+        candidate["deterministic_tie_break_rank"] = int(rank)
+    probes: list[dict[str, Any]] = []
+    for threshold in (extra_thresholds or []):
+        current = evaluate_train_only_selector_candidate(
+            selector_rows,
+            threshold=float(threshold),
+            direction=TRAIN_ONLY_SELECTOR_DIRECTION,
+            scalar=TRAIN_ONLY_SELECTOR_SCALAR,
+            include_prediction_vector=True,
+        )
+        current["threshold_kind"] = "explicit_probe"
+        probes.append(current)
+    return {
+        "selection_version": TRAIN_SCALAR_SELECTION_VERSION,
+        "selector_algorithm": {
+            "scalar": TRAIN_ONLY_SELECTOR_SCALAR,
+            "direction": TRAIN_ONLY_SELECTOR_DIRECTION,
+            "candidate_thresholds": "observed_values_plus_boundary_sentinels",
+            "tie_break_rule": "max_balanced_accuracy_then_observed_threshold_then_highest_threshold_for_ge",
+            "row_order": "sorted_by_sample_id",
+        },
+        "selector_input_rows": selector_rows,
+        "selector_input_summary": summary,
+        "max_balanced_accuracy": float(max_balanced_accuracy),
+        "tied_best_thresholds": tied_best,
+        "selected_rule": dict(tied_best[0]) if tied_best else None,
+        "specific_threshold_checks": probes,
+    }
+
+
+def compare_train_only_selector_semantics(feature_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    midpoint = train_only_balanced_accuracy_selector_v1(feature_rows, extra_thresholds=[float(FROZEN_SIMPLE_SCALAR_RULE["threshold"])])
+    observed = train_only_observed_value_selector_reference(feature_rows, extra_thresholds=[float(FROZEN_SIMPLE_SCALAR_RULE["threshold"])])
+    midpoint_rule = midpoint["selected_rule"]
+    observed_rule = observed["selected_rule"]
+    differing_samples: list[dict[str, Any]] = []
+    midpoint_pred = list(midpoint_rule.get("prediction_vector") or []) if midpoint_rule is not None else []
+    observed_pred = list(observed_rule.get("prediction_vector") or []) if observed_rule is not None else []
+    selector_rows = list(midpoint["selector_input_rows"])
+    for idx, row in enumerate(selector_rows):
+        if idx >= len(midpoint_pred) or idx >= len(observed_pred):
+            break
+        if int(midpoint_pred[idx]) != int(observed_pred[idx]):
+            differing_samples.append(
+                {
+                    "sample_id": str(row["sample_id"]),
+                    "patient_id": str(row["patient_id"]),
+                    "bridge_target": int(row["bridge_target"]),
+                    "candidate_fraction": float(row["candidate_fraction"]),
+                    "midpoint_prediction": int(midpoint_pred[idx]),
+                    "observed_prediction": int(observed_pred[idx]),
+                }
+            )
+    upper_probe_threshold = None
+    if observed_rule is not None:
+        upper_probe_threshold = float(observed_rule["threshold"])
+    return {
+        "midpoint_selector": midpoint,
+        "observed_value_selector": observed,
+        "train_predictions_identical": bool(midpoint_pred == observed_pred),
+        "differing_train_samples": differing_samples,
+        "neighbor_audit": audit_selector_threshold_neighbors(
+            selector_rows,
+            threshold=float(FROZEN_SIMPLE_SCALAR_RULE["threshold"]),
+            upper_probe_threshold=upper_probe_threshold,
+        ),
+    }
 
 
 def train_only_balanced_accuracy_selector_v1(
@@ -647,19 +818,17 @@ def train_only_balanced_accuracy_selector_v1(
     values = np.asarray([float(row[TRAIN_ONLY_SELECTOR_SCALAR]) for row in selector_rows], dtype=np.float64)
     if values.size == 0:
         raise SystemExit("TRAIN-only selector cannot run on an empty selector input table.")
-    unique = np.unique(values)
-    thresholds: list[tuple[str, float]] = [("sentinel_low", float(unique[0] - SELECTOR_SENTINEL_EPS))]
-    thresholds.extend(("observed", float(v)) for v in unique.tolist())
-    thresholds.append(("sentinel_high", float(unique[-1] + SELECTOR_SENTINEL_EPS)))
     candidates: list[dict[str, Any]] = []
-    for kind, threshold in thresholds:
+    for evaluation_order, (kind, threshold) in enumerate(_build_midpoint_threshold_candidates(values), start=1):
         current = evaluate_train_only_selector_candidate(
             selector_rows,
             threshold=float(threshold),
             direction=TRAIN_ONLY_SELECTOR_DIRECTION,
             scalar=TRAIN_ONLY_SELECTOR_SCALAR,
+            include_prediction_vector=True,
         )
         current["threshold_kind"] = str(kind)
+        current["evaluation_order"] = int(evaluation_order)
         candidates.append(current)
     max_balanced_accuracy = max(float(candidate["balanced_accuracy"]) for candidate in candidates)
     tied_best = [
@@ -667,7 +836,7 @@ def train_only_balanced_accuracy_selector_v1(
         for candidate in candidates
         if abs(float(candidate["balanced_accuracy"]) - float(max_balanced_accuracy)) <= 1.0e-12
     ]
-    tied_best = sorted(tied_best, key=_selector_tiebreak_key)
+    tied_best = sorted(tied_best, key=lambda candidate: int(candidate["evaluation_order"]))
     for rank, candidate in enumerate(tied_best, start=1):
         candidate["deterministic_tie_break_rank"] = int(rank)
     specific_threshold_checks = []
@@ -677,6 +846,7 @@ def train_only_balanced_accuracy_selector_v1(
             threshold=float(threshold),
             direction=TRAIN_ONLY_SELECTOR_DIRECTION,
             scalar=TRAIN_ONLY_SELECTOR_SCALAR,
+            include_prediction_vector=True,
         )
         current["threshold_kind"] = "explicit_probe"
         specific_threshold_checks.append(current)
@@ -685,8 +855,8 @@ def train_only_balanced_accuracy_selector_v1(
         "selector_algorithm": {
             "scalar": TRAIN_ONLY_SELECTOR_SCALAR,
             "direction": TRAIN_ONLY_SELECTOR_DIRECTION,
-            "candidate_thresholds": "observed_values_plus_boundary_sentinels",
-            "tie_break_rule": "max_balanced_accuracy_then_observed_threshold_then_highest_threshold_for_ge",
+            "candidate_thresholds": "midpoints_between_sorted_unique_values_plus_boundary_sentinels",
+            "tie_break_rule": "first_best_in_ascending_threshold_order_for_fixed_candidate_fraction_ge",
             "row_order": "sorted_by_sample_id",
         },
         "selector_input_rows": selector_rows,
@@ -1124,6 +1294,7 @@ def prepare_split_preflight(
         feature_rows,
         extra_thresholds=[float(FROZEN_SIMPLE_SCALAR_RULE["threshold"])],
     )
+    selector_semantics_comparison = compare_train_only_selector_semantics(feature_rows)
     runtime_report = micro_runner._build_runtime_device_report(
         cfg=cfg,
         prepared={
@@ -1151,7 +1322,15 @@ def prepare_split_preflight(
         "runtime_report": runtime_report,
         "simple_scalar_rule": select_train_only_scalar_rule(feature_rows),
         "selector_input_rows": list(selector_audit["selector_input_rows"]),
-        "selector_audit": selector_audit,
+        "selector_audit": {
+            **selector_audit,
+            "neighbor_audit": selector_semantics_comparison["neighbor_audit"],
+            "observed_value_selector_reference": selector_semantics_comparison["observed_value_selector"],
+            "midpoint_vs_observed_comparison": {
+                "train_predictions_identical": bool(selector_semantics_comparison["train_predictions_identical"]),
+                "differing_train_samples": list(selector_semantics_comparison["differing_train_samples"]),
+            },
+        },
     }
 
 

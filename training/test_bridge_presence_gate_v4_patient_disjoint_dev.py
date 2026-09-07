@@ -196,22 +196,72 @@ class TestBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
         self.assertEqual(a["selected_rule"]["threshold"], b["selected_rule"]["threshold"])
         self.assertEqual(a["selected_rule"]["direction"], b["selected_rule"]["direction"])
 
-    def test_selector_tie_break_prefers_observed_higher_ge_threshold(self):
-        low = 0.0464257225394249
-        high = 0.1541646271944046
+    def test_exact_midpoint_construction(self):
+        low = 0.1538984477519989
+        high = 0.1544308066368103
+        thresholds = dev._build_midpoint_threshold_candidates(np.asarray([low, high], dtype=np.float64))
+        self.assertEqual(thresholds[1][0], "midpoint")
+        self.assertAlmostEqual(thresholds[1][1], dev.FROZEN_SIMPLE_SCALAR_RULE["threshold"])
+
+    def test_frozen_threshold_reproduced_by_midpoint_selector(self):
+        low = 0.1538984477519989
+        high = 0.1544308066368103
         feature_rows = [
             {"sample_id": "n1", "bridge_positive_target": 0, "candidate_fraction": low},
             {"sample_id": "p1", "bridge_positive_target": 1, "candidate_fraction": high},
         ]
         audit = dev.train_only_balanced_accuracy_selector_v1(
             feature_rows,
-            extra_thresholds=[0.10029517486691475, high],
+            extra_thresholds=[dev.FROZEN_SIMPLE_SCALAR_RULE["threshold"], high],
         )
-        self.assertEqual(audit["selected_rule"]["threshold"], high)
+        self.assertEqual(audit["selected_rule"]["threshold"], dev.FROZEN_SIMPLE_SCALAR_RULE["threshold"])
         self.assertEqual(len(audit["tied_best_thresholds"]), 1)
         checks = {round(float(row["threshold"]), 15): row for row in audit["specific_threshold_checks"]}
-        self.assertAlmostEqual(checks[round(0.10029517486691475, 15)]["balanced_accuracy"], 1.0)
+        self.assertAlmostEqual(checks[round(dev.FROZEN_SIMPLE_SCALAR_RULE["threshold"], 15)]["balanced_accuracy"], 1.0)
         self.assertAlmostEqual(checks[round(high, 15)]["balanced_accuracy"], 1.0)
+
+    def test_midpoint_selector_matches_historical_helper_on_candidate_fraction_case(self):
+        low = 0.1538984477519989
+        high = 0.1544308066368103
+        feature_rows = []
+        for sample_id, target, frac in (("n1", 0, low), ("p1", 1, high)):
+            row = {
+                "sample_id": sample_id,
+                "bridge_positive_target": target,
+                "candidate_fraction": frac,
+            }
+            for name in gate_v4.SCALAR_FEATURE_NAMES:
+                row.setdefault(name, 0.0)
+            row["candidate_fraction"] = frac
+            feature_rows.append(row)
+        historical = gate_v4.simple_scalar_threshold_audit(feature_rows)
+        restored = dev.train_only_balanced_accuracy_selector_v1(feature_rows)
+        self.assertEqual(historical["best_scalar"]["scalar"], restored["selected_rule"]["scalar"])
+        self.assertEqual(historical["best_scalar"]["direction"], restored["selected_rule"]["direction"])
+        self.assertAlmostEqual(historical["best_scalar"]["threshold"], restored["selected_rule"]["threshold"])
+
+    def test_lower_upper_observed_neighbor_audit(self):
+        low = 0.1538984477519989
+        high = 0.1544308066368103
+        feature_rows = [
+            {"sample_id": "n1", "bridge_positive_target": 0, "candidate_fraction": low},
+            {"sample_id": "p1", "bridge_positive_target": 1, "candidate_fraction": high},
+        ]
+        rows = dev.build_train_only_selector_input_rows(feature_rows)
+        audit = dev.audit_selector_threshold_neighbors(
+            rows,
+            threshold=dev.FROZEN_SIMPLE_SCALAR_RULE["threshold"],
+            upper_probe_threshold=high,
+        )
+        self.assertAlmostEqual(audit["lower_observed_fraction"], low)
+        self.assertEqual(audit["lower_candidate_pixels"], 90773)
+        self.assertEqual(audit["lower_samples"][0]["sample_id"], "n1")
+        self.assertAlmostEqual(audit["upper_observed_fraction"], high)
+        self.assertEqual(audit["upper_candidate_pixels"], 91087)
+        self.assertEqual(audit["upper_samples"][0]["sample_id"], "p1")
+        self.assertAlmostEqual(audit["exact_midpoint"], dev.FROZEN_SIMPLE_SCALAR_RULE["threshold"])
+        self.assertAlmostEqual(audit["midpoint_difference"], 0.0)
+        self.assertEqual(audit["train_values_strictly_between_frozen_and_upper"], [])
 
     def test_selector_dtype_invariance(self):
         rows32 = [
@@ -239,14 +289,35 @@ class TestBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
         self.assertEqual(out["differing_samples"][0]["sample_id"], "a")
 
     def test_exact_shared_selector_reuse_and_no_validation_label_access(self):
+        low = 0.1538984477519989
+        high = 0.1544308066368103
         feature_rows = [
-            {"sample_id": "a", "bridge_positive_target": 1, "candidate_fraction": 0.1541646271944046},
-            {"sample_id": "b", "bridge_positive_target": 0, "candidate_fraction": 0.0464257225394249},
+            {"sample_id": "a", "bridge_positive_target": 1, "candidate_fraction": high},
+            {"sample_id": "b", "bridge_positive_target": 0, "candidate_fraction": low},
         ]
         with mock.patch.object(dev, "train_only_balanced_accuracy_selector_v1", wraps=dev.train_only_balanced_accuracy_selector_v1) as selector_mock:
             out = dev.select_train_only_scalar_rule(feature_rows)
         selector_mock.assert_called_once()
         self.assertFalse(out["selection_uses_validation_labels"])
+
+    def test_midpoint_vs_observed_prediction_equivalence_where_applicable(self):
+        low = 0.1538984477519989
+        high = 0.1544308066368103
+        feature_rows = [
+            {"sample_id": "n1", "bridge_positive_target": 0, "candidate_fraction": low},
+            {"sample_id": "p1", "bridge_positive_target": 1, "candidate_fraction": high},
+        ]
+        comparison = dev.compare_train_only_selector_semantics(feature_rows)
+        self.assertEqual(
+            comparison["midpoint_selector"]["selected_rule"]["threshold"],
+            dev.FROZEN_SIMPLE_SCALAR_RULE["threshold"],
+        )
+        self.assertEqual(
+            comparison["observed_value_selector"]["selected_rule"]["threshold"],
+            high,
+        )
+        self.assertTrue(comparison["train_predictions_identical"])
+        self.assertEqual(comparison["differing_train_samples"], [])
 
     def test_predeclared_success_criteria_serialized_before_training(self):
         criteria = dev.build_predeclared_success_criteria_v1(
