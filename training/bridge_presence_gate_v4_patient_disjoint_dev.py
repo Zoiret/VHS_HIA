@@ -481,8 +481,9 @@ def compute_safe_two_state_oracle(hard_gate_state_cache: list[dict[str, Any]]) -
 
 
 def select_train_only_scalar_rule(train_feature_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    audit = run_train_only_balanced_accuracy_selector_v1(train_feature_rows)
-    validate_frozen_scalar_rule(audit)
+    selector_input_rows = build_train_only_selector_input_rows(train_feature_rows)
+    audit = run_train_only_balanced_accuracy_selector_v1(selector_input_rows)
+    validate_frozen_scalar_rule(audit, caller="select_train_only_scalar_rule", source_function="select_train_only_scalar_rule")
     return {
         "selection_version": TRAIN_SCALAR_SELECTION_VERSION,
         "train_simple_gate_threshold_exists": bool(audit["selected_rule"] is not None),
@@ -496,24 +497,54 @@ def build_train_only_selector_input_rows(feature_rows: list[dict[str, Any]]) -> 
     rows: list[dict[str, Any]] = []
     for row in feature_rows:
         sample_id = str(row["sample_id"])
+        candidate_pixels = row.get("candidate_pixels")
+        if candidate_pixels is None:
+            candidate_pixels = _infer_candidate_pixels(float(row[TRAIN_ONLY_SELECTOR_SCALAR]))
+        denominator = row.get("candidate_fraction_denominator")
+        if denominator is None:
+            denominator = int(TRAIN_SELECTOR_CROP_AREA_PIXELS)
         rows.append(
             {
                 "sample_id": sample_id,
-                "patient_id": bridge._make_patient_id(sample_id),
+                "patient_id": str(row.get("patient_id", bridge._make_patient_id(sample_id))),
+                "gt_count": int(row.get("gt_count", 0)),
                 "bridge_target": int(row["bridge_positive_target"]),
+                "candidate_pixels": int(candidate_pixels),
+                "candidate_fraction_denominator": int(denominator),
                 "candidate_fraction": float(np.float64(float(row[TRAIN_ONLY_SELECTOR_SCALAR]))),
             }
         )
     return sorted(rows, key=lambda row: str(row["sample_id"]))
 
 
-def _selector_input_sha256(rows: list[dict[str, Any]]) -> str:
+def _scientific_selector_input_sha256(rows: list[dict[str, Any]]) -> str:
     lines = [
         "\t".join(
             [
                 str(row["sample_id"]),
                 str(row["patient_id"]),
+                str(int(row["gt_count"])),
                 str(int(row["bridge_target"])),
+                str(int(row["candidate_pixels"])),
+                str(int(row["candidate_fraction_denominator"])),
+            ]
+        )
+        for row in rows
+    ]
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _audit_selector_row_sha256(rows: list[dict[str, Any]]) -> str:
+    lines = [
+        "\t".join(
+            [
+                str(row["sample_id"]),
+                str(row["patient_id"]),
+                str(int(row["gt_count"])),
+                str(int(row["bridge_target"])),
+                str(int(row["candidate_pixels"])),
+                str(int(row["candidate_fraction_denominator"])),
                 format(float(row["candidate_fraction"]), ".17g"),
             ]
         )
@@ -539,7 +570,8 @@ def summarize_selector_input_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "row_count": int(len(rows)),
         "positive_count": int(sum(labels)),
         "negative_count": int(len(rows) - sum(labels)),
-        "selector_input_sha256": _selector_input_sha256(rows),
+        "scientific_selector_input_sha256": _scientific_selector_input_sha256(rows),
+        "audit_row_sha256": _audit_selector_row_sha256(rows),
         "candidate_fraction_min": float(np.min(values)) if values.size else 0.0,
         "candidate_fraction_max": float(np.max(values)) if values.size else 0.0,
         "candidate_fraction_mean": float(np.mean(values)) if values.size else 0.0,
@@ -579,9 +611,11 @@ def compare_selector_input_rows(reference_rows: list[dict[str, Any]], current_ro
     return {
         "reference_row_count": int(len(reference_rows)),
         "current_row_count": int(len(current_rows)),
-        "reference_sha256": _selector_input_sha256(reference_rows),
-        "current_sha256": _selector_input_sha256(current_rows),
-        "identical": bool(_selector_input_sha256(reference_rows) == _selector_input_sha256(current_rows)),
+        "reference_scientific_selector_input_sha256": _scientific_selector_input_sha256(reference_rows),
+        "current_scientific_selector_input_sha256": _scientific_selector_input_sha256(current_rows),
+        "reference_audit_row_sha256": _audit_selector_row_sha256(reference_rows),
+        "current_audit_row_sha256": _audit_selector_row_sha256(current_rows),
+        "identical": bool(_scientific_selector_input_sha256(reference_rows) == _scientific_selector_input_sha256(current_rows)),
         "differing_samples": differing,
     }
 
@@ -802,7 +836,10 @@ def train_only_balanced_accuracy_selector_v1(
     *,
     extra_thresholds: list[float] | None = None,
 ) -> dict[str, Any]:
-    selector_rows = build_train_only_selector_input_rows(feature_rows)
+    if feature_rows and "bridge_target" in feature_rows[0] and TRAIN_ONLY_SELECTOR_SCALAR in feature_rows[0]:
+        selector_rows = [dict(row) for row in feature_rows]
+    else:
+        selector_rows = build_train_only_selector_input_rows(feature_rows)
     summary = summarize_selector_input_rows(selector_rows)
     values = np.asarray([float(row[TRAIN_ONLY_SELECTOR_SCALAR]) for row in selector_rows], dtype=np.float64)
     if values.size == 0:
@@ -864,25 +901,53 @@ def run_train_only_balanced_accuracy_selector_v1(
 ) -> dict[str, Any]:
     return train_only_balanced_accuracy_selector_v1(feature_rows, extra_thresholds=extra_thresholds)
 
-
-def validate_frozen_scalar_rule(selector_audit: dict[str, Any]) -> dict[str, Any]:
+def validate_frozen_scalar_rule(
+    selector_audit: dict[str, Any],
+    *,
+    caller: str,
+    source_function: str,
+    artifact_path: Path | None = None,
+) -> dict[str, Any]:
     locked_rule = dict(FROZEN_SIMPLE_SCALAR_RULE)
     best_scalar = selector_audit.get("selected_rule")
+    summary = dict(selector_audit.get("selector_input_summary") or {})
+    payload = {
+        "caller": str(caller),
+        "source_function": str(source_function),
+        "scalar": None if best_scalar is None else str(best_scalar.get("scalar")),
+        "direction": None if best_scalar is None else str(best_scalar.get("direction")),
+        "threshold": None if best_scalar is None else float(best_scalar.get("threshold")),
+        "tp": None if best_scalar is None else int(best_scalar.get("tp")),
+        "tn": None if best_scalar is None else int(best_scalar.get("tn")),
+        "fp": None if best_scalar is None else int(best_scalar.get("fp")),
+        "fn": None if best_scalar is None else int(best_scalar.get("fn")),
+        "balanced_accuracy": None if best_scalar is None else float(best_scalar.get("balanced_accuracy")),
+        "selector_input_row_count": int(summary.get("row_count", 0)),
+        "scientific_selector_input_sha256": summary.get("scientific_selector_input_sha256"),
+        "audit_row_sha256": summary.get("audit_row_sha256"),
+        "expected_rule": locked_rule,
+        "actual_rule": None if best_scalar is None else dict(best_scalar),
+    }
+    if artifact_path is not None:
+        bridge._write_json(artifact_path, payload)
     if best_scalar is None:
-        raise SystemExit("Frozen TRAIN-only scalar rule must exist but simple threshold audit returned no candidate.")
+        raise SystemExit(json.dumps({"status": "blocked", "reason": "frozen_train_only_scalar_rule_missing", **payload}, ensure_ascii=False, indent=2))
     check_fields = ("scalar", "direction")
     for field in check_fields:
         if str(best_scalar.get(field)) != str(locked_rule.get(field)):
-            raise SystemExit(f"Frozen TRAIN-only scalar rule mismatch for {field}: expected {locked_rule.get(field)} actual {best_scalar.get(field)}")
+            raise SystemExit(json.dumps({"status": "blocked", "reason": f"frozen_train_only_scalar_rule_mismatch_{field}", **payload}, ensure_ascii=False, indent=2))
     if abs(float(best_scalar.get("threshold")) - float(locked_rule["threshold"])) > 1.0e-12:
-        raise SystemExit(
-            f"Frozen TRAIN-only scalar rule mismatch for threshold: expected {locked_rule['threshold']} actual {best_scalar.get('threshold')}"
-        )
+        raise SystemExit(json.dumps({"status": "blocked", "reason": "frozen_train_only_scalar_rule_mismatch_threshold", **payload}, ensure_ascii=False, indent=2))
     return {
         "matches_frozen_rule": True,
         "frozen_rule_reproduced": True,
         "expected_rule": locked_rule,
         "actual_rule": dict(best_scalar),
+        "caller": str(caller),
+        "source_function": str(source_function),
+        "selector_input_row_count": int(summary.get("row_count", 0)),
+        "scientific_selector_input_sha256": summary.get("scientific_selector_input_sha256"),
+        "audit_row_sha256": summary.get("audit_row_sha256"),
     }
 
 
@@ -1289,6 +1354,9 @@ def _prepare_split_preflight_core(
     device: torch.device,
     frozen_model: bridge.FrozenSemanticBridgeSuppressionModel,
     enforce_frozen_scalar_rule: bool,
+    caller: str,
+    source_function: str,
+    validation_artifact_path: Path | None = None,
 ) -> dict[str, Any]:
     split_txt = bridge._resolve_repo_path((cfg.get("dataset") or {}).get("train_txt", DEFAULT_SOURCE_SPLIT), DEFAULT_SOURCE_SPLIT)
     records = bridge.mine_bridge_records_for_split(
@@ -1309,11 +1377,11 @@ def _prepare_split_preflight_core(
     feature_rows, features_t, targets_t, pixel_remove_masks = gate_v4.extract_gate_feature_rows(annotated, logits)
     hard_gate_state_cache, cache_timing = gate_v4.build_hard_gate_state_cache(annotated, pixel_remove_masks)
     gate_model = gate_v4.build_gate_model_from_cfg(cfg, input_dim=int(features_t.shape[1]))
+    selector_input_rows = build_train_only_selector_input_rows(feature_rows)
     selector_audit = run_train_only_balanced_accuracy_selector_v1(
-        feature_rows,
+        selector_input_rows,
         extra_thresholds=[float(FROZEN_SIMPLE_SCALAR_RULE["threshold"])],
     )
-    selector_semantics_comparison = compare_train_only_selector_semantics(feature_rows)
     simple_scalar_rule = {
         "selection_version": TRAIN_SCALAR_SELECTION_VERSION,
         "train_simple_gate_threshold_exists": bool(selector_audit["selected_rule"] is not None),
@@ -1328,7 +1396,12 @@ def _prepare_split_preflight_core(
         "actual_rule": dict(selector_audit["selected_rule"]) if selector_audit["selected_rule"] is not None else None,
     }
     if bool(enforce_frozen_scalar_rule):
-        frozen_rule_validation = validate_frozen_scalar_rule(selector_audit)
+        frozen_rule_validation = validate_frozen_scalar_rule(
+            selector_audit,
+            caller=str(caller),
+            source_function=str(source_function),
+            artifact_path=validation_artifact_path,
+        )
     runtime_report = micro_runner._build_runtime_device_report(
         cfg=cfg,
         prepared={
@@ -1356,16 +1429,8 @@ def _prepare_split_preflight_core(
         "runtime_report": runtime_report,
         "simple_scalar_rule": simple_scalar_rule,
         "frozen_rule_validation": frozen_rule_validation,
-        "selector_input_rows": list(selector_audit["selector_input_rows"]),
-        "selector_audit": {
-            **selector_audit,
-            "neighbor_audit": selector_semantics_comparison["neighbor_audit"],
-            "observed_value_selector_reference": selector_semantics_comparison["observed_value_selector"],
-            "midpoint_vs_observed_comparison": {
-                "train_predictions_identical": bool(selector_semantics_comparison["train_predictions_identical"]),
-                "differing_train_samples": list(selector_semantics_comparison["differing_train_samples"]),
-            },
-        },
+        "selector_input_rows": list(selector_input_rows),
+        "selector_audit": selector_audit,
     }
 
 
@@ -1382,6 +1447,8 @@ def prepare_split_preflight(
         device=device,
         frozen_model=frozen_model,
         enforce_frozen_scalar_rule=True,
+        caller="prepare_split_preflight",
+        source_function="prepare_split_preflight",
     )
 
 

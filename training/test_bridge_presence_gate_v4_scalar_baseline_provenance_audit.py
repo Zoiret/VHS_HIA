@@ -135,6 +135,28 @@ class TestBridgePresenceGateV4ScalarBaselineProvenanceAudit(unittest.TestCase):
         self.assertEqual(diff["candidate_fraction_differences"][0]["sample_id"], "a")
         self.assertAlmostEqual(diff["candidate_fraction_differences"][0]["absolute_difference"], 0.02)
 
+    def test_scientific_sha_ignores_path_specific_forensic_metadata(self):
+        rows_a = [
+            {
+                "sample_id": "a",
+                "patient_id": "p1",
+                "gt_count": 1,
+                "bridge_target": 0,
+                "candidate_pixels": 10,
+                "candidate_fraction": "0.1",
+                "candidate_fraction_denominator": 100,
+                "candidate_mask_shape": "10x10",
+                "scalar_source": "historical",
+                "dtype": "float64",
+            }
+        ]
+        rows_b = [dict(rows_a[0], scalar_source="current_preflight", dtype="float32")]
+        self.assertEqual(
+            audit.canonical_scientific_selector_input_sha256(rows_a),
+            audit.canonical_scientific_selector_input_sha256(rows_b),
+        )
+        self.assertNotEqual(audit.canonical_row_sha256(rows_a), audit.canonical_row_sha256(rows_b))
+
     def test_selector_result_payload_records_mismatch_without_raising(self):
         feature_rows = [
             {

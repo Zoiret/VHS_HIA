@@ -84,7 +84,12 @@ def _load_gate_checkpoint(path: Path, gate_model: torch.nn.Module, device: torch
     return payload
 
 
-def _prepare_training_inputs_core(cfg: dict[str, Any], *, enforce_frozen_scalar_rule: bool) -> dict[str, Any]:
+def _prepare_training_inputs_core(
+    cfg: dict[str, Any],
+    *,
+    enforce_frozen_scalar_rule: bool,
+    train_validation_artifact_path: Path | None = None,
+) -> dict[str, Any]:
     manifest_stage = preflight_runner._prepare_manifest(cfg)
     contract = dict(manifest_stage["manifest"]["contract"])
     device = manifest_stage["device"]
@@ -95,13 +100,18 @@ def _prepare_training_inputs_core(cfg: dict[str, Any], *, enforce_frozen_scalar_
         device=device,
         frozen_model=frozen_model,
         enforce_frozen_scalar_rule=bool(enforce_frozen_scalar_rule),
+        caller="training_runner.gate_train",
+        source_function="train_bridge_presence_gate_v4_patient_disjoint_dev._prepare_training_inputs_core",
+        validation_artifact_path=train_validation_artifact_path,
     )
     val_prepared = dev._prepare_split_preflight_core(
         cfg=cfg,
         sample_ids=list(contract["val_sample_ids"]),
         device=device,
         frozen_model=frozen_model,
-        enforce_frozen_scalar_rule=bool(enforce_frozen_scalar_rule),
+        enforce_frozen_scalar_rule=False,
+        caller="training_runner.gate_val",
+        source_function="train_bridge_presence_gate_v4_patient_disjoint_dev._prepare_training_inputs_core",
     )
     train_scalar_rule = train_prepared["simple_scalar_rule"]
     if not bool(train_scalar_rule["train_simple_gate_threshold_exists"]):
@@ -279,7 +289,11 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
     save_dir.mkdir(parents=True, exist_ok=True)
     analysis_dir.mkdir(parents=True, exist_ok=True)
     bridge._seed_everything(int(cfg.get("seed", 1337)))
-    prepared = _prepare_training_inputs(cfg)
+    prepared = _prepare_training_inputs_core(
+        cfg,
+        enforce_frozen_scalar_rule=True,
+        train_validation_artifact_path=save_dir / "gate_train_selector_validation.json",
+    )
     runtime_report = micro_runner._build_runtime_device_report(
         cfg=cfg,
         prepared={
@@ -305,6 +319,7 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
     _save_csv(save_dir / "gate_train_selector_inputs.csv", prepared["train_prepared"]["selector_input_rows"])
     bridge._write_json(save_dir / "gate_train_selector_inputs.json", prepared["train_prepared"]["selector_input_rows"])
     bridge._write_json(save_dir / "gate_train_selector_audit.json", prepared["train_prepared"]["selector_audit"])
+    bridge._write_json(save_dir / "gate_train_selector_validation.json", prepared["train_prepared"]["frozen_rule_validation"])
     preflight_selector_audit_path = analysis_dir / "gate_train_selector_audit.json"
     selector_input_comparison: dict[str, Any] | None = None
     if preflight_selector_audit_path.exists():

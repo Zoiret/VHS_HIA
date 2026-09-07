@@ -505,7 +505,11 @@ def extract_gate_feature_rows(cached_records: list[dict[str, Any]], bridge_logit
         rows.append(
             {
                 "sample_id": str(record["sample_id"]),
+                "patient_id": str(record.get("patient_id", bridge._make_patient_id(str(record["sample_id"])))),
+                "gt_count": int(record.get("gt_count", 0)),
                 "bridge_positive_target": int(record["gate_target"]),
+                "candidate_pixels": int(record.get("candidate_pixels", int(np.sum(candidate_bool)))),
+                "candidate_fraction_denominator": int(candidate_bool.size),
                 **{key: float(value) for key, value in scalar.items()},
                 "pooled_feature_dimensionality": int(pooled.size),
                 "feature_dimensionality": int(feature_vec.size),

@@ -88,8 +88,17 @@ class TestTrainBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
                 "features_t": torch.ones((1, 105)),
                 "targets_t": torch.ones((1, 1)),
                 "feature_rows": [{"sample_id": "t1", "candidate_fraction": 0.1541646271944046}],
-                "selector_input_rows": [{"sample_id": "t1", "patient_id": "t1", "bridge_target": 1, "candidate_fraction": 0.1541646271944046}],
-                "selector_audit": {"selector_input_rows": [{"sample_id": "t1", "patient_id": "t1", "bridge_target": 1, "candidate_fraction": 0.1541646271944046}]},
+                "selector_input_rows": [{"sample_id": "t1", "patient_id": "t1", "gt_count": 2, "bridge_target": 1, "candidate_pixels": 90930, "candidate_fraction_denominator": 589824, "candidate_fraction": 0.1541646271944046}],
+                "selector_audit": {
+                    "selector_input_rows": [{"sample_id": "t1", "patient_id": "t1", "gt_count": 2, "bridge_target": 1, "candidate_pixels": 90930, "candidate_fraction_denominator": 589824, "candidate_fraction": 0.1541646271944046}],
+                    "selector_input_summary": {
+                        "row_count": 1,
+                        "scientific_selector_input_sha256": "sha-train",
+                        "audit_row_sha256": "audit-train",
+                    },
+                    "selected_rule": {"scalar": "candidate_fraction", "direction": "ge", "threshold": 0.1541646271944046, "tp": 1, "tn": 0, "fp": 0, "fn": 0, "balanced_accuracy": 0.7364329268292682},
+                },
+                "frozen_rule_validation": {"matches_frozen_rule": True, "scientific_selector_input_sha256": "sha-train"},
                 "hard_gate_state_cache": train_cache,
             },
             "val_prepared": {
@@ -134,7 +143,7 @@ class TestTrainBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
 
     def test_validation_is_not_used_during_optimization_or_threshold_selection(self):
         prepared = self._fake_prepared()
-        with mock.patch.object(runner, "_prepare_training_inputs", return_value=prepared), \
+        with mock.patch.object(runner, "_prepare_training_inputs_core", return_value=prepared), \
              mock.patch.object(dev, "assert_locked_val_references"), \
              mock.patch.object(dev, "assert_locked_active_success_criterion_v2"), \
              mock.patch.object(dev, "snapshot_frozen_backbone_state", return_value={"named": [], "params": {}, "bn": {}}), \
@@ -161,7 +170,7 @@ class TestTrainBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
             analysis_dir = Path(td) / "analysis"
             analysis_dir.mkdir(parents=True, exist_ok=True)
             bridge._write_json(analysis_dir / "gate_train_selector_audit.json", prepared["train_prepared"]["selector_audit"])
-            with mock.patch.object(runner, "_prepare_training_inputs", return_value=prepared), \
+            with mock.patch.object(runner, "_prepare_training_inputs_core", return_value=prepared), \
                  mock.patch.object(dev, "assert_locked_val_references"), \
                  mock.patch.object(dev, "assert_locked_active_success_criterion_v2"), \
                  mock.patch.object(dev, "snapshot_frozen_backbone_state", return_value={"named": [], "params": {}, "bn": {}}), \
@@ -176,6 +185,24 @@ class TestTrainBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
                 cfg["analysis"] = {"feature_audit_dir": str(analysis_dir)}
                 summary = runner.run_pipeline(cfg)
         self.assertTrue(summary["train_selector_input_comparison"]["identical"])
+
+    def test_training_preparation_enforces_train_only_not_val(self):
+        manifest_stage = {
+            "manifest": {"contract": {"train_sample_ids": ["t1"], "val_sample_ids": ["v1"]}},
+            "device": torch.device("cpu"),
+        }
+        fake_prepared = {
+            "simple_scalar_rule": {"train_simple_gate_threshold_exists": True},
+            "state_summary": {"always_closed": {}, "two_state_positive_success50_union_upper_bound": 0},
+            "hard_gate_state_cache": [],
+        }
+        with mock.patch.object(runner.preflight_runner, "_prepare_manifest", return_value=manifest_stage), \
+             mock.patch.object(runner.gate_v4, "load_frozen_v2_pixel_model_from_cfg", return_value=(mock.Mock(), {})), \
+             mock.patch.object(dev, "_prepare_split_preflight_core", side_effect=[fake_prepared, fake_prepared]) as prepare_mock, \
+             mock.patch.object(dev, "build_predeclared_success_criteria_v2", return_value={}):
+            runner._prepare_training_inputs_core({}, enforce_frozen_scalar_rule=True)
+        self.assertTrue(prepare_mock.call_args_list[0].kwargs["enforce_frozen_scalar_rule"])
+        self.assertFalse(prepare_mock.call_args_list[1].kwargs["enforce_frozen_scalar_rule"])
 
     def test_frozen_baseline_mismatch_still_fails_closed(self):
         feature_rows = [

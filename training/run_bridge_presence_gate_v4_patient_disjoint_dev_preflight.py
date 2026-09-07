@@ -151,17 +151,25 @@ def run_pipeline(cfg: dict[str, Any], *, manifest_only: bool = False) -> dict[st
             gate_features_t=None,
         )
     )
-    train_prepared = dev.prepare_split_preflight(
+    train_prepared = dev._prepare_split_preflight_core(
         cfg=cfg,
         sample_ids=list(contract["train_sample_ids"]),
         device=device,
         frozen_model=frozen_model,
+        enforce_frozen_scalar_rule=True,
+        caller="regular_preflight.gate_train",
+        source_function="run_bridge_presence_gate_v4_patient_disjoint_dev_preflight.run_pipeline",
+        validation_artifact_path=analysis_dir / "gate_train_selector_validation.json",
     )
-    val_prepared = dev.prepare_split_preflight(
+    val_prepared = dev._prepare_split_preflight_core(
         cfg=cfg,
         sample_ids=list(contract["val_sample_ids"]),
         device=device,
         frozen_model=frozen_model,
+        enforce_frozen_scalar_rule=False,
+        caller="regular_preflight.gate_val",
+        source_function="run_bridge_presence_gate_v4_patient_disjoint_dev_preflight.run_pipeline",
+        validation_artifact_path=analysis_dir / "gate_val_selector_validation.json",
     )
     runtime_snapshot = micro_runner._runtime_environment_snapshot(device)
     train_oracle = dev.compute_safe_two_state_oracle(train_prepared["hard_gate_state_cache"])
@@ -198,9 +206,7 @@ def run_pipeline(cfg: dict[str, Any], *, manifest_only: bool = False) -> dict[st
                 "selector_input_summary": train_prepared["selector_audit"]["selector_input_summary"],
                 "selector_max_balanced_accuracy": float(train_prepared["selector_audit"]["max_balanced_accuracy"]),
                 "selector_tied_best_threshold_count": int(len(train_prepared["selector_audit"]["tied_best_thresholds"])),
-                "selector_neighbor_audit": train_prepared["selector_audit"]["neighbor_audit"],
-                "selector_observed_value_reference": train_prepared["selector_audit"]["observed_value_selector_reference"]["selected_rule"],
-                "selector_midpoint_vs_observed": train_prepared["selector_audit"]["midpoint_vs_observed_comparison"],
+                "frozen_rule_validation": train_prepared["frozen_rule_validation"],
                 "cache_construction_time_seconds": float(train_prepared["cache_timing"]["total_seconds"]),
             },
             "gate_val": {
@@ -221,6 +227,7 @@ def run_pipeline(cfg: dict[str, Any], *, manifest_only: bool = False) -> dict[st
     _write_csv(analysis_dir / "gate_train_selector_inputs.csv", train_prepared["selector_input_rows"])
     bridge._write_json(analysis_dir / "gate_train_selector_inputs.json", train_prepared["selector_input_rows"])
     bridge._write_json(analysis_dir / "gate_train_selector_audit.json", train_prepared["selector_audit"])
+    bridge._write_json(analysis_dir / "gate_train_selector_validation.json", train_prepared["frozen_rule_validation"])
     bridge._write_json(analysis_dir / "preflight_summary.json", output)
     return output
 

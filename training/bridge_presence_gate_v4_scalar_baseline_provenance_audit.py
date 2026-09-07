@@ -62,6 +62,10 @@ def canonical_row_sha256(rows: list[dict[str, Any]]) -> str:
     return hashlib.sha256(_canonical_row_payload(rows)).hexdigest()
 
 
+def canonical_scientific_selector_input_sha256(rows: list[dict[str, Any]]) -> str:
+    return dev._scientific_selector_input_sha256(rows)
+
+
 def _normalize_shape(shape: Any) -> str:
     if isinstance(shape, str):
         return shape
@@ -125,7 +129,8 @@ def summarize_forensic_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "candidate_fraction_min": float(np.min(fractions)) if fractions.size else 0.0,
         "candidate_fraction_mean": float(np.mean(fractions)) if fractions.size else 0.0,
         "candidate_fraction_max": float(np.max(fractions)) if fractions.size else 0.0,
-        "row_sha256": canonical_row_sha256(rows),
+        "scientific_selector_input_sha256": canonical_scientific_selector_input_sha256(rows),
+        "audit_row_sha256": canonical_row_sha256(rows),
         "sample_ids": [str(row["sample_id"]) for row in rows],
     }
 
@@ -167,8 +172,10 @@ def diff_forensic_row_sets(reference_rows: list[dict[str, Any]], current_rows: l
     return {
         "reference_row_count": int(len(reference_rows)),
         "current_row_count": int(len(current_rows)),
-        "reference_sha256": canonical_row_sha256(reference_rows),
-        "current_sha256": canonical_row_sha256(current_rows),
+        "reference_scientific_selector_input_sha256": canonical_scientific_selector_input_sha256(reference_rows),
+        "current_scientific_selector_input_sha256": canonical_scientific_selector_input_sha256(current_rows),
+        "reference_audit_row_sha256": canonical_row_sha256(reference_rows),
+        "current_audit_row_sha256": canonical_row_sha256(current_rows),
         "missing_sample_ids": missing_sample_ids,
         "extra_sample_ids": extra_sample_ids,
         "target_differences": target_differences,
@@ -274,6 +281,8 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         device=device,
         frozen_model=frozen_model,
         enforce_frozen_scalar_rule=False,
+        caller="forensic_audit.current_preflight",
+        source_function="bridge_presence_gate_v4_scalar_baseline_provenance_audit.run_pipeline",
     )
     current_training = train_runner._prepare_training_inputs_core(cfg, enforce_frozen_scalar_rule=False)["train_prepared"]
 

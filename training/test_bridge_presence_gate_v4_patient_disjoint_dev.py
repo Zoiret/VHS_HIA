@@ -18,6 +18,7 @@ if str(THIS_DIR) not in sys.path:
 import bridge_presence_gate_v4 as gate_v4
 import bridge_presence_gate_v4_patient_disjoint_dev as dev
 import bridge_suppression_head as bridge
+import train_bridge_presence_gate_v4 as micro_runner
 
 
 class _FailOnUse:
@@ -183,7 +184,42 @@ class TestBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
         rows_a = dev.build_train_only_selector_input_rows(feature_rows)
         rows_b = dev.build_train_only_selector_input_rows(list(reversed(feature_rows)))
         self.assertEqual(rows_a, rows_b)
-        self.assertEqual(dev.summarize_selector_input_rows(rows_a)["selector_input_sha256"], dev.summarize_selector_input_rows(rows_b)["selector_input_sha256"])
+        self.assertEqual(
+            dev.summarize_selector_input_rows(rows_a)["scientific_selector_input_sha256"],
+            dev.summarize_selector_input_rows(rows_b)["scientific_selector_input_sha256"],
+        )
+
+    def test_scientific_sha_ignores_path_specific_metadata(self):
+        rows_a = [
+            {
+                "sample_id": "a",
+                "patient_id": "p1",
+                "gt_count": 2,
+                "bridge_target": 1,
+                "candidate_pixels": 12,
+                "candidate_fraction_denominator": 100,
+                "candidate_fraction": 0.12,
+                "scalar_source": "path_a",
+            }
+        ]
+        rows_b = [dict(rows_a[0], scalar_source="path_b")]
+        self.assertEqual(dev._scientific_selector_input_sha256(rows_a), dev._scientific_selector_input_sha256(rows_b))
+
+    def test_audit_row_sha_may_differ_without_scientific_mismatch(self):
+        rows_a = [
+            {
+                "sample_id": "a",
+                "patient_id": "p1",
+                "gt_count": 2,
+                "bridge_target": 1,
+                "candidate_pixels": 12,
+                "candidate_fraction_denominator": 100,
+                "candidate_fraction": 0.12,
+            }
+        ]
+        rows_b = [dict(rows_a[0], candidate_fraction=0.12000000000000001)]
+        self.assertEqual(dev._scientific_selector_input_sha256(rows_a), dev._scientific_selector_input_sha256(rows_b))
+        self.assertNotEqual(dev._audit_selector_row_sha256(rows_a), dev._audit_selector_row_sha256(rows_b))
 
     def test_selector_permutation_invariance(self):
         feature_rows = [
@@ -279,10 +315,10 @@ class TestBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
 
     def test_selector_input_comparison_reports_differing_samples(self):
         reference = [
-            {"sample_id": "a", "patient_id": "p1", "bridge_target": 1, "candidate_fraction": 0.2},
+            {"sample_id": "a", "patient_id": "p1", "gt_count": 2, "bridge_target": 1, "candidate_pixels": 20, "candidate_fraction_denominator": 100, "candidate_fraction": 0.2},
         ]
         current = [
-            {"sample_id": "a", "patient_id": "p1", "bridge_target": 0, "candidate_fraction": 0.3},
+            {"sample_id": "a", "patient_id": "p1", "gt_count": 2, "bridge_target": 0, "candidate_pixels": 30, "candidate_fraction_denominator": 100, "candidate_fraction": 0.3},
         ]
         out = dev.compare_selector_input_rows(reference, current)
         self.assertFalse(out["identical"])
@@ -304,13 +340,75 @@ class TestBridgePresenceGateV4PatientDisjointDev(unittest.TestCase):
         with self.assertRaises(SystemExit):
             dev.validate_frozen_scalar_rule(
                 {
+                    "selector_input_summary": {"row_count": 2, "scientific_selector_input_sha256": "sha", "audit_row_sha256": "audit"},
                     "selected_rule": {
                         "scalar": "candidate_fraction",
                         "direction": "ge",
                         "threshold": 0.10029517486691475,
+                        "tp": 1,
+                        "tn": 1,
+                        "fp": 0,
+                        "fn": 0,
+                        "balanced_accuracy": 1.0,
                     }
-                }
+                },
+                caller="unit_test",
+                source_function="unit_test",
             )
+
+    def test_validate_receives_exact_shared_selector_result_without_recomputation(self):
+        sentinel_rows = [{"sample_id": "a", "patient_id": "p1", "gt_count": 1, "bridge_target": 1, "candidate_pixels": 10, "candidate_fraction_denominator": 100, "candidate_fraction": 0.1}]
+        sentinel_audit = {
+            "selected_rule": dict(dev.FROZEN_SIMPLE_SCALAR_RULE, tp=1, tn=1, fp=0, fn=0, balanced_accuracy=0.7364329268292682),
+            "selector_input_rows": sentinel_rows,
+            "selector_input_summary": {"row_count": 1, "scientific_selector_input_sha256": "sha", "audit_row_sha256": "audit"},
+            "max_balanced_accuracy": 0.7364329268292682,
+            "tied_best_thresholds": [dict(dev.FROZEN_SIMPLE_SCALAR_RULE)],
+        }
+        feature_rows = [{"sample_id": "a", "bridge_positive_target": 1, "candidate_fraction": 0.1}]
+        with mock.patch.object(dev, "build_train_only_selector_input_rows", return_value=sentinel_rows), \
+             mock.patch.object(dev, "run_train_only_balanced_accuracy_selector_v1", return_value=sentinel_audit) as selector_mock, \
+             mock.patch.object(dev, "validate_frozen_scalar_rule", return_value={"matches_frozen_rule": True}) as validate_mock:
+            out = dev.select_train_only_scalar_rule(feature_rows)
+        selector_mock.assert_called_once_with(sentinel_rows)
+        self.assertIs(validate_mock.call_args.args[0], sentinel_audit)
+        self.assertEqual(out["selector_audit"], sentinel_audit)
+
+    def test_prepare_split_preflight_core_uses_single_shared_selector_result(self):
+        cached_records = [{"sample_id": "a", "patient_id": "p1", "gt_count": 1, "candidate_pixels": 10, "candidate_mask_np": np.ones((2, 2), dtype=np.uint8), "gate_target": 1, "bridge_positive": 1}]
+        feature_rows = [{"sample_id": "a", "patient_id": "p1", "gt_count": 1, "bridge_positive_target": 1, "candidate_pixels": 10, "candidate_fraction_denominator": 4, "candidate_fraction": 0.25}]
+        sentinel_rows = [{"sample_id": "a", "patient_id": "p1", "gt_count": 1, "bridge_target": 1, "candidate_pixels": 10, "candidate_fraction_denominator": 4, "candidate_fraction": 0.25}]
+        sentinel_audit = {
+            "selected_rule": dict(dev.FROZEN_SIMPLE_SCALAR_RULE, tp=1, tn=1, fp=0, fn=0, balanced_accuracy=0.7364329268292682),
+            "selector_input_rows": sentinel_rows,
+            "selector_input_summary": {"row_count": 1, "scientific_selector_input_sha256": "sha", "audit_row_sha256": "audit"},
+            "max_balanced_accuracy": 0.7364329268292682,
+            "tied_best_thresholds": [dict(dev.FROZEN_SIMPLE_SCALAR_RULE)],
+        }
+        fake_gate = torch.nn.Linear(105, 1)
+        with mock.patch.object(bridge, "mine_bridge_records_for_split", return_value=[]), \
+             mock.patch.object(bridge, "cache_microset_features", return_value=cached_records), \
+             mock.patch.object(gate_v4, "compute_frozen_v2_bridge_logits", return_value=(torch.ones((1, 1, 2, 2)), {"input_devices": {}})), \
+             mock.patch.object(gate_v4, "extract_gate_feature_rows", return_value=(feature_rows, torch.ones((1, 105)), torch.ones((1, 1)), [])), \
+             mock.patch.object(gate_v4, "build_hard_gate_state_cache", return_value=([], {"total_seconds": 0.0})), \
+             mock.patch.object(gate_v4, "build_gate_model_from_cfg", return_value=fake_gate), \
+             mock.patch.object(dev, "summarize_hard_gate_states", return_value={}), \
+             mock.patch.object(micro_runner, "_build_runtime_device_report", return_value={}), \
+             mock.patch.object(dev, "build_train_only_selector_input_rows", return_value=sentinel_rows), \
+             mock.patch.object(dev, "run_train_only_balanced_accuracy_selector_v1", return_value=sentinel_audit) as selector_mock, \
+             mock.patch.object(dev, "validate_frozen_scalar_rule", return_value={"matches_frozen_rule": True}) as validate_mock:
+            out = dev._prepare_split_preflight_core(
+                cfg={},
+                sample_ids=["a"],
+                device=torch.device("cpu"),
+                frozen_model=mock.Mock(),
+                enforce_frozen_scalar_rule=True,
+                caller="unit_test",
+                source_function="unit_test",
+            )
+        selector_mock.assert_called_once_with(sentinel_rows, extra_thresholds=[float(dev.FROZEN_SIMPLE_SCALAR_RULE["threshold"])])
+        self.assertIs(validate_mock.call_args.args[0], sentinel_audit)
+        self.assertEqual(out["selector_audit"], sentinel_audit)
 
     def test_midpoint_vs_observed_prediction_equivalence_where_applicable(self):
         low = 0.1538984477519989

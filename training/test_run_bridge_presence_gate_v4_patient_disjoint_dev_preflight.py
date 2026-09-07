@@ -91,6 +91,44 @@ class TestRunBridgePresenceGateV4PatientDisjointDevPreflight(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     runner.run_pipeline(cfg, manifest_only=False)
 
+    def test_preflight_enforces_train_only_not_val(self):
+        cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_presence_gate_v4_patient_disjoint_dev_v1.yaml")
+        with tempfile.TemporaryDirectory() as td:
+            ckpt = Path(td) / "present.pth"
+            ckpt.write_bytes(b"x")
+            cfg = dict(cfg)
+            cfg["analysis"] = {"feature_audit_dir": str(Path(td) / "analysis")}
+            cfg["frozen_v2_pixel_head"] = dict(cfg["frozen_v2_pixel_head"])
+            cfg["frozen_v2_pixel_head"]["checkpoint_path"] = str(ckpt)
+            fake_prepared = {
+                "state_summary": {
+                    "record_stats": {},
+                    "always_closed": {},
+                    "always_open": {},
+                    "two_state_positive_success50_union_upper_bound": 0,
+                },
+                "hard_gate_state_cache": [],
+                "runtime_report": {},
+                "cache_timing": {"total_seconds": 0.0},
+                "simple_scalar_rule": {"train_simple_gate_threshold_exists": True},
+                "selector_input_rows": [],
+                "selector_audit": {"selector_input_summary": {}, "max_balanced_accuracy": 0.0, "tied_best_thresholds": []},
+                "frozen_rule_validation": {"matches_frozen_rule": True},
+            }
+            with mock.patch.object(runner, "_prepare_manifest", return_value=self._fake_manifest_stage()), \
+                 mock.patch.object(gate_v4, "load_frozen_v2_pixel_model_from_cfg", return_value=(mock.Mock(), {"checkpoint_file_sha256": "a", "checkpoint_model_state_sha256": "b"})), \
+                 mock.patch.object(runner.micro_runner, "_build_runtime_device_report", return_value={"selected_torch_device": "cpu"}), \
+                 mock.patch.object(runner.micro_runner, "_assert_expected_cuda_runtime"), \
+                 mock.patch.object(runner.micro_runner, "_runtime_environment_snapshot", return_value={}), \
+                 mock.patch.object(dev, "_prepare_split_preflight_core", side_effect=[fake_prepared, fake_prepared]) as prepare_mock, \
+                 mock.patch.object(dev, "compute_safe_two_state_oracle", return_value={}), \
+                 mock.patch.object(dev, "build_predeclared_success_criteria_v1", return_value={}), \
+                 mock.patch.object(dev, "assess_success_criterion_v1_feasibility", return_value={}), \
+                 mock.patch.object(dev, "build_predeclared_success_criteria_v2", return_value={}):
+                runner.run_pipeline(cfg, manifest_only=False)
+        self.assertTrue(prepare_mock.call_args_list[0].kwargs["enforce_frozen_scalar_rule"])
+        self.assertFalse(prepare_mock.call_args_list[1].kwargs["enforce_frozen_scalar_rule"])
+
 
 if __name__ == "__main__":
     unittest.main()
