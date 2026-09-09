@@ -36,6 +36,14 @@ class TestTrainBridgeSuppressionHeadV6PatientDisjointDev(unittest.TestCase):
             "loss_fn": mock.Mock(),
             "train_records": [{"sample_id": "a", "patient_id": "p1", "bridge_positive": 1, "gt_bridge_pixels": 1, "candidate_pixels": 10}],
             "val_records": [{"sample_id": "b", "patient_id": "p2", "bridge_positive": 1, "gt_bridge_pixels": 1, "candidate_pixels": 10}],
+            "train_cache_contract": {
+                "sample_count": 1,
+                "fields": {
+                    "p_leaf": {"dtype": "torch.float32", "shape": [1, 2, 2]},
+                    "candidate_mask": {"dtype": "torch.float32", "shape": [1, 2, 2]},
+                    "bridge_target": {"dtype": "torch.float32", "shape": [1, 2, 2]},
+                },
+            },
         }
 
     def test_no_validation_before_checkpoint_freeze(self):
@@ -64,6 +72,54 @@ class TestTrainBridgeSuppressionHeadV6PatientDisjointDev(unittest.TestCase):
         cfg = bridge._read_yaml(bridge.REPO_ROOT / "training" / "configs" / "unetpp_effb3_bridge_suppression_frozen_semantic_patient_disjoint_v6_dev.yaml")
         init_ckpt = str((cfg.get("train") or {}).get("init_checkpoint", ""))
         self.assertNotIn("bridge_suppression_frozen_semantic_micro_overfit_v2", init_ckpt)
+
+    def test_prepare_inputs_tensorizes_records_and_validates_train_cache(self):
+        raw = {
+            "sample_id": "s1",
+            "patient_id": "p1",
+            "gt_count": 2,
+            "bridge_positive": 1,
+            "candidate_pixels": 4,
+            "bridge_pixels": 1,
+            "x_0_4": torch.ones((2, 4, 4), dtype=torch.float32),
+            "x_2_2": torch.ones((2, 2, 2), dtype=torch.float32),
+            "p_leaf": __import__("numpy").ones((2, 2), dtype="float32"),
+            "candidate_mask": __import__("numpy").ones((2, 2), dtype="uint8"),
+            "bridge_target": __import__("numpy").zeros((2, 2), dtype="uint8"),
+            "oracle_removed_mask": __import__("numpy").ones((2, 2), dtype="uint8"),
+            "gt_instances": __import__("numpy").ones((2, 2), dtype="uint8"),
+            "image_path": "dummy.png",
+        }
+        cfg = {"dataset": {"train_txt": "datasets/converted_full_multiclass_curated/train.txt"}, "train": {"init_checkpoint": "x"}}
+        fake_manifest = {"manifest": {"contract": {"train_sample_ids": ["s1"], "val_sample_ids": ["v1"]}}, "device": torch.device("cpu")}
+        fake_model = mock.Mock()
+        fake_reconstruction = {"labels": __import__("numpy").zeros((2, 2), dtype="uint8"), "metrics": {"all_iou_ge_0.50": False, "instance_mean_matched_iou": 0.0}}
+        with mock.patch.object(runner.split_runner, "_prepare_manifest", return_value=fake_manifest), \
+             mock.patch.object(runner.v6, "build_v6_model_with_fresh_bridge_head", return_value=(fake_model, {}, {})), \
+             mock.patch.object(runner.bridge, "build_optimizer", return_value=(mock.Mock(), {})), \
+             mock.patch.object(runner.bridge, "build_bridge_loss_from_cfg", return_value=mock.Mock()), \
+             mock.patch.object(runner.bridge, "mine_bridge_records_for_split", side_effect=[[raw], [raw]]), \
+             mock.patch.object(runner.bridge, "run_locked_reconstruction", return_value=fake_reconstruction):
+            prepared = runner._prepare_inputs(cfg)
+        self.assertTrue(torch.is_tensor(prepared["train_records"][0]["p_leaf"]))
+        self.assertEqual(str(prepared["train_records"][0]["p_leaf"].dtype), "torch.float32")
+        self.assertIn("train_cache_contract", prepared)
+
+    def test_no_optimizer_step_occurs_if_cache_validation_fails(self):
+        cfg = {"dataset": {"train_txt": "datasets/converted_full_multiclass_curated/train.txt"}, "train": {"init_checkpoint": "x"}}
+        fake_manifest = {"manifest": {"contract": {"train_sample_ids": ["s1"], "val_sample_ids": ["v1"]}}, "device": torch.device("cpu")}
+        fake_model = mock.Mock()
+        fake_opt = mock.Mock()
+        with mock.patch.object(runner.split_runner, "_prepare_manifest", return_value=fake_manifest), \
+             mock.patch.object(runner.v6, "build_v6_model_with_fresh_bridge_head", return_value=(fake_model, {}, {})), \
+             mock.patch.object(runner.bridge, "build_optimizer", return_value=(fake_opt, {})), \
+             mock.patch.object(runner.bridge, "build_bridge_loss_from_cfg", return_value=mock.Mock()), \
+             mock.patch.object(runner.bridge, "mine_bridge_records_for_split", side_effect=[[{"sample_id": "s1"}], [{"sample_id": "v1"}]]), \
+             mock.patch.object(runner.v6, "build_v6_cached_records", side_effect=lambda rows: rows), \
+             mock.patch.object(runner.v6, "validate_train_cache_contract", side_effect=SystemExit("bad contract")):
+            with self.assertRaises(SystemExit):
+                runner._prepare_inputs(cfg)
+        fake_opt.step.assert_not_called()
 
 
 if __name__ == "__main__":

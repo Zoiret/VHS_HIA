@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import torch
 
 THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
@@ -17,6 +18,24 @@ import bridge_suppression_head_v6_patient_disjoint_dev as v6
 
 
 class TestBridgeSuppressionHeadV6PatientDisjointDev(unittest.TestCase):
+    def _raw_record(self):
+        return {
+            "sample_id": "s1",
+            "patient_id": "p1",
+            "gt_count": 2,
+            "bridge_positive": 1,
+            "candidate_pixels": 4,
+            "bridge_pixels": 1,
+            "x_0_4": torch.arange(32, dtype=torch.float32).reshape(2, 4, 4),
+            "x_2_2": torch.arange(8, dtype=torch.float32).reshape(2, 2, 2),
+            "p_leaf": np.array([[0.1, 0.9], [0.2, 0.8]], dtype=np.float32),
+            "candidate_mask": np.array([[0, 1], [1, 1]], dtype=np.uint8),
+            "bridge_target": np.array([[0, 1], [0, 0]], dtype=np.uint8),
+            "oracle_removed_mask": np.array([[0, 0], [1, 1]], dtype=np.uint8),
+            "gt_instances": np.array([[1, 1], [0, 2]], dtype=np.uint8),
+            "image_path": "dummy.png",
+        }
+
     def test_microset_overlap_audit(self):
         contract = {
             "train_sample_ids": ["a", "b"],
@@ -99,6 +118,49 @@ class TestBridgeSuppressionHeadV6PatientDisjointDev(unittest.TestCase):
         self.assertEqual(semantic_info["checkpoint_sha256"], "semantic")
         self.assertEqual(meta["total_trainable_params"], 1713)
         self.assertEqual(sha_mock.call_count, 2)
+
+    def test_v6_cached_records_match_historical_tensor_contract(self):
+        raw = self._raw_record()
+        fake_reconstruction = {"labels": np.zeros((2, 2), dtype=np.uint8), "metrics": {"all_iou_ge_0.50": False, "instance_mean_matched_iou": 0.0}}
+        with mock.patch.object(bridge, "run_locked_reconstruction", return_value=fake_reconstruction):
+            historical = bridge.cache_microset_features([raw])[0]
+            current = v6.build_v6_cached_records([raw])[0]
+        for key in ("x_0_4", "x_2_2", "p_leaf", "candidate_mask", "bridge_target"):
+            self.assertTrue(torch.is_tensor(current[key]))
+            self.assertEqual(str(current[key].dtype), str(historical[key].dtype))
+            self.assertEqual(list(current[key].shape), list(historical[key].shape))
+            self.assertTrue(torch.equal(current[key], historical[key]))
+
+    def test_stack_cached_batch_succeeds_on_corrected_v6_records(self):
+        raw = self._raw_record()
+        fake_reconstruction = {"labels": np.zeros((2, 2), dtype=np.uint8), "metrics": {"all_iou_ge_0.50": False, "instance_mean_matched_iou": 0.0}}
+        with mock.patch.object(bridge, "run_locked_reconstruction", return_value=fake_reconstruction):
+            records = v6.build_v6_cached_records([raw])
+        batch = bridge.stack_cached_batch(records, torch.device("cpu"))
+        self.assertEqual(list(batch["p_leaf"].shape), [1, 1, 2, 2])
+        self.assertEqual(str(batch["candidate_mask"].dtype), "torch.float32")
+        self.assertEqual(str(batch["bridge_target"].dtype), "torch.float32")
+
+    def test_validate_train_cache_contract_blocks_ndarray_fields(self):
+        bad = {
+            "sample_id": "s1",
+            "x_0_4": torch.ones((2, 4, 4), dtype=torch.float32),
+            "x_2_2": torch.ones((2, 2, 2), dtype=torch.float32),
+            "p_leaf": np.ones((2, 2), dtype=np.float32),
+            "candidate_mask": np.ones((2, 2), dtype=np.uint8),
+            "bridge_target": np.zeros((2, 2), dtype=np.uint8),
+        }
+        with self.assertRaises(SystemExit) as cm:
+            v6.validate_train_cache_contract([bad])
+        self.assertIn("v6_train_cache_contract_mismatch", str(cm.exception))
+
+    def test_target_tensor_values_unchanged_after_tensorization(self):
+        raw = self._raw_record()
+        fake_reconstruction = {"labels": np.zeros((2, 2), dtype=np.uint8), "metrics": {"all_iou_ge_0.50": False, "instance_mean_matched_iou": 0.0}}
+        with mock.patch.object(bridge, "run_locked_reconstruction", return_value=fake_reconstruction):
+            records = v6.build_v6_cached_records([raw])
+        target = records[0]["bridge_target"]
+        self.assertTrue(torch.equal(target, torch.tensor([[[0.0, 1.0], [0.0, 0.0]]], dtype=torch.float32)))
 
 
 if __name__ == "__main__":

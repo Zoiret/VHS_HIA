@@ -26,6 +26,7 @@ V6_EXPERIMENT_VERSION = "clean_full_data_v2_bridge_head_patient_disjoint_v6_dev"
 V6_CHECKPOINT_SELECTION_VERSION = "gate_train_reconstruction_v1"
 V6_SAFETY_MAX_NEGATIVE_REGRESSIONS = 10
 V6_SAFETY_MAX_NEGATIVE_TOPOLOGY_CHANGES = 12
+STACKED_CACHE_FIELDS = ("x_0_4", "x_2_2", "p_leaf", "candidate_mask", "bridge_target")
 
 DEVELOPMENT_REFERENCES = {
     "closed": {
@@ -150,6 +151,94 @@ def build_v6_model_with_fresh_bridge_head(cfg: dict[str, Any], device: torch.dev
     }
     del optimizer
     return model, semantic_info, {**optimizer_meta, **head_state}
+
+
+def build_v6_cached_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return bridge.cache_microset_features(records)
+
+
+def _tensor_contract_row(value: Any) -> dict[str, Any]:
+    if torch.is_tensor(value):
+        return {
+            "python_type": type(value).__name__,
+            "dtype": str(value.dtype),
+            "shape": [int(v) for v in value.shape],
+        }
+    if isinstance(value, np.ndarray):
+        return {
+            "python_type": type(value).__name__,
+            "dtype": str(value.dtype),
+            "shape": [int(v) for v in value.shape],
+        }
+    return {
+        "python_type": type(value).__name__ if value is not None else None,
+        "dtype": None,
+        "shape": None,
+    }
+
+
+def summarize_cached_record_contract(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not records:
+        return {"sample_count": 0, "fields": {}}
+    first = records[0]
+    return {
+        "sample_count": int(len(records)),
+        "fields": {
+            str(key): _tensor_contract_row(first.get(key))
+            for key in STACKED_CACHE_FIELDS
+        },
+    }
+
+
+def validate_train_cache_contract(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not records:
+        raise SystemExit("V6 train cache validation failed: no cached GATE_TRAIN records.")
+    summary = summarize_cached_record_contract(records)
+    errors: list[dict[str, Any]] = []
+    for row in records:
+        sample_id = str(row.get("sample_id"))
+        p_leaf_shape: tuple[int, ...] | None = None
+        for key in STACKED_CACHE_FIELDS:
+            value = row.get(key)
+            if not torch.is_tensor(value):
+                errors.append({"sample_id": sample_id, "field": str(key), "reason": "python_type", "actual_type": type(value).__name__})
+                continue
+            if str(value.dtype) != "torch.float32":
+                errors.append({"sample_id": sample_id, "field": str(key), "reason": "dtype", "actual_dtype": str(value.dtype)})
+            if int(value.ndim) != 3:
+                errors.append({"sample_id": sample_id, "field": str(key), "reason": "ndim", "actual_ndim": int(value.ndim)})
+            if not bool(torch.isfinite(value).all().item()):
+                errors.append({"sample_id": sample_id, "field": str(key), "reason": "non_finite"})
+            if str(key) == "p_leaf":
+                p_leaf_shape = tuple(int(v) for v in value.shape)
+                if p_leaf_shape[:1] != (1,):
+                    errors.append({"sample_id": sample_id, "field": str(key), "reason": "channel_dim", "actual_shape": list(p_leaf_shape)})
+            elif str(key) in {"candidate_mask", "bridge_target"} and p_leaf_shape is not None:
+                current_shape = tuple(int(v) for v in value.shape)
+                if current_shape != p_leaf_shape:
+                    errors.append(
+                        {
+                            "sample_id": sample_id,
+                            "field": str(key),
+                            "reason": "shape_mismatch_vs_p_leaf",
+                            "actual_shape": list(current_shape),
+                            "expected_shape": list(p_leaf_shape),
+                        }
+                    )
+    if errors:
+        raise SystemExit(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "reason": "v6_train_cache_contract_mismatch",
+                    "summary": summary,
+                    "errors": errors[:20],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    return summary
 
 
 def build_loss_hparam_parity_report(v6_cfg: dict[str, Any], historical_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -317,4 +406,3 @@ def patient_level_report(per_sample_rows: list[dict[str, Any]]) -> dict[str, Any
             "negative_topology_changes": float(np.mean([float(row["negative_topology_changes"]) for row in patient_rows])) if patient_rows else 0.0,
         },
     }
-

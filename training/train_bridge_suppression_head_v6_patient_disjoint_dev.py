@@ -47,7 +47,7 @@ def _prepare_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
     optimizer, optimizer_meta = bridge.build_optimizer(model, cfg)
     loss_fn = bridge.build_bridge_loss_from_cfg(cfg)
     split_txt = bridge._resolve_repo_path(((cfg.get("dataset") or {}).get("train_txt")), bridge.DEFAULT_TRAIN_SPLIT)
-    train_records = bridge.mine_bridge_records_for_split(
+    train_records_raw = bridge.mine_bridge_records_for_split(
         cfg=cfg,
         split_txt=split_txt,
         model=model,
@@ -55,7 +55,7 @@ def _prepare_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
         cache_features=True,
         selected_sample_ids=list(contract["train_sample_ids"]),
     )
-    val_records = bridge.mine_bridge_records_for_split(
+    val_records_raw = bridge.mine_bridge_records_for_split(
         cfg=cfg,
         split_txt=split_txt,
         model=model,
@@ -63,6 +63,9 @@ def _prepare_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
         cache_features=True,
         selected_sample_ids=list(contract["val_sample_ids"]),
     )
+    train_records = v6.build_v6_cached_records(train_records_raw)
+    val_records = v6.build_v6_cached_records(val_records_raw)
+    train_cache_contract = v6.validate_train_cache_contract(train_records)
     return {
         "manifest_stage": manifest_stage,
         "contract": contract,
@@ -75,6 +78,7 @@ def _prepare_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
         "loss_fn": loss_fn,
         "train_records": train_records,
         "val_records": val_records,
+        "train_cache_contract": train_cache_contract,
     }
 
 
@@ -172,6 +176,15 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
     analysis_dir.mkdir(parents=True, exist_ok=True)
     bridge._seed_everything(int(cfg.get("seed", 1337)))
     prepared = _prepare_inputs(cfg)
+    contract_summary = prepared["train_cache_contract"]
+    print(
+        "V6 TRAIN cache contract | "
+        f"samples {int(contract_summary['sample_count'])} | "
+        f"p_leaf {contract_summary['fields']['p_leaf']['dtype']} {contract_summary['fields']['p_leaf']['shape']} | "
+        f"candidate_mask {contract_summary['fields']['candidate_mask']['dtype']} {contract_summary['fields']['candidate_mask']['shape']} | "
+        f"bridge_target {contract_summary['fields']['bridge_target']['dtype']} {contract_summary['fields']['bridge_target']['shape']}",
+        flush=True,
+    )
     semantic_named = [(name, p) for name, p in prepared["model"].named_parameters() if name.startswith("base.")]
     semantic_snap = bridge._snapshot_named_parameters(semantic_named)
     bn_snap = bridge._collect_batchnorm_stats(prepared["model"].base)
@@ -213,6 +226,7 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
             "checkpoint_selection": v6.build_v6_checkpoint_selection_policy(),
         },
         "semantic_checkpoint": prepared["semantic_info"],
+        "train_cache_contract": contract_summary,
         "development_references": dict(v6.DEVELOPMENT_REFERENCES),
         "train_evaluation": train_eval,
         "val_reused_dev_evaluation": val_eval,
