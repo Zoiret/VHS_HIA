@@ -162,6 +162,46 @@ class TestBridgeSuppressionHeadV6PatientDisjointDev(unittest.TestCase):
         target = records[0]["bridge_target"]
         self.assertTrue(torch.equal(target, torch.tensor([[[0.0, 1.0], [0.0, 0.0]]], dtype=torch.float32)))
 
+    def test_metadata_preserved_after_v6_cache_construction(self):
+        raw = self._raw_record()
+        fake_reconstruction = {"labels": np.zeros((2, 2), dtype=np.uint8), "metrics": {"all_iou_ge_0.50": False, "instance_mean_matched_iou": 0.0}}
+        with mock.patch.object(bridge, "run_locked_reconstruction", return_value=fake_reconstruction):
+            records = v6.build_v6_cached_records([raw])
+        self.assertEqual(records[0]["sample_id"], "s1")
+        self.assertEqual(records[0]["patient_id"], "p1")
+        self.assertEqual(records[0]["gt_count"], 2)
+        self.assertEqual(records[0]["bridge_positive"], 1)
+        self.assertEqual(records[0]["candidate_pixels"], 4)
+        self.assertEqual(records[0]["bridge_pixels"], 1)
+
+    def test_validate_train_cache_contract_checks_manifest_sample_set(self):
+        raw = self._raw_record()
+        fake_reconstruction = {"labels": np.zeros((2, 2), dtype=np.uint8), "metrics": {"all_iou_ge_0.50": False, "instance_mean_matched_iou": 0.0}}
+        with mock.patch.object(bridge, "run_locked_reconstruction", return_value=fake_reconstruction):
+            records = v6.build_v6_cached_records([raw])
+        with self.assertRaises(SystemExit) as cm:
+            v6.validate_train_cache_contract(records, expected_sample_ids=["other"])
+        self.assertIn("manifest_sample_set_mismatch", str(cm.exception))
+
+    def test_full_train_evaluate_open_on_cached_records_completes_with_patient_metadata(self):
+        raw = self._raw_record()
+        fake_reconstruction = {"labels": np.zeros((2, 2), dtype=np.uint8), "metrics": {"all_iou_ge_0.50": False, "instance_mean_matched_iou": 0.0}}
+        with mock.patch.object(bridge, "run_locked_reconstruction", return_value=fake_reconstruction):
+            records = v6.build_v6_cached_records([raw])
+
+        class FakeModel(torch.nn.Module):
+            def eval(self):
+                return self
+
+            def bridge_forward_from_cached(self, x_0_4, x_2_2, p_leaf):
+                return {"bridge_logits": torch.zeros((x_0_4.shape[0], 1, p_leaf.shape[-2], p_leaf.shape[-1]), dtype=torch.float32)}
+
+        out = v6.evaluate_open_on_cached_records(model=FakeModel(), cached_records=records, device=torch.device("cpu"))
+        self.assertEqual(out["per_sample"][0]["patient_id"], "p1")
+        self.assertEqual(out["per_sample"][0]["gt_count"], 2)
+        patient_report = v6.patient_level_report(out["per_sample"])
+        self.assertEqual(patient_report["rows"][0]["patient_id"], "p1")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,7 +65,10 @@ def _prepare_inputs(cfg: dict[str, Any]) -> dict[str, Any]:
     )
     train_records = v6.build_v6_cached_records(train_records_raw)
     val_records = v6.build_v6_cached_records(val_records_raw)
-    train_cache_contract = v6.validate_train_cache_contract(train_records)
+    train_cache_contract = v6.validate_train_cache_contract(
+        train_records,
+        expected_sample_ids=list(contract["train_sample_ids"]),
+    )
     return {
         "manifest_stage": manifest_stage,
         "contract": contract,
@@ -110,9 +113,12 @@ def _train_v6(
     history: list[dict[str, Any]] = []
     best_key: tuple[int, float] | None = None
     best_payload: dict[str, Any] | None = None
+    batch_count = 0
+    optimizer_updates = 0
     for epoch in range(1, epochs + 1):
         epoch_losses: list[float] = []
         for batch_records in _iter_epoch_batches(train_records, batch_size=batch_size, seed=seed, epoch=epoch):
+            batch_count += 1
             batch = bridge.stack_cached_batch(batch_records, device)
             model.train(True)
             optimizer.zero_grad(set_to_none=True)
@@ -130,6 +136,7 @@ def _train_v6(
             loss = loss_dict["loss"]
             loss.backward()
             optimizer.step()
+            optimizer_updates += 1
             epoch_losses.append(float(loss.detach().cpu().item()))
         train_eval = v6.evaluate_open_on_cached_records(model=model, cached_records=train_records, device=device)
         key = (
@@ -158,6 +165,8 @@ def _train_v6(
     bridge._write_json(save_dir / "train_history.json", history)
     return {
         "epochs": int(epochs),
+        "batch_count": int(batch_count),
+        "optimizer_updates": int(optimizer_updates),
         "history": history,
         "best_payload": best_payload,
     }
@@ -180,6 +189,9 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
     print(
         "V6 TRAIN cache contract | "
         f"samples {int(contract_summary['sample_count'])} | "
+        f"tensor_contract PASS | metadata_contract PASS | "
+        f"unique_sample_ids {int(contract_summary['unique_sample_ids'])} | "
+        f"patients {int(contract_summary['patient_count'])} | "
         f"p_leaf {contract_summary['fields']['p_leaf']['dtype']} {contract_summary['fields']['p_leaf']['shape']} | "
         f"candidate_mask {contract_summary['fields']['candidate_mask']['dtype']} {contract_summary['fields']['candidate_mask']['shape']} | "
         f"bridge_target {contract_summary['fields']['bridge_target']['dtype']} {contract_summary['fields']['bridge_target']['shape']}",
@@ -233,6 +245,11 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         "train_patient_report": train_patient,
         "val_patient_report": val_patient,
         "decision": decision,
+        "training_progress": {
+            "optimizer_updates": int(train_run["optimizer_updates"]),
+            "batches_completed": int(train_run["batch_count"]),
+            "epochs_completed": int(train_run["epochs"]),
+        },
         "validation_status": {
             "reused_development_validation": True,
             "authoritative_holdout_touched": False,

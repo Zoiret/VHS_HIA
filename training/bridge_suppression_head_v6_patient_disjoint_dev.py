@@ -27,6 +27,7 @@ V6_CHECKPOINT_SELECTION_VERSION = "gate_train_reconstruction_v1"
 V6_SAFETY_MAX_NEGATIVE_REGRESSIONS = 10
 V6_SAFETY_MAX_NEGATIVE_TOPOLOGY_CHANGES = 12
 STACKED_CACHE_FIELDS = ("x_0_4", "x_2_2", "p_leaf", "candidate_mask", "bridge_target")
+V6_REQUIRED_METADATA_FIELDS = ("sample_id", "patient_id", "gt_count", "bridge_positive", "candidate_pixels", "bridge_pixels")
 
 DEVELOPMENT_REFERENCES = {
     "closed": {
@@ -154,7 +155,48 @@ def build_v6_model_with_fresh_bridge_head(cfg: dict[str, Any], device: torch.dev
 
 
 def build_v6_cached_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return bridge.cache_microset_features(records)
+    raw_by_sample: dict[str, dict[str, Any]] = {}
+    for row in records:
+        sample_id = str(row.get("sample_id"))
+        if not sample_id:
+            raise SystemExit("V6 cached-record construction failed: raw record missing sample_id.")
+        if sample_id in raw_by_sample:
+            raise SystemExit(f"V6 cached-record construction failed: duplicate raw sample_id={sample_id}.")
+        raw_by_sample[sample_id] = row
+    tensorized = bridge.cache_microset_features(records)
+    tensor_by_sample: dict[str, dict[str, Any]] = {}
+    for row in tensorized:
+        sample_id = str(row.get("sample_id"))
+        if not sample_id:
+            raise SystemExit("V6 cached-record construction failed: tensorized record missing sample_id.")
+        if sample_id in tensor_by_sample:
+            raise SystemExit(f"V6 cached-record construction failed: duplicate tensorized sample_id={sample_id}.")
+        tensor_by_sample[sample_id] = row
+    raw_ids = set(raw_by_sample)
+    tensor_ids = set(tensor_by_sample)
+    if raw_ids != tensor_ids:
+        raise SystemExit(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "reason": "v6_cached_record_sample_set_mismatch",
+                    "raw_only_sample_ids": sorted(raw_ids - tensor_ids),
+                    "tensorized_only_sample_ids": sorted(tensor_ids - raw_ids),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    merged: list[dict[str, Any]] = []
+    for sample_id in sorted(raw_ids):
+        raw_row = raw_by_sample[sample_id]
+        tensor_row = dict(tensor_by_sample[sample_id])
+        if str(tensor_row.get("sample_id")) != str(raw_row.get("sample_id")):
+            raise SystemExit(f"V6 cached-record construction failed: sample_id mismatch for sample_id={sample_id}.")
+        current = dict(raw_row)
+        current.update(tensor_row)
+        merged.append(current)
+    return merged
 
 
 def _tensor_contract_row(value: Any) -> dict[str, Any]:
@@ -179,24 +221,54 @@ def _tensor_contract_row(value: Any) -> dict[str, Any]:
 
 def summarize_cached_record_contract(records: list[dict[str, Any]]) -> dict[str, Any]:
     if not records:
-        return {"sample_count": 0, "fields": {}}
+        return {"sample_count": 0, "fields": {}, "metadata_fields": {}, "unique_sample_ids": 0, "patient_count": 0}
     first = records[0]
+    sample_ids = [str(row.get("sample_id")) for row in records]
+    patient_ids = [str(row.get("patient_id")) for row in records if row.get("patient_id") is not None]
     return {
         "sample_count": int(len(records)),
+        "unique_sample_ids": int(len(set(sample_ids))),
+        "patient_count": int(len(set(patient_ids))),
         "fields": {
             str(key): _tensor_contract_row(first.get(key))
             for key in STACKED_CACHE_FIELDS
         },
+        "metadata_fields": {
+            str(key): type(first.get(key)).__name__ if first.get(key) is not None else None
+            for key in V6_REQUIRED_METADATA_FIELDS
+        },
     }
 
 
-def validate_train_cache_contract(records: list[dict[str, Any]]) -> dict[str, Any]:
+def metadata_contract_table() -> list[dict[str, Any]]:
+    return [
+        {"key": "sample_id", "raw_mined_record_present": True, "historical_tensorized_record_present": True, "v6_evaluator_required": True, "dtype_type": "str", "classification": "scientific_identity_and_reporting"},
+        {"key": "patient_id", "raw_mined_record_present": True, "historical_tensorized_record_present": True, "v6_evaluator_required": True, "dtype_type": "str", "classification": "reporting_only"},
+        {"key": "gt_count", "raw_mined_record_present": True, "historical_tensorized_record_present": True, "v6_evaluator_required": True, "dtype_type": "int", "classification": "scientific_and_reporting"},
+        {"key": "bridge_positive", "raw_mined_record_present": True, "historical_tensorized_record_present": True, "v6_evaluator_required": True, "dtype_type": "int", "classification": "scientific_and_reporting"},
+        {"key": "candidate_pixels", "raw_mined_record_present": True, "historical_tensorized_record_present": True, "v6_evaluator_required": True, "dtype_type": "int", "classification": "scientific_and_reporting"},
+        {"key": "bridge_pixels", "raw_mined_record_present": True, "historical_tensorized_record_present": True, "v6_evaluator_required": True, "dtype_type": "int", "classification": "scientific_and_reporting"},
+        {"key": "image_path", "raw_mined_record_present": True, "historical_tensorized_record_present": True, "v6_evaluator_required": False, "dtype_type": "str", "classification": "diagnostic_only"},
+    ]
+
+
+def validate_train_cache_contract(records: list[dict[str, Any]], *, expected_sample_ids: list[str] | None = None) -> dict[str, Any]:
     if not records:
         raise SystemExit("V6 train cache validation failed: no cached GATE_TRAIN records.")
     summary = summarize_cached_record_contract(records)
     errors: list[dict[str, Any]] = []
+    seen_sample_ids: set[str] = set()
     for row in records:
         sample_id = str(row.get("sample_id"))
+        if not sample_id:
+            errors.append({"sample_id": None, "field": "sample_id", "reason": "missing_metadata"})
+        elif sample_id in seen_sample_ids:
+            errors.append({"sample_id": sample_id, "field": "sample_id", "reason": "duplicate_metadata"})
+        else:
+            seen_sample_ids.add(sample_id)
+        for key in V6_REQUIRED_METADATA_FIELDS:
+            if row.get(key) is None:
+                errors.append({"sample_id": sample_id, "field": str(key), "reason": "missing_metadata"})
         p_leaf_shape: tuple[int, ...] | None = None
         for key in STACKED_CACHE_FIELDS:
             value = row.get(key)
@@ -225,6 +297,18 @@ def validate_train_cache_contract(records: list[dict[str, Any]]) -> dict[str, An
                             "expected_shape": list(p_leaf_shape),
                         }
                     )
+    if expected_sample_ids is not None:
+        expected = {str(v) for v in expected_sample_ids}
+        actual = {str(row.get("sample_id")) for row in records if row.get("sample_id") is not None}
+        if actual != expected:
+            errors.append(
+                {
+                    "field": "sample_id",
+                    "reason": "manifest_sample_set_mismatch",
+                    "missing_from_cache": sorted(expected - actual),
+                    "unexpected_in_cache": sorted(actual - expected),
+                }
+            )
     if errors:
         raise SystemExit(
             json.dumps(
@@ -313,6 +397,12 @@ def evaluate_open_on_cached_records(
 ) -> dict[str, Any]:
     recon = bridge.evaluate_reconstruction_levels_on_cached(model, cached_records, device, threshold=float(threshold))
     batch = bridge.stack_cached_batch(cached_records, device)
+    metadata_by_sample: dict[str, dict[str, Any]] = {}
+    for row in cached_records:
+        sample_id = str(row["sample_id"])
+        if sample_id in metadata_by_sample:
+            raise SystemExit(f"V6 evaluation failed: duplicate cached sample_id={sample_id}.")
+        metadata_by_sample[sample_id] = row
     with torch.no_grad():
         outputs = model.bridge_forward_from_cached(
             x_0_4=batch["x_0_4"],
@@ -334,11 +424,40 @@ def evaluate_open_on_cached_records(
         subset_indices=positive_indices,
         threshold=float(threshold),
     )
+    required_recon_keys = {
+        "sample_id",
+        "bridge_positive",
+        "gt_count",
+        "candidate_pixels",
+        "gt_bridge_pixels",
+        "predicted_removed_pixels",
+        "predicted_removed_fraction",
+        "start_mean_iou",
+        "predicted_mean_iou",
+        "oracle_mean_iou",
+        "start_success50",
+        "predicted_success50",
+        "oracle_success50",
+        "component_topology_changed",
+    }
+    missing_recon_keys = sorted(required_recon_keys - set(str(v) for v in (recon.get("per_sample") or [])[0].keys())) if recon.get("per_sample") else []
+    if missing_recon_keys:
+        raise SystemExit(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "reason": "v6_reconstruction_per_sample_contract_mismatch",
+                    "missing_reconstruction_keys": missing_recon_keys,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     per_sample_rows = [
         {
             "sample_id": str(row["sample_id"]),
-            "patient_id": str(row["patient_id"]),
-            "gt_count": int(row["gt_count"]),
+            "patient_id": str(metadata_by_sample[str(row["sample_id"])]["patient_id"]),
+            "gt_count": int(metadata_by_sample[str(row["sample_id"])]["gt_count"]),
             "bridge_positive": int(row["bridge_positive"]),
             "candidate_pixels": int(row["candidate_pixels"]),
             "gt_bridge_pixels": int(row["gt_bridge_pixels"]),
