@@ -24,6 +24,8 @@ def _attach_eval_rows(records: list[dict[str, Any]], eval_payload: dict[str, Any
     for row in records:
         sample_id = str(row["sample_id"])
         current = dict(row)
+        if sample_id not in per_sample:
+            raise SystemExit(f"Audit attach failed: missing per-sample evaluation row for sample_id={sample_id}.")
         current["_predicted_component_topology_changed"] = int(per_sample[sample_id]["component_topology_changed"])
         current["_predicted_success50"] = int(per_sample[sample_id]["predicted_success50"])
         current["_predicted_mean_iou"] = float(per_sample[sample_id]["predicted_mean_iou"])
@@ -127,6 +129,8 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
     historical_v2_model, historical_v2_info = audit.load_historical_v2_model(cfg, device)
     historical_v2_probs_train = audit._bridge_probs_for_cached_records(historical_v2_model, train_records, device)
     historical_v2_probs_val = audit._bridge_probs_for_cached_records(historical_v2_model, val_records, device)
+    historical_v2_eval_train = audit.evaluate_prob_set_on_cached_records(train_records, historical_v2_probs_train, threshold=audit.FIXED_REMOVE_THRESHOLD)
+    historical_v2_eval_val = audit.evaluate_prob_set_on_cached_records(val_records, historical_v2_probs_val, threshold=audit.FIXED_REMOVE_THRESHOLD)
 
     score_partition = {
         "threshold": float(audit.FIXED_REMOVE_THRESHOLD),
@@ -156,14 +160,49 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         "reused_gate_val": audit.exact_target_oracle(val_records),
     }
     train_trajectory_pareto = audit.pareto_frontier(_read_train_history(v6.DEFAULT_RUN_DIR))
+    v6_patient_level = audit.patient_level_failure_concentration(val_records, v6_probs_val, eval_payload=val_eval)
+    historical_v2_patient_level = audit.patient_level_failure_concentration(val_records, historical_v2_probs_val, eval_payload=historical_v2_eval_val)
+    v6_train_topology_consistency = audit.validate_topology_consistency(
+        eval_payload=train_eval,
+        patient_payload=None,
+        expected_negative_topology_changes=int(audit.AUTHORITATIVE_TOPOLOGY_REFERENCES["v6_train_epoch63"]),
+        context="v6_train_epoch63",
+    )
+    v6_val_topology_consistency = audit.validate_topology_consistency(
+        eval_payload=val_eval,
+        patient_payload=v6_patient_level,
+        expected_negative_topology_changes=int(audit.AUTHORITATIVE_TOPOLOGY_REFERENCES["v6_val"]),
+        context="v6_reused_val",
+    )
+    historical_v2_val_topology_consistency = audit.validate_topology_consistency(
+        eval_payload=historical_v2_eval_val,
+        patient_payload=historical_v2_patient_level,
+        expected_negative_topology_changes=int(audit.AUTHORITATIVE_TOPOLOGY_REFERENCES["historical_v2_val"]),
+        context="historical_v2_reused_val",
+    )
     historical_v2_vs_v6 = {
         "threshold": float(audit.FIXED_REMOVE_THRESHOLD),
         "threshold_sweep_performed": False,
-        "train": audit.compare_historical_v2_vs_v6(train_records, v6_probs_train, historical_v2_probs_train),
-        "reused_val": audit.compare_historical_v2_vs_v6(val_records, v6_probs_val, historical_v2_probs_val),
+        "train": audit.compare_historical_v2_vs_v6(
+            train_records,
+            v6_probs_train,
+            historical_v2_probs_train,
+            v6_eval_payload=train_eval,
+            v2_eval_payload=historical_v2_eval_train,
+        ),
+        "reused_val": audit.compare_historical_v2_vs_v6(
+            val_records,
+            v6_probs_val,
+            historical_v2_probs_val,
+            v6_eval_payload=val_eval,
+            v2_eval_payload=historical_v2_eval_val,
+        ),
     }
     historical_v2_vs_v6["interpretation"] = audit.interpret_historical_v2_vs_v6(historical_v2_vs_v6["reused_val"])
-    patient_level = audit.patient_level_failure_concentration(val_records, v6_probs_val)
+    patient_level = {
+        "v6_open": v6_patient_level,
+        "historical_v2_open": historical_v2_patient_level,
+    }
     dominant_failure = audit.classify_dominant_failure(
         score_partition_train=score_partition["train"]["v6_open"],
         exact_target_oracle_val=exact_target_oracle["reused_gate_val"],
@@ -189,12 +228,24 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
             "authoritative_holdout_touched": False,
             "read_only_checkpoint_audit": True,
         },
+        "topology_consistency": {
+            "v6_train_epoch63": v6_train_topology_consistency,
+            "v6_reused_val": v6_val_topology_consistency,
+            "historical_v2_reused_val": historical_v2_val_topology_consistency,
+        },
         "score_separability": {
-            "train": score_partition["train"]["v6_open"],
-            "reused_val": score_partition["reused_val"]["v6_open"],
+            "train": {
+                "v6_open": score_partition["train"]["v6_open"],
+                "historical_v2_open": score_partition["train"]["historical_v2_open"],
+            },
+            "reused_val": {
+                "v6_open": score_partition["reused_val"]["v6_open"],
+                "historical_v2_open": score_partition["reused_val"]["historical_v2_open"],
+            },
         },
         "damage": {
             "inside_gt_removal": damage_decomposition["v6_open"]["aggregate"],
+            "reused_val_compact": audit.compact_damage_depth_for_split(damage_decomposition["v6_open"], "val"),
             "dominant_negative_failure": {
                 "rules": dict(audit.TOPOLOGY_FAILURE_RULES),
                 "counts": {
@@ -208,7 +259,9 @@ def run_pipeline(cfg: dict[str, Any]) -> dict[str, Any]:
         "historical_v2_vs_v6": historical_v2_vs_v6,
         "patient_level": patient_level,
         "next_representation": dominant_failure,
+        "frozen_v6_train_metrics": train_eval["reconstruction"],
         "frozen_v6_val_metrics": val_eval["reconstruction"],
+        "historical_v2_val_metrics": historical_v2_eval_val["reconstruction"],
     }
     _write_required_outputs(
         analysis_dir=analysis_dir,

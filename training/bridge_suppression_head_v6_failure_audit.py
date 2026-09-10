@@ -16,6 +16,11 @@ DEFAULT_ANALYSIS_DIR = bridge.REPO_ROOT / "training" / "analysis" / "bridge_supp
 AUTHORITATIVE_V6_CHECKPOINT = v6.DEFAULT_RUN_DIR / "best_train_reconstruction.pth"
 AUTHORITATIVE_V6_EPOCH = 63
 FIXED_REMOVE_THRESHOLD = 0.50
+AUTHORITATIVE_TOPOLOGY_REFERENCES = {
+    "v6_train_epoch63": 62,
+    "v6_val": 21,
+    "historical_v2_val": 24,
+}
 SCORE_PARTITIONS = ("TRUE_BRIDGE", "POSITIVE_SAMPLE_NON_BRIDGE", "ZERO_TARGET_SAMPLE")
 BOUNDARY_BINS = ("0_2", "3_5", "6_10", "gt_10")
 TOPOLOGY_FAILURE_RULES = {
@@ -35,6 +40,23 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _require_mapping_fields(mapping: dict[str, Any], fields: tuple[str, ...], *, context: str) -> None:
+    missing = [field for field in fields if field not in mapping]
+    if missing:
+        raise SystemExit(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "reason": "missing_required_fields",
+                    "context": context,
+                    "missing_fields": missing,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
 
 def _as_target_mask(row: dict[str, Any]) -> np.ndarray:
@@ -318,6 +340,170 @@ def _connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
     return bridge._connected_components(mask.astype(np.uint8))
 
 
+def evaluate_prob_set_on_cached_records(
+    cached_records: list[dict[str, Any]],
+    probs: np.ndarray,
+    *,
+    threshold: float = FIXED_REMOVE_THRESHOLD,
+) -> dict[str, Any]:
+    per_sample_rows: list[dict[str, Any]] = []
+    predicted_metrics: list[dict[str, Any]] = []
+    positive_metrics: list[dict[str, Any]] = []
+    negative_regressions = 0
+    negative_topology_changes = 0
+    for idx, row in enumerate(cached_records):
+        pred_remove = probs[idx, 0] >= float(threshold)
+        spatial = spatial_damage_partition(row, pred_remove)
+        refined = (row["candidate_mask_np"].astype(bool) & (~spatial["pred_remove_candidate"])).astype(np.uint8)
+        pred = bridge.run_locked_reconstruction(refined, row["gt_instances"])
+        start = row["start_reconstruction"]
+        component_count_start = int(row["component_count_start"])
+        component_count_predicted = int(_connected_components(refined.astype(np.uint8))[1])
+        component_topology_changed = int(component_count_start != component_count_predicted)
+        predicted_mean_iou = float(pred["metrics"]["instance_mean_matched_iou"])
+        start_mean_iou = float(start["metrics"]["instance_mean_matched_iou"])
+        predicted_success50 = int(bool(pred["metrics"]["all_iou_ge_0.50"]))
+        sample_row = {
+            "sample_id": str(row["sample_id"]),
+            "patient_id": str(row["patient_id"]),
+            "bridge_positive": int(row["bridge_positive"]),
+            "gt_count": int(row["gt_count"]),
+            "predicted_success50": int(predicted_success50),
+            "predicted_mean_iou": float(predicted_mean_iou),
+            "start_mean_iou": float(start_mean_iou),
+            "component_topology_changed": int(component_topology_changed),
+            "component_count_start": int(component_count_start),
+            "component_count_predicted": int(component_count_predicted),
+        }
+        per_sample_rows.append(sample_row)
+        metric_row = {"sample_id": str(row["sample_id"]), "gt_count": int(row["gt_count"]), **pred["metrics"]}
+        predicted_metrics.append(metric_row)
+        if int(row["bridge_positive"]) == 1:
+            positive_metrics.append(metric_row)
+        else:
+            negative_regressions += int(predicted_mean_iou + 1.0e-9 < start_mean_iou)
+            negative_topology_changes += int(component_topology_changed)
+    return {
+        "per_sample": per_sample_rows,
+        "reconstruction": {
+            "overall_success50": int(sum(int(row["predicted_success50"]) for row in per_sample_rows)),
+            "overall_mean_matched_iou": float(np.mean([float(row["predicted_mean_iou"]) for row in per_sample_rows])) if per_sample_rows else 0.0,
+            "positive_success50": int(sum(int(row["predicted_success50"]) for row in per_sample_rows if int(row["bridge_positive"]) == 1)),
+            "positive_mean_matched_iou": float(np.mean([float(row["predicted_mean_iou"]) for row in per_sample_rows if int(row["bridge_positive"]) == 1])) if any(int(row["bridge_positive"]) == 1 for row in per_sample_rows) else 0.0,
+            "negative_regressions": int(negative_regressions),
+            "negative_topology_changes": int(negative_topology_changes),
+        },
+        "overall": bridge._subset_reconstruction_summary(predicted_metrics),
+        "positive": bridge._subset_reconstruction_summary(positive_metrics),
+    }
+
+
+def validate_topology_consistency(
+    *,
+    eval_payload: dict[str, Any],
+    patient_payload: dict[str, Any] | None,
+    expected_negative_topology_changes: int | None,
+    context: str,
+) -> dict[str, Any]:
+    _require_mapping_fields(eval_payload, ("reconstruction", "per_sample"), context=f"{context}.eval_payload")
+    _require_mapping_fields(eval_payload["reconstruction"], ("negative_topology_changes",), context=f"{context}.reconstruction")
+    per_sample_rows = list(eval_payload["per_sample"])
+    negative_rows = [row for row in per_sample_rows if int(row["bridge_positive"]) == 0]
+    for idx, row in enumerate(negative_rows):
+        _require_mapping_fields(row, ("sample_id", "component_topology_changed"), context=f"{context}.per_sample[{idx}]")
+    global_total = int(eval_payload["reconstruction"]["negative_topology_changes"])
+    per_sample_total = int(sum(int(row["component_topology_changed"]) for row in negative_rows))
+    if per_sample_total != global_total:
+        raise SystemExit(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "reason": "topology_total_mismatch",
+                    "context": context,
+                    "global_negative_topology_changes": global_total,
+                    "per_sample_negative_topology_changes": per_sample_total,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    patient_sum_total = None
+    if patient_payload is not None:
+        _require_mapping_fields(patient_payload, ("rows",), context=f"{context}.patient_payload")
+        patient_sum_total = int(sum(int(row["negative_topology_changes"]) for row in patient_payload["rows"]))
+        if patient_sum_total != global_total:
+            raise SystemExit(
+                json.dumps(
+                    {
+                        "status": "blocked",
+                        "reason": "patient_topology_sum_mismatch",
+                        "context": context,
+                        "global_negative_topology_changes": global_total,
+                        "patient_negative_topology_changes": patient_sum_total,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+    if expected_negative_topology_changes is not None and global_total != int(expected_negative_topology_changes):
+        raise SystemExit(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "reason": "authoritative_topology_reference_mismatch",
+                    "context": context,
+                    "expected_negative_topology_changes": int(expected_negative_topology_changes),
+                    "actual_negative_topology_changes": global_total,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    return {
+        "global_negative_topology_changes": int(global_total),
+        "per_sample_negative_topology_changes": int(per_sample_total),
+        "patient_negative_topology_changes": None if patient_sum_total is None else int(patient_sum_total),
+        "patient_sum_parity": None if patient_sum_total is None else bool(patient_sum_total == global_total),
+    }
+
+
+def compact_exact_target_oracle_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    _require_mapping_fields(payload, ("overall", "positive", "negative_regressions", "negative_topology_changes", "zero_target_identical_to_closed"), context="exact_target_oracle")
+    _require_mapping_fields(payload["overall"], ("all_iou_ge_0.50_count", "mean_matched_iou"), context="exact_target_oracle.overall")
+    _require_mapping_fields(payload["positive"], ("all_iou_ge_0.50_count", "mean_matched_iou"), context="exact_target_oracle.positive")
+    return {
+        **payload,
+        "overall_success50": int(payload["overall"]["all_iou_ge_0.50_count"]),
+        "overall_mean_matched_iou": float(payload["overall"]["mean_matched_iou"]),
+        "positive_success50": int(payload["positive"]["all_iou_ge_0.50_count"]),
+        "positive_mean_matched_iou": float(payload["positive"]["mean_matched_iou"]),
+    }
+
+
+def compact_damage_depth_for_split(damage_payload: dict[str, Any], split_name: str) -> dict[str, Any]:
+    aggregate = damage_payload["aggregate"]
+    positive = aggregate[f"{split_name}_positive_target_samples"]
+    zero_target = aggregate[f"{split_name}_zero_target_samples"]
+    return {
+        "positive_target_samples": {
+            "inside_gt_removed_pixels": int(positive["inside_gt_removed_pixels"]),
+            "outside_gt_removed_pixels": int(positive["outside_gt_removed_pixels"]),
+            "0_2_px": int(positive["boundary_distance_bins"]["0_2"]),
+            "3_5_px": int(positive["boundary_distance_bins"]["3_5"]),
+            "6_10_px": int(positive["boundary_distance_bins"]["6_10"]),
+            "gt_10_px": int(positive["boundary_distance_bins"]["gt_10"]),
+        },
+        "zero_target_samples": {
+            "inside_gt_removed_pixels": int(zero_target["inside_gt_removed_pixels"]),
+            "outside_gt_removed_pixels": int(zero_target["outside_gt_removed_pixels"]),
+            "0_2_px": int(zero_target["boundary_distance_bins"]["0_2"]),
+            "3_5_px": int(zero_target["boundary_distance_bins"]["3_5"]),
+            "6_10_px": int(zero_target["boundary_distance_bins"]["6_10"]),
+            "gt_10_px": int(zero_target["boundary_distance_bins"]["gt_10"]),
+        },
+    }
+
+
 def removal_component_morphology(cached_records: list[dict[str, Any]], probs: np.ndarray, *, threshold: float = FIXED_REMOVE_THRESHOLD) -> dict[str, Any]:
     component_areas: list[float] = []
     total_components = 0
@@ -386,7 +572,9 @@ def removal_component_morphology(cached_records: list[dict[str, Any]], probs: np
                     "outside_gt_pixels": outside_gt_pixels,
                 }
             )
-        topology_changed = int(row.get("_predicted_component_topology_changed", 0))
+        if "_predicted_component_topology_changed" not in row:
+            raise SystemExit("Removal component morphology requires authoritative per-sample topology field '_predicted_component_topology_changed'.")
+        topology_changed = int(row["_predicted_component_topology_changed"])
         if int(row["bridge_positive"]) == 0 and topology_changed == 1:
             zero_target_samples_with_topology_change += 1
         per_sample_rows.append(
@@ -448,14 +636,16 @@ def topology_failure_cases(cached_records: list[dict[str, Any]], probs: np.ndarr
         for comp_id in range(1, int(comp_n) + 1):
             largest_component = max(largest_component, int(np.sum(labels == comp_id)))
         far_inside_gt_removed_pixels = int(spatial["boundary_bins"]["6_10"] + spatial["boundary_bins"]["gt_10"])
+        if "_predicted_component_topology_changed" not in row:
+            raise SystemExit("Topology failure case audit requires authoritative per-sample topology field '_predicted_component_topology_changed'.")
         case_row = {
             "sample_id": str(row["sample_id"]),
             "patient_id": str(row["patient_id"]),
             "split": str(row.get("_split_name", "unknown")),
             "semantic_candidate_component_count_before": int(row["component_count_start"]),
-            "component_count_after_v6_removal": int(pred["pred_k"]),
+            "component_count_after_v6_removal": int(_connected_components(refined.astype(np.uint8))[1]),
             "gt_instance_count": int(row["gt_count"]),
-            "topology_changed": int(int(pred["pred_k"]) != int(row["component_count_start"])),
+            "topology_changed": int(row["_predicted_component_topology_changed"]),
             "reconstruction_regressed": int(float(pred["metrics"]["instance_mean_matched_iou"]) + 1.0e-9 < float(start["metrics"]["instance_mean_matched_iou"])),
             "inside_gt_removed_pixels": int(np.sum(spatial["inside_gt"])),
             "outside_gt_removed_pixels": int(np.sum(spatial["outside_gt"])),
@@ -500,13 +690,13 @@ def exact_target_oracle(cached_records: list[dict[str, Any]]) -> dict[str, Any]:
                 indent=2,
             )
         )
-    return {
+    return compact_exact_target_oracle_summary({
         "overall": bridge._subset_reconstruction_summary(predicted_metrics),
         "positive": bridge._subset_reconstruction_summary(positive_pred),
         "negative_regressions": int(negative_regressions),
         "negative_topology_changes": int(negative_topology_changes),
         "zero_target_identical_to_closed": True,
-    }
+    })
 
 
 def pareto_frontier(train_history: list[dict[str, Any]]) -> dict[str, Any]:
@@ -579,15 +769,10 @@ def pareto_frontier(train_history: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _compare_prob_set(cached_records: list[dict[str, Any]], probs: np.ndarray) -> dict[str, Any]:
+def _compare_prob_set(cached_records: list[dict[str, Any]], probs: np.ndarray, eval_payload: dict[str, Any]) -> dict[str, Any]:
     target_tuples: list[tuple[int, int, int]] = []
     inside_off_target = 0
     outside_off_target = 0
-    positive_successes = 0
-    negative_regressions = 0
-    negative_topology_changes = 0
-    negative_total = 0
-    positive_total = 0
     for idx, row in enumerate(cached_records):
         pred_remove = probs[idx, 0] >= FIXED_REMOVE_THRESHOLD
         spatial = spatial_damage_partition(row, pred_remove)
@@ -598,41 +783,41 @@ def _compare_prob_set(cached_records: list[dict[str, Any]], probs: np.ndarray) -
         target_tuples.append((tp, fp, fn))
         inside_off_target += int(np.sum(spatial["inside_gt"] & (~bridge_target)))
         outside_off_target += int(np.sum(spatial["outside_gt"] & (~bridge_target)))
-        refined = (row["candidate_mask_np"].astype(bool) & (~spatial["pred_remove_candidate"])).astype(np.uint8)
-        pred = bridge.run_locked_reconstruction(refined, row["gt_instances"])
-        start = row["start_reconstruction"]
-        if int(row["bridge_positive"]) == 1:
-            positive_total += 1
-            positive_successes += int(bool(pred["metrics"]["all_iou_ge_0.50"]))
-        else:
-            negative_total += 1
-            negative_regressions += int(float(pred["metrics"]["instance_mean_matched_iou"]) + 1.0e-9 < float(start["metrics"]["instance_mean_matched_iou"]))
-            negative_topology_changes += int(int(pred["pred_k"]) != int(start["pred_k"]))
     tp = int(sum(item[0] for item in target_tuples))
     fp = int(sum(item[1] for item in target_tuples))
     fn = int(sum(item[2] for item in target_tuples))
     precision = float(tp / max(tp + fp, 1))
     recall = float(tp / max(tp + fn, 1))
     f1 = float((2 * tp) / max(2 * tp + fp + fn, 1))
+    reconstruction = eval_payload["reconstruction"]
+    negative_total = int(sum(1 for row in eval_payload["per_sample"] if int(row["bridge_positive"]) == 0))
+    positive_total = int(sum(1 for row in eval_payload["per_sample"] if int(row["bridge_positive"]) == 1))
     return {
         "true_bridge_precision": precision,
         "true_bridge_recall": recall,
         "true_bridge_f1": f1,
         "off_target_inside_gt_removal": int(inside_off_target),
         "off_target_outside_gt_removal": int(outside_off_target),
-        "positive_success50": int(positive_successes),
+        "positive_success50": int(reconstruction["positive_success50"]),
         "positive_total": int(positive_total),
-        "negative_regressions": int(negative_regressions),
-        "negative_regression_rate": float(negative_regressions / max(negative_total, 1)),
-        "negative_topology_changes": int(negative_topology_changes),
-        "negative_topology_change_rate": float(negative_topology_changes / max(negative_total, 1)),
+        "negative_regressions": int(reconstruction["negative_regressions"]),
+        "negative_regression_rate": float(float(reconstruction["negative_regressions"]) / max(negative_total, 1)),
+        "negative_topology_changes": int(reconstruction["negative_topology_changes"]),
+        "negative_topology_change_rate": float(float(reconstruction["negative_topology_changes"]) / max(negative_total, 1)),
     }
 
 
-def compare_historical_v2_vs_v6(cached_records: list[dict[str, Any]], v6_probs: np.ndarray, v2_probs: np.ndarray) -> dict[str, Any]:
+def compare_historical_v2_vs_v6(
+    cached_records: list[dict[str, Any]],
+    v6_probs: np.ndarray,
+    v2_probs: np.ndarray,
+    *,
+    v6_eval_payload: dict[str, Any],
+    v2_eval_payload: dict[str, Any],
+) -> dict[str, Any]:
     return {
-        "historical_v2_open": _compare_prob_set(cached_records, v2_probs),
-        "v6_open": _compare_prob_set(cached_records, v6_probs),
+        "historical_v2_open": _compare_prob_set(cached_records, v2_probs, v2_eval_payload),
+        "v6_open": _compare_prob_set(cached_records, v6_probs, v6_eval_payload),
     }
 
 
@@ -658,7 +843,8 @@ def interpret_historical_v2_vs_v6(compare_payload: dict[str, Any]) -> dict[str, 
     }
 
 
-def patient_level_failure_concentration(cached_records: list[dict[str, Any]], probs: np.ndarray) -> dict[str, Any]:
+def patient_level_failure_concentration(cached_records: list[dict[str, Any]], probs: np.ndarray, *, eval_payload: dict[str, Any]) -> dict[str, Any]:
+    per_sample_by_id = {str(row["sample_id"]): row for row in eval_payload["per_sample"]}
     rows_by_patient: dict[str, dict[str, Any]] = {}
     for idx, row in enumerate(cached_records):
         patient_id = str(row["patient_id"])
@@ -676,19 +862,21 @@ def patient_level_failure_concentration(cached_records: list[dict[str, Any]], pr
         )
         pred_remove = probs[idx, 0] >= FIXED_REMOVE_THRESHOLD
         spatial = spatial_damage_partition(row, pred_remove)
-        refined = (row["candidate_mask_np"].astype(bool) & (~spatial["pred_remove_candidate"])).astype(np.uint8)
-        pred = bridge.run_locked_reconstruction(refined, row["gt_instances"])
-        start = row["start_reconstruction"]
+        sample_id = str(row["sample_id"])
+        if sample_id not in per_sample_by_id:
+            raise SystemExit(f"Patient-level audit missing per-sample evaluation row for sample_id={sample_id}.")
+        per_sample_row = per_sample_by_id[sample_id]
+        _require_mapping_fields(per_sample_row, ("component_topology_changed", "predicted_success50", "predicted_mean_iou", "start_mean_iou"), context=f"patient_level.per_sample[{sample_id}]")
         total_removed = int(np.sum(spatial["pred_remove_candidate"]))
         inside_removed = int(np.sum(spatial["inside_gt"]))
         current["inside_gt_removed_fraction_values"].append(float(inside_removed / max(total_removed, 1)))
         if int(row["bridge_positive"]) == 1:
             current["positive_samples"] += 1
-            current["positive_successes"] += int(bool(pred["metrics"]["all_iou_ge_0.50"]))
+            current["positive_successes"] += int(per_sample_row["predicted_success50"])
         else:
             current["negative_samples"] += 1
-            current["negative_regressions"] += int(float(pred["metrics"]["instance_mean_matched_iou"]) + 1.0e-9 < float(start["metrics"]["instance_mean_matched_iou"]))
-            current["negative_topology_changes"] += int(int(pred["pred_k"]) != int(start["pred_k"]))
+            current["negative_regressions"] += int(float(per_sample_row["predicted_mean_iou"]) + 1.0e-9 < float(per_sample_row["start_mean_iou"]))
+            current["negative_topology_changes"] += int(per_sample_row["component_topology_changed"])
     rows: list[dict[str, Any]] = []
     for patient_id, row in sorted(rows_by_patient.items()):
         rows.append(
@@ -702,7 +890,12 @@ def patient_level_failure_concentration(cached_records: list[dict[str, Any]], pr
                 "mean_inside_gt_removed_fraction": float(np.mean(row["inside_gt_removed_fraction_values"])) if row["inside_gt_removed_fraction_values"] else 0.0,
             }
         )
-    return {"rows": rows}
+    return {
+        "rows": rows,
+        "global_negative_topology_changes": int(eval_payload["reconstruction"]["negative_topology_changes"]),
+        "patient_negative_topology_changes_sum": int(sum(int(row["negative_topology_changes"]) for row in rows)),
+        "patient_sum_parity": bool(sum(int(row["negative_topology_changes"]) for row in rows) == int(eval_payload["reconstruction"]["negative_topology_changes"])),
+    }
 
 
 def classify_dominant_failure(
